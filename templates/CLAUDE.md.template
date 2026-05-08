@@ -1,0 +1,60 @@
+# {{PROJECT_NAME}}
+
+<!--
+This is a template for a project-level CLAUDE.md. Replace the placeholders, delete sections
+that don't apply, and commit the result to the project repo's root.
+
+CLAUDE.md is automatically loaded by Claude Code when working in this repo. Keep it concise:
+focus on what's not obvious from reading the code.
+-->
+
+## What this project is
+
+{{ONE_PARAGRAPH_DESCRIPTION}}
+
+## Stack
+
+- {{LANGUAGE_AND_FRAMEWORK}}
+- {{PACKAGE_MANAGER}} — install: `{{INSTALL_CMD}}`, run: `{{RUN_CMD}}`, test: `{{TEST_CMD}}`
+- {{OTHER_KEY_TOOLING}}
+
+## Project layout
+
+```
+{{TREE_SNIPPET}}
+```
+
+Notable conventions:
+- {{CONVENTION_1_E_G_PATH_ALIASES}}
+- {{CONVENTION_2}}
+
+## Conventions in use
+
+<!-- Reference the conventions checked into this repo or imported from the kit. Delete what
+     doesn't apply. -->
+
+- **Code review** — see `docs/conventions/code-review.md` (or my personal draft at
+  `~/dev/agentic-kit/conventions/code-review.md`).
+- **Commit messages** — {{CONVENTIONAL_COMMITS_OR_OTHER}}
+- **Branch naming** — {{BRANCH_NAMING_PATTERN}}
+
+## Things to know before changing code
+
+<!-- Non-obvious gotchas, deprecated paths, in-progress migrations, env-specific quirks. -->
+
+- {{GOTCHA_1}}
+- {{GOTCHA_2}}
+
+## Common tasks
+
+- **Run locally:** `{{COMMAND}}`
+- **Run tests:** `{{COMMAND}}`
+- **Check types:** `{{COMMAND}}`
+- **Lint:** `{{COMMAND}}`
+
+## Out of scope for Claude
+
+<!-- Things Claude should NOT do without explicit instruction. -->
+
+- {{NEVER_DO_X}}
+- {{NEVER_DO_Y}}
