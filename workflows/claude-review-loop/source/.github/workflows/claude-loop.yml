@@ -187,10 +187,51 @@ jobs:
 
             Do NOT merge the PR. Do NOT post comments.
 
+      - name: Verify visual review
+        if: steps.decide.outputs.decision == 'pass'
+        id: visual
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
+          RUN=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.name=="visual-review")] | .[0] // empty')
+
+          if [[ -z "$RUN" || "$RUN" == "null" ]]; then
+            echo "block_merge=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          STATUS=$(echo "$RUN" | jq -r '.status')
+          CONCLUSION=$(echo "$RUN" | jq -r '.conclusion // empty')
+
+          if [[ "$STATUS" != "completed" ]]; then
+            echo "block_merge=true" >> "$GITHUB_OUTPUT"
+            gh pr comment "$PR" --body "Claude review loop: code PASSED — waiting for **visual-review** to finish."
+            exit 0
+          fi
+
+          if [[ "$CONCLUSION" != "success" ]]; then
+            echo "block_merge=true" >> "$GITHUB_OUTPUT"
+            gh pr comment "$PR" --body "Claude review loop: code PASSED but **visual-review** is \`${CONCLUSION}\`. Auto-merge blocked."
+            exit 0
+          fi
+
+          BODY=$(gh pr view "$PR" --json comments \
+            --jq '[.comments[].body | select(test("claude-visual:summary"))] | last // empty')
+          if echo "$BODY" | grep -qE 'VisualPass:\s*no'; then
+            echo "block_merge=true" >> "$GITHUB_OUTPUT"
+            gh pr comment "$PR" --body "Claude review loop: code PASSED but **visual quality review failed**. Improve UI and push."
+            exit 0
+          fi
+          echo "block_merge=false" >> "$GITHUB_OUTPUT"
+
       - name: Auto-merge on pass
         if: |
           steps.decide.outputs.decision == 'pass' &&
-          steps.prepare.outputs.ready == 'true'
+          steps.prepare.outputs.ready == 'true' &&
+          steps.visual.outputs.block_merge != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           CONF: ${{ steps.decide.outputs.confidence }}
