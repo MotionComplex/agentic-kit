@@ -1,88 +1,96 @@
 ---
 name: implement-feature
 description: >-
-  Implement a complete feature from project docs through PR and CI review loop.
-  Use for implement feature, ship feature, build from docs, /implement-feature,
-  or any doc/task/feature name. Means the WHOLE feature — not one subtask or phase
-  unless the user explicitly scopes down (e.g. "Phase 1 only", "Task 12.1 only").
+  Implement feature(s) from project docs through PR(s) and CI review loop. Use for
+  implement feature, ship feature, /implement-feature, or multiple features.
+  Asks how to run work when scope is unclear or plural. Full feature unless user
+  scopes down (Phase 1 only, Task 12.1 only).
 ---
 
 # Implement feature
 
-**"Implement feature" = ship the full feature.** All related tasks, phases, and acceptance criteria in the docs — one continuous run until done or blocked.
+## Step 0 — Ask how to run (required when ambiguous)
 
-Do **not** stop after the first subtask, phase, or MVP slice to ask "want the rest?" That is wrong unless the user narrowed scope.
+**Always ask** before coding if any of these are true:
 
-## Scope down only when the user explicitly says
+- User mentions **multiple** features, tasks, or an epic
+- User says "implement features" / lists several items
+- User did not pick a run mode yet
 
-Examples: "Phase 1 only", "MVP only", "Task 12.1 only", "just the dome overlay".
+Use the **AskQuestion** tool (or a clear numbered list and wait for reply). Offer:
 
-If they name a doc or feature without narrowing → **full feature**.
+| ID | Mode | Best for |
+|---|---|---|
+| `single` | **One feature, one session → one PR** | Default. You stay in Cursor/Claude; full feature in one branch. |
+| `by-tasks` | **One feature, same PR, task-by-task** | Large feature; write `docs/wip/<slug>.md` handoff if context gets heavy. |
+| `seq` | **Several features, one after another** | Same machine; finish PR #1 before starting #2. |
+| `parallel-gh` | **Several features, parallel via GitHub** | Fire-and-forget: Issue per feature + `@claude implement…` (no shared IDE context). |
+| `parallel-wt` | **Several features, parallel in Cursor** | One worktree + branch per feature; you open a window per worktree. |
 
-## 1. Discover scope (read everything)
+Also ask in the same flow (second question or combined):
 
-Find **all** work for this feature:
+- **PR labels:** none (default) · `awaiting-e2e` (you preview on Vercel before merge) · `human-gate` (you review before bot auto-fixes)
+- **Scope:** full feature (default) · only if user already said "Phase 1" / "Task X" — skip scope question
 
-- Named doc (e.g. `docs/milky-way-integration.md`) — **every phase**, not only Phase 1
-- `docs/features/<name>.feature` — all scenarios
-- `docs/tasks.md` — **every unchecked task** in that feature's section (e.g. 12.1, 12.2, 12.3)
-- `docs/spec.md` if linked
+**Single named feature with clear doc** (e.g. "implement milky way per docs/…"): you may skip the mode table and default to `single`, but still confirm in one line: *"Running single-feature / one PR / full scope — OK?"*
 
-Build one checklist of acceptance criteria. Implement until the checklist is complete.
+Do **not** start implementation until the user chooses (unless they already said e.g. "parallel via GitHub").
 
-## 2. Plan once
+## What each mode does
 
-Brief plan covering the **entire** feature. Then implement — no mid-run scope check-ins.
+### `single` / `by-tasks`
 
-## 3. Branch
+**Full feature** = all phases in the integration doc + all unchecked tasks in that feature section + `.feature` scenarios.
+
+Do **not** stop after Phase 1 or Task 12.1 to ask "want the rest?"
+
+1. Discover scope → checklist  
+2. Plan once → implement all → lint/test → one PR  
+3. CI review loop runs on push  
+
+`by-tasks`: same, but commit per task; update `docs/wip/<slug>.md` (done / next / blockers) before ending a session.
+
+### `seq`
+
+For each feature in order: run `single` flow to PR, wait for user to say continue (or only start next when they ask).
+
+### `parallel-gh`
+
+For each feature: ensure a GitHub Issue exists with spec; comment:
+
+```text
+@claude Implement per this issue and linked docs. Full feature. Open one PR. Do not merge.
+```
+
+Tell user: *N issues triggered — watch GitHub notifications; no Cursor context shared.*
+
+### `parallel-wt`
+
+For each feature: `git worktree add ../<repo>-wt/<slug> -b feat/<slug> origin/main`, implement there, open PR. Tell user which worktrees exist.
+
+## Branch (modes that code locally)
 
 ```bash
 git fetch origin main
 git checkout -b feat/<short-slug> origin/main
 ```
 
-Use a worktree only if another feature PR is already open on this repo.
+Skip new branch if continuing the same feature on an existing branch.
 
-## 4. Implement everything
-
-- Complete all tasks/phases in the checklist
-- Match repo conventions; split files if >300 lines
-- Conventional commits as you go
-- Check off completed items in `docs/tasks.md` when done
-
-## 5. Verify
+## Verify & PR
 
 ```bash
-npm run lint
-npm run test:unit
+npm run lint && npm run test:unit
 ```
 
-Run e2e when UI is involved. Fix failures you introduced; note pre-existing failures separately.
+E2e when UI changes. Then `gh pr create` with labels the user chose. **Do not merge.**
 
-## 6. Open one PR
+## Hand off
 
-```bash
-git push -u origin HEAD
-gh pr create --title "feat(<scope>): <subject>" --body "<what shipped — list all tasks/phases completed>"
-```
-
-Labels (only when applicable):
-
-| Situation | Label |
-|---|---|
-| User asked for preview gate / UI they will eyeball | `awaiting-e2e` |
-| User asked to review before bot auto-fixes | `human-gate` |
-| Trivial docs-only | `no-claude-loop` |
-| **Default** | **none** |
-
-Do **not** merge.
-
-## 7. Hand off
-
-Report: PR link, everything completed, what's left only if truly blocked (missing API keys, ambiguous spec). CI handles review after push.
+PR URL(s), mode used, what's done. CI handles review. Optional: `/babysit` when ready to merge.
 
 ## Do not
 
-- Deliver Phase 1 alone when asked to implement the feature
-- Ask "want Phase 2?" — implement it
-- Add `awaiting-e2e` unless user wanted a preview gate or said UI review
+- Ship only Phase 1 when user asked for the feature
+- Auto-add `awaiting-e2e` unless user chose preview gate
+- Run multiple unrelated features in one chat without `parallel-gh` or separate worktrees
