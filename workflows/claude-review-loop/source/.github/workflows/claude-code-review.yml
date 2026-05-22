@@ -40,9 +40,11 @@ jobs:
             Steps:
             1. Run `gh pr diff ${{ github.event.pull_request.number }}` and skim changed files only.
             2. Read `.github/PR-REVIEW-RUBRIC.md` once for severity rules.
-            3. Post inline comments only for real issues (max ~10). Tag `[Category/Severity]`.
-            4. Submit ONE PR review (REQUEST_CHANGES if any Critical, else COMMENT) whose body
-               MUST end with the summary block below. Do not explore unrelated files.
+            3. Post inline comments only for real issues (max ~8). Tag `[Category/Severity]`.
+            4. Submit exactly ONE PR review (REQUEST_CHANGES if any Critical, else COMMENT)
+               whose body MUST end with the summary block below.
+               Do NOT submit separate reviews per inline comment — one review only.
+            5. Do not explore unrelated files.
 
             REQUIRED — your review body MUST end with this exact block, no other markup:
 

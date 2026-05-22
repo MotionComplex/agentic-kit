@@ -13,7 +13,8 @@ jobs:
     if: |
       github.event.review.user.type == 'Bot' &&
       contains(github.event.review.user.login, 'claude') &&
-      !contains(github.event.pull_request.labels.*.name, 'no-claude-loop')
+      !contains(github.event.pull_request.labels.*.name, 'no-claude-loop') &&
+      contains(github.event.review.body, 'claude-review:summary')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -21,17 +22,19 @@ jobs:
       issues: write
       id-token: write
     env:
-      MAX_ITER: 3
+      MAX_ITER: 5
       MIN_CONFIDENCE: 4
       PR: ${{ github.event.pull_request.number }}
       REVIEW_ID: ${{ github.event.review.id }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
       NOTIFY_USER: ${{ vars.HUMAN_GATE_NOTIFY || github.repository_owner }}
 
     steps:
       - name: Checkout PR head
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ env.HEAD_REF }}
           fetch-depth: 0
 
       - name: Parse review summary and decide
@@ -45,27 +48,16 @@ jobs:
           CRITICAL=$(echo "$BODY" | grep -oP '(?<=Critical:\s)\d+' | head -1 || true)
           UNRESOLVED=$(echo "$BODY" | grep -oP '(?<=Unresolved:\s)\d+' | head -1 || true)
 
-          if [[ -z "$CONFIDENCE" || -z "$CRITICAL" || -z "$UNRESOLVED" ]]; then
-            echo "decision=skip" >> "$GITHUB_OUTPUT"
-            echo "reason=summary block missing or unparseable" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           ITER_PREV=$(gh pr view "$PR" --json comments \
             --jq '[.comments[].body | select(test("<!-- claude-loop:iter:"))] | length')
           ITER_NEXT=$((ITER_PREV + 1))
 
           LABELS=$(gh pr view "$PR" --json labels -q '[.labels[].name] | join(",")')
           HAS_HUMAN_GATE=0
-          # awaiting-e2e is legacy alias for human-gate (merge hold)
           echo "$LABELS" | grep -qE 'human-gate|awaiting-e2e' && HAS_HUMAN_GATE=1
 
           if [[ $CONFIDENCE -ge $MIN_CONFIDENCE && $CRITICAL -eq 0 && $UNRESOLVED -eq 0 ]]; then
-            if [[ $HAS_HUMAN_GATE -eq 1 ]]; then
-              DECISION=gate_human
-            else
-              DECISION=pass
-            fi
+            if [[ $HAS_HUMAN_GATE -eq 1 ]]; then DECISION=gate_human; else DECISION=pass; fi
           elif [[ $ITER_PREV -ge $MAX_ITER ]]; then
             DECISION=max
           else
@@ -79,69 +71,6 @@ jobs:
             echo "unresolved=$UNRESOLVED"
             echo "iter=$ITER_NEXT"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Auto-merge on pass
-        if: steps.decide.outputs.decision == 'pass'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONF: ${{ steps.decide.outputs.confidence }}
-        run: |
-          gh pr comment "$PR" --body-file - <<EOF
-          Claude review loop: PASSED
-
-          Confidence: ${CONF}/5 — Critical: 0 — Unresolved: 0
-
-          Auto-merge enabled — merging when required checks pass.
-          EOF
-          gh pr merge "$PR" --squash --auto
-
-      - name: Post human gate hold message
-        if: steps.decide.outputs.decision == 'gate_human'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONF: ${{ steps.decide.outputs.confidence }}
-          NOTIFY: ${{ env.NOTIFY_USER }}
-        run: |
-          gh pr comment "$PR" --body-file - <<EOF
-          Claude review loop: PASSED — **merge held** (\`human-gate\`)
-
-          Confidence: ${CONF}/5 — Critical: 0 — Unresolved: 0
-
-          @${NOTIFY} — review the PR (check Vercel preview / e2e if applicable), then merge
-          when satisfied. Auto-merge is disabled while \`human-gate\` (or legacy \`awaiting-e2e\`)
-          is present.
-          EOF
-          gh pr edit "$PR" --add-reviewer "$NOTIFY" 2>/dev/null || true
-
-      - name: Post max-iter message
-        if: steps.decide.outputs.decision == 'max'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONF: ${{ steps.decide.outputs.confidence }}
-          CRIT: ${{ steps.decide.outputs.critical }}
-          UNRES: ${{ steps.decide.outputs.unresolved }}
-        run: |
-          gh pr comment "$PR" --body-file - <<EOF
-          Claude review loop: STOPPED at max iterations (${MAX_ITER})
-
-          Final state — Confidence: ${CONF}/5, Critical: ${CRIT}, Unresolved: ${UNRES}.
-
-          Manual review required. To skip the loop on future PRs, add the \`no-claude-loop\` label.
-          EOF
-
-      - name: Post skip message
-        if: steps.decide.outputs.decision == 'skip'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REASON: ${{ steps.decide.outputs.reason }}
-        run: |
-          gh pr comment "$PR" --body-file - <<EOF
-          Claude review loop: skipped — ${REASON}.
-
-          The previous review did not include the required \`<!-- claude-review:summary -->\` block,
-          so the loop cannot decide whether to continue. Trigger the review workflow manually or
-          add the \`no-claude-loop\` label to disable.
-          EOF
 
       - name: Post iteration marker
         if: steps.decide.outputs.decision == 'continue'
@@ -160,19 +89,140 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "claude[bot],*"
-          claude_args: --max-turns 30 --model claude-opus-4-7
+          claude_args: >-
+            --max-turns 50
+            --model claude-opus-4-7
+            --allowedTools "Bash(gh *),Bash(git *),Read,Glob,Grep,Edit,Write"
           prompt: |
-            You are inside the automated Claude review loop on PR #${{ env.PR }}
-            (iteration ${{ steps.decide.outputs.iter }}/${{ env.MAX_ITER }}).
+            Automated fix pass on PR #${{ env.PR }} (iteration ${{ steps.decide.outputs.iter }}/${{ env.MAX_ITER }}).
 
-            Tasks:
-            1. Read the most recent review by the claude bot and all unresolved inline review
-               comments on the PR.
-            2. Address each actionable comment with a minimal, focused change. Add tests when the
-               reviewer asked for them. Preserve existing style.
-            3. Stage, commit with message
-               "fix: address review feedback (loop iteration ${{ steps.decide.outputs.iter }})",
-               and push to the PR branch.
+            1. Read the latest claude bot PR review and open inline threads only.
+            2. Fix **Critical** issues first; skip Suggestions if Critical remain.
+            3. At most 5 focused fixes. Match repo style; add tests only when asked.
+            4. One commit: `fix: address review feedback (loop iteration N)` then push.
 
-            Do NOT post a chat summary. Do NOT request another review — pushing automatically
-            triggers the next review round.
+            Do NOT post PR comments or request review — push triggers the next round.
+
+      - name: Post max-iter message
+        if: steps.decide.outputs.decision == 'max'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONF: ${{ steps.decide.outputs.confidence }}
+          CRIT: ${{ steps.decide.outputs.critical }}
+          UNRES: ${{ steps.decide.outputs.unresolved }}
+          NOTIFY: ${{ env.NOTIFY_USER }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: STOPPED at max iterations (${MAX_ITER})
+
+          Final state — Confidence: ${CONF}/5, Critical: ${CRIT}, Unresolved: ${UNRES}.
+
+          @${NOTIFY} — run **/babysit** in Cursor to finish, or fix manually and push.
+          EOF
+
+      - name: Prepare branch for merge
+        if: steps.decide.outputs.decision == 'pass' || steps.decide.outputs.decision == 'gate_human'
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          merge_state() {
+            gh pr view "$PR" --json mergeable,mergeStateStatus \
+              -q '[.mergeable, .mergeStateStatus] | @tsv'
+          }
+
+          read -r MERGEABLE STATUS <<< "$(merge_state)"
+          if [[ "$MERGEABLE" == "MERGEABLE" && "$STATUS" == "CLEAN" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$STATUS" == "BEHIND" ]]; then
+            HEAD_SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR}/update-branch" \
+              -f expected_head_sha="$HEAD_SHA" 2>/dev/null || true
+            for _ in $(seq 1 18); do
+              sleep 10
+              read -r MERGEABLE STATUS <<< "$(merge_state)"
+              [[ "$STATUS" != "BEHIND" && "$STATUS" != "UNKNOWN" ]] && break
+            done
+          fi
+
+          read -r MERGEABLE STATUS <<< "$(merge_state)"
+          if [[ "$MERGEABLE" == "MERGEABLE" && "$STATUS" == "CLEAN" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch origin "$BASE_REF"
+          if git merge "origin/$BASE_REF" --no-edit; then
+            git push origin "HEAD:$HEAD_REF"
+            echo "sync_pushed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git merge --abort 2>/dev/null || true
+          echo "needs_conflict_fix=true" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve merge conflicts
+        if: steps.prepare.outputs.needs_conflict_fix == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "claude[bot],*"
+          claude_args: >-
+            --max-turns 40
+            --model claude-opus-4-7
+            --allowedTools "Bash(gh *),Bash(git *),Read,Glob,Grep,Edit,Write"
+          prompt: |
+            PR #${{ env.PR }} has merge conflicts with origin/${{ env.BASE_REF }}.
+
+            1. `git fetch origin ${{ env.BASE_REF }} && git merge origin/${{ env.BASE_REF }}`
+            2. Resolve all conflict markers; preserve branch intent and main fixes.
+            3. Commit: `chore: resolve merge conflicts with ${{ env.BASE_REF }}` and push.
+
+            Do NOT merge the PR. Do NOT post comments.
+
+      - name: Auto-merge on pass
+        if: |
+          steps.decide.outputs.decision == 'pass' &&
+          steps.prepare.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONF: ${{ steps.decide.outputs.confidence }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: PASSED
+
+          Confidence: ${CONF}/5 — Critical: 0 — Unresolved: 0
+
+          Branch is up to date with \`${{ env.BASE_REF }}\`. Auto-merge enabled.
+          EOF
+          gh pr merge "$PR" --squash --auto
+
+      - name: Post sync re-review notice
+        if: steps.prepare.outputs.sync_pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "$PR" --body "Claude review loop: synced with \`${{ env.BASE_REF }}\` — re-review will run on the updated branch."
+
+      - name: Post human gate hold message
+        if: steps.decide.outputs.decision == 'gate_human'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONF: ${{ steps.decide.outputs.confidence }}
+          NOTIFY: ${{ env.NOTIFY_USER }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: PASSED — **merge held** (\`human-gate\`)
+
+          Confidence: ${CONF}/5 — Critical: 0 — Unresolved: 0
+
+          @${NOTIFY} — review preview/e2e, then merge when satisfied.
+          EOF
+          gh pr edit "$PR" --add-reviewer "$NOTIFY" 2>/dev/null || true

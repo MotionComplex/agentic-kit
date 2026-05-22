@@ -7,8 +7,8 @@ This repo runs an automated Claude review-fix loop on every PR (subscription-bil
 1. PR is opened or updated → `.github/workflows/claude-code-review.yml` reviews against
    `.github/PR-REVIEW-RUBRIC.md` and posts a review with a machine-readable summary block.
 2. `.github/workflows/claude-loop.yml` parses the summary and decides:
-   - **Pass** if `Confidence ≥ 4/5 AND Critical == 0 AND Unresolved == 0` → **auto-merge**
-     (squash, when required checks pass) unless `human-gate` is on the PR.
+   - **Pass** if `Confidence ≥ 4/5 AND Critical == 0 AND Unresolved == 0` → sync with base,
+     resolve merge conflicts if needed, then **auto-merge** unless `human-gate` is on the PR.
    - **Stop** if iteration count reached `MAX_ITER` (default **3**) → manual review.
    - **Continue** otherwise → push a fix commit. The new commit triggers the review workflow
      again, which posts a new summary, which feeds back into this decision.
@@ -49,7 +49,7 @@ Defaults live as `env:` keys at the top of `.github/workflows/claude-loop.yml`:
 
 | Key | Default | Effect |
 |---|---|---|
-| `MAX_ITER` | 3 | Hard cap on review-fix rounds. |
+| `MAX_ITER` | 5 | Hard cap on review-fix rounds. |
 | `MIN_CONFIDENCE` | 4 | Minimum score required to pass. |
 
 The rubric itself is at `.github/PR-REVIEW-RUBRIC.md` — edit it to tighten or loosen review
