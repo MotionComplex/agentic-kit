@@ -21,7 +21,7 @@ Confirm the repo has (or install from `agentic-kit/workflows/claude-review-loop`
 - `tests/support/fixtures/visual.ts` — `visitSkyView`, `captureVisual`, writes `test-results/visual-review/manifest.json`
 - Playwright project `visual-review` + `npm run test:e2e:visual`
 
-If the visual fixture is missing, copy/adapt from this repo's `tests/support/fixtures/visual.ts`.
+If the visual fixture is missing, copy/adapt from [references/visual-fixture.ts](references/visual-fixture.ts) into `tests/support/fixtures/visual.ts`. Playwright requires fixture callbacks to destructure the first argument (use `({}, provide)` when no deps are needed).
 
 **Project repos:** commit real files under `.claude/skills/visual-e2e/` and `.cursor/skills/visual-e2e/`. Never symlink to a local `agentic-kit` path — that breaks on other machines. Canonical source lives in `agentic-kit/skills/visual-e2e/`; sync copies when the skill changes.
 
