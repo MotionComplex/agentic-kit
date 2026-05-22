@@ -97,26 +97,80 @@ else
 fi
 echo
 
-cat <<'EOF'
-Done. Post-install checklist:
+echo "Checking prerequisites in $TARGET..."
+echo
 
-  1. Set repo secret `CLAUDE_CODE_OAUTH_TOKEN`
-       Generate with:   claude setup-token
-       Add under:       Settings -> Secrets and variables -> Actions
+cd "$TARGET"
 
-  2. Create the opt-out label `no-claude-loop`
-       gh label create no-claude-loop \
-         --description "Skip the automated Claude review loop on this PR" \
-         --color cccccc
+GH_OK=0; SECRET_OK=0; CLAUDE_YML_OK=0; LABEL_OK=0
 
-  3. Commit and push the new files
-       git add .github/ AGENTS.md
-       git commit -m "ci: install claude review loop"
-       git push
+gh auth status >/dev/null 2>&1 && GH_OK=1
+[[ -f ".github/workflows/claude.yml" ]] && CLAUDE_YML_OK=1
+if [[ $GH_OK -eq 1 ]]; then
+  gh secret list 2>/dev/null | awk -F'\t' '{print $1}' \
+    | grep -qx CLAUDE_CODE_OAUTH_TOKEN && SECRET_OK=1
+  gh label list 2>/dev/null | awk -F'\t' '{print $1}' \
+    | grep -qx no-claude-loop && LABEL_OK=1
+fi
 
-  4. Open a test PR and watch the Actions tab.
+mark() { [[ $1 -eq 1 ]] && echo "ok  " || echo "todo"; }
 
-To uninstall: delete `.github/workflows/claude-code-review.yml`,
-`.github/workflows/claude-loop.yml`, `.github/PR-REVIEW-RUBRIC.md`, and remove the
-`<!-- claude-review-loop:begin/end -->` block from your AGENTS.md / CLAUDE.md.
+cat <<EOF
+  [$(mark $GH_OK)] gh CLI authenticated
+  [$(mark $CLAUDE_YML_OK)] .github/workflows/claude.yml present
+  [$(mark $SECRET_OK)] CLAUDE_CODE_OAUTH_TOKEN secret set
+  [$(mark $LABEL_OK)] no-claude-loop label exists
+
 EOF
+
+NEED_ACTION=0
+
+if [[ $GH_OK -eq 0 ]]; then
+  cat <<'EOF'
+Next: authenticate the gh CLI
+  gh auth login
+
+EOF
+  NEED_ACTION=1
+fi
+
+if [[ $CLAUDE_YML_OK -eq 0 || $SECRET_OK -eq 0 ]]; then
+  cat <<'EOF'
+Next: install the Claude GitHub App + OAuth secret (interactive)
+  claude          # then inside claude run: /install-github-app
+
+  This adds .github/workflows/claude.yml and sets the
+  CLAUDE_CODE_OAUTH_TOKEN repo secret. Required for the loop to run.
+
+EOF
+  NEED_ACTION=1
+fi
+
+if [[ $LABEL_OK -eq 0 && $GH_OK -eq 1 ]]; then
+  cat <<'EOF'
+Next: create the opt-out label
+  gh label create no-claude-loop \
+    --description "Skip the automated Claude review loop on this PR" \
+    --color cccccc
+
+EOF
+  NEED_ACTION=1
+fi
+
+cat <<'EOF'
+Next: commit and push
+  git add .github/ AGENTS.md
+  git commit -m "ci: install claude review loop"
+  git push
+
+Then open a test PR and watch the Actions tab.
+
+To uninstall: delete .github/workflows/claude-code-review.yml,
+.github/workflows/claude-loop.yml, .github/PR-REVIEW-RUBRIC.md, and remove the
+<!-- claude-review-loop:begin/end --> block from AGENTS.md / CLAUDE.md.
+EOF
+
+if [[ $NEED_ACTION -eq 1 ]]; then
+  echo
+  echo "(Some prerequisites are missing — see TODOs above before opening a PR.)"
+fi
