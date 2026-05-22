@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { test, expect } from "../../support/fixtures/visual";
+import { test } from "../../support/fixtures/visual";
 
 const criteria = JSON.parse(
   fs.readFileSync(
