@@ -1,0 +1,27 @@
+{
+  "feature": "Feature Name",
+  "specPath": "docs/features/your-feature.feature",
+  "qualityGoals": [
+    "Global quality bar 1 — appearance and polish in plain English",
+    "Global quality bar 2 — readable, intentional, on-brand for the app",
+    "Global quality bar 3 — correct enable/disable or state behavior where relevant"
+  ],
+  "steps": [
+    {
+      "id": "primary-state",
+      "scenario": "User sees the main UI state worth reviewing",
+      "criteria": [
+        "Specific visual expectation for this screenshot",
+        "Not placeholder or debug styling"
+      ]
+    },
+    {
+      "id": "alternate-state",
+      "scenario": "User toggles or navigates to a comparison state",
+      "criteria": [
+        "Clear difference from primary-state screenshot",
+        "Rest of UI remains usable"
+      ]
+    }
+  ]
+}

@@ -81,7 +81,7 @@ Skip new branch if continuing the same feature on an existing branch.
 npm run lint && npm run test:unit
 ```
 
-E2e when UI changes. Then `gh pr create` with labels the user chose. **Do not merge manually** — CI auto-merges on pass unless `human-gate`.
+E2e when UI changes. For UI features with visual quality bar, run **visual-e2e** skill (`tests/e2e/visual/` + criteria JSON) so CI runs `visual-review`. Then `gh pr create` with labels the user chose. **Do not merge manually** — CI auto-merges on pass unless `human-gate`.
 
 ## Hand off
 
