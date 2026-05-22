@@ -1,0 +1,142 @@
+name: Claude Review Loop
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  loop:
+    if: |
+      github.event.review.user.type == 'Bot' &&
+      contains(github.event.review.user.login, 'claude') &&
+      !contains(github.event.pull_request.labels.*.name, 'no-claude-loop')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    env:
+      MAX_ITER: 3
+      MIN_CONFIDENCE: 4
+      PR: ${{ github.event.pull_request.number }}
+      REVIEW_ID: ${{ github.event.review.id }}
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Parse review summary and decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews/${REVIEW_ID}" --jq '.body')
+          CONFIDENCE=$(echo "$BODY" | grep -oP '(?<=Confidence:\s)\d+' | head -1 || true)
+          CRITICAL=$(echo "$BODY" | grep -oP '(?<=Critical:\s)\d+' | head -1 || true)
+          UNRESOLVED=$(echo "$BODY" | grep -oP '(?<=Unresolved:\s)\d+' | head -1 || true)
+
+          if [[ -z "$CONFIDENCE" || -z "$CRITICAL" || -z "$UNRESOLVED" ]]; then
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            echo "reason=summary block missing or unparseable" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ITER_PREV=$(gh pr view "$PR" --json comments \
+            --jq '[.comments[].body | select(test("<!-- claude-loop:iter:"))] | length')
+          ITER_NEXT=$((ITER_PREV + 1))
+
+          if [[ $CONFIDENCE -ge $MIN_CONFIDENCE && $CRITICAL -eq 0 && $UNRESOLVED -eq 0 ]]; then
+            DECISION=pass
+          elif [[ $ITER_PREV -ge $MAX_ITER ]]; then
+            DECISION=max
+          else
+            DECISION=continue
+          fi
+
+          {
+            echo "decision=$DECISION"
+            echo "confidence=$CONFIDENCE"
+            echo "critical=$CRITICAL"
+            echo "unresolved=$UNRESOLVED"
+            echo "iter=$ITER_NEXT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post pass message
+        if: steps.decide.outputs.decision == 'pass'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONF: ${{ steps.decide.outputs.confidence }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: PASSED
+
+          Confidence: ${CONF}/5 — Critical: 0 — Unresolved: 0
+          EOF
+
+      - name: Post max-iter message
+        if: steps.decide.outputs.decision == 'max'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONF: ${{ steps.decide.outputs.confidence }}
+          CRIT: ${{ steps.decide.outputs.critical }}
+          UNRES: ${{ steps.decide.outputs.unresolved }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: STOPPED at max iterations (${MAX_ITER})
+
+          Final state — Confidence: ${CONF}/5, Critical: ${CRIT}, Unresolved: ${UNRES}.
+
+          Manual review required. To skip the loop on future PRs, add the \`no-claude-loop\` label.
+          EOF
+
+      - name: Post skip message
+        if: steps.decide.outputs.decision == 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: skipped — ${REASON}.
+
+          The previous review did not include the required \`<!-- claude-review:summary -->\` block,
+          so the loop cannot decide whether to continue. Trigger the review workflow manually or
+          add the \`no-claude-loop\` label to disable.
+          EOF
+
+      - name: Post iteration marker
+        if: steps.decide.outputs.decision == 'continue'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ITER: ${{ steps.decide.outputs.iter }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          <!-- claude-loop:iter:${ITER} -->
+          Claude review loop: iteration ${ITER}/${MAX_ITER} — addressing review feedback.
+          EOF
+
+      - name: Run Claude to address feedback
+        if: steps.decide.outputs.decision == 'continue'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 30 --model claude-opus-4-7
+          prompt: |
+            You are inside the automated Claude review loop on PR #${{ env.PR }}
+            (iteration ${{ steps.decide.outputs.iter }}/${{ env.MAX_ITER }}).
+
+            Tasks:
+            1. Read the most recent review by the claude bot and all unresolved inline review
+               comments on the PR.
+            2. Address each actionable comment with a minimal, focused change. Add tests when the
+               reviewer asked for them. Preserve existing style.
+            3. Stage, commit with message
+               "fix: address review feedback (loop iteration ${{ steps.decide.outputs.iter }})",
+               and push to the PR branch.
+
+            Do NOT post a chat summary. Do NOT request another review — pushing automatically
+            triggers the next review round.

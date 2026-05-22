@@ -1,0 +1,60 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  claude-review:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-claude-loop') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 20 --model claude-opus-4-7
+          prompt: |
+            You are an automated PR reviewer. Review PR #${{ github.event.pull_request.number }}
+            of ${{ github.repository }} against the rubric at `.github/PR-REVIEW-RUBRIC.md`.
+
+            Steps:
+            1. Read `.github/PR-REVIEW-RUBRIC.md` to understand the rubric and severity definitions.
+            2. Inspect the PR diff, related files, and tests.
+            3. Post inline review comments on specific lines for each issue you find. Be specific
+               and actionable. Cite the rubric category and severity in each comment, e.g.
+               `[Correctness/Critical] Null pointer dereference when …`.
+            4. Submit a single PR review (REQUEST_CHANGES if any Critical issues, COMMENT
+               otherwise) whose body MUST end with the machine-readable summary block below.
+
+            REQUIRED — your review body MUST end with this exact block, no other markup:
+
+            <!-- claude-review:summary -->
+            Confidence: N/5
+            Critical: N
+            Suggestions: N
+            Unresolved: N
+            <!-- /claude-review:summary -->
+
+            Counting rules:
+            - Confidence: your overall confidence the PR is mergeable, on a 1–5 scale per the rubric.
+            - Critical: number of issues flagged as Critical severity.
+            - Suggestions: number of issues flagged as Suggestion severity (style, minor).
+            - Unresolved: number of unresolved inline review threads on this PR after your review.
+              For a fresh review this equals Critical + Suggestions; for re-reviews on a later push,
+              count only threads that are still open.
+
+            Be strict. The downstream loop uses this block to decide whether to keep iterating.
+            Do NOT include any other text after the closing marker.
