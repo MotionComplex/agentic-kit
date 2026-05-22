@@ -9,15 +9,18 @@ description: >-
 
 # Implement feature
 
-## Step 0 — Ask how to run (required when ambiguous)
+## Step 0 — Clarify only when needed
 
-**Always ask** before coding if any of these are true:
+**Do not** run a questionnaire for an obvious single feature (e.g. "implement milky way per docs/milky-way-integration.md"). Go straight to work: `single` mode, full scope, no extra labels unless UI preview was requested.
 
-- User mentions **multiple** features, tasks, or an epic
-- User says "implement features" / lists several items
-- User did not pick a run mode yet
+**Ask** (AskQuestion or short numbered list, then wait) only when:
 
-Use the **AskQuestion** tool (or a clear numbered list and wait for reply). Offer:
+- **Multiple** features, an epic, or a list of tasks/features
+- Run mode is unclear (parallel vs sequential vs GitHub-only)
+- Scope is ambiguous (whole feature vs one phase/task — and user did not already narrow it)
+- User might want `awaiting-e2e` / `human-gate` and did not say
+
+When asking, offer:
 
 | ID | Mode | Best for |
 |---|---|---|
@@ -27,14 +30,9 @@ Use the **AskQuestion** tool (or a clear numbered list and wait for reply). Offe
 | `parallel-gh` | **Several features, parallel via GitHub** | Fire-and-forget: Issue per feature + `@claude implement…` (no shared IDE context). |
 | `parallel-wt` | **Several features, parallel in Cursor** | One worktree + branch per feature; you open a window per worktree. |
 
-Also ask in the same flow (second question or combined):
+Optional second question in the same ask (only if relevant): labels (`none` · `awaiting-e2e` · `human-gate`) or scope (full vs Phase X).
 
-- **PR labels:** none (default) · `awaiting-e2e` (you preview on Vercel before merge) · `human-gate` (you review before bot auto-fixes)
-- **Scope:** full feature (default) · only if user already said "Phase 1" / "Task X" — skip scope question
-
-**Single named feature with clear doc** (e.g. "implement milky way per docs/…"): you may skip the mode table and default to `single`, but still confirm in one line: *"Running single-feature / one PR / full scope — OK?"*
-
-Do **not** start implementation until the user chooses (unless they already said e.g. "parallel via GitHub").
+Do **not** ask for confirmation on a clear single-feature request. Start implementing.
 
 ## What each mode does
 
