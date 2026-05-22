@@ -25,19 +25,20 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: --max-turns 20 --model claude-opus-4-7
+          claude_args: >-
+            --max-turns 40
+            --model claude-opus-4-7
+            --allowedTools "Bash(gh pr *),Bash(gh api *),Read,Glob,Grep"
           prompt: |
             You are an automated PR reviewer. Review PR #${{ github.event.pull_request.number }}
-            of ${{ github.repository }} against the rubric at `.github/PR-REVIEW-RUBRIC.md`.
+            of ${{ github.repository }}. Be efficient — finish within ~15 tool turns.
 
             Steps:
-            1. Read `.github/PR-REVIEW-RUBRIC.md` to understand the rubric and severity definitions.
-            2. Inspect the PR diff, related files, and tests.
-            3. Post inline review comments on specific lines for each issue you find. Be specific
-               and actionable. Cite the rubric category and severity in each comment, e.g.
-               `[Correctness/Critical] Null pointer dereference when …`.
-            4. Submit a single PR review (REQUEST_CHANGES if any Critical issues, COMMENT
-               otherwise) whose body MUST end with the machine-readable summary block below.
+            1. Run `gh pr diff ${{ github.event.pull_request.number }}` and skim changed files only.
+            2. Read `.github/PR-REVIEW-RUBRIC.md` once for severity rules.
+            3. Post inline comments only for real issues (max ~10). Tag `[Category/Severity]`.
+            4. Submit ONE PR review (REQUEST_CHANGES if any Critical, else COMMENT) whose body
+               MUST end with the summary block below. Do not explore unrelated files.
 
             REQUIRED — your review body MUST end with this exact block, no other markup:
 
