@@ -24,6 +24,17 @@ Add the **`no-claude-loop`** label so the loop and review do not burn quota. Thi
 agent-created PRs too: if you are an agent opening a PR that matches the criteria above, apply
 the label as part of `gh pr create`.
 
+### Human gates (stay in the loop)
+
+| Label | Effect |
+|---|---|
+| `human-gate` | CI review still runs; **no automated fix rounds**. You are added as reviewer and @mentioned. Remove label + `@claude continue review loop` (or push) to resume auto-fix. |
+| `awaiting-e2e` | On CI pass, bot posts an **e2e checkpoint** instead of "fully done". Run e2e locally, verify UI, remove label when satisfied. Does not block fix rounds while score is still low. |
+| `no-claude-loop` | Disables review + loop entirely. |
+
+**Get notified:** Watch the repo on GitHub, or set repository variable `HUMAN_GATE_NOTIFY`
+to your GitHub username (defaults to repo owner). The loop @mentions you and requests review.
+
 ### Manual escape hatches
 
 - Add the `no-claude-loop` label any time to halt further iterations on a PR.

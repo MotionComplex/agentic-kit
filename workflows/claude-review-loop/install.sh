@@ -123,6 +123,15 @@ cat <<EOF
 
 EOF
 
+GATE_OK=0; E2E_OK=0
+if [[ $GH_OK -eq 1 ]]; then
+  gh label list 2>/dev/null | awk -F'\t' '{print $1}' | grep -qx human-gate && GATE_OK=1
+  gh label list 2>/dev/null | awk -F'\t' '{print $1}' | grep -qx awaiting-e2e && E2E_OK=1
+fi
+echo "  [$( [[ $GATE_OK -eq 1 ]] && echo ok || echo todo )] human-gate label (optional gate)"
+echo "  [$( [[ $E2E_OK -eq 1 ]] && echo ok || echo todo )] awaiting-e2e label (optional gate)"
+echo
+
 NEED_ACTION=0
 
 if [[ $GH_OK -eq 0 ]]; then
@@ -146,15 +155,32 @@ EOF
   NEED_ACTION=1
 fi
 
-if [[ $LABEL_OK -eq 0 && $GH_OK -eq 1 ]]; then
-  cat <<'EOF'
-Next: create the opt-out label
+if [[ $GH_OK -eq 1 ]]; then
+  if [[ $LABEL_OK -eq 0 ]]; then
+    cat <<'EOF'
+Next: create labels
   gh label create no-claude-loop \
     --description "Skip the automated Claude review loop on this PR" \
     --color cccccc
 
 EOF
-  NEED_ACTION=1
+    NEED_ACTION=1
+  fi
+  if [[ $GATE_OK -eq 0 || $E2E_OK -eq 0 ]]; then
+    cat <<'EOF'
+Next: create human gate labels (optional but recommended)
+  gh label create human-gate \
+    --description "Pause automated fix rounds; human reviews first" \
+    --color FBCA04
+  gh label create awaiting-e2e \
+    --description "Require manual e2e verification before treating PR as done" \
+    --color 0E8A16
+
+  Optional: gh variable set HUMAN_GATE_NOTIFY --body "your-github-username"
+
+EOF
+    NEED_ACTION=1
+  fi
 fi
 
 cat <<'EOF'

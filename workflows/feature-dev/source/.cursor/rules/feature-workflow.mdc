@@ -1,0 +1,54 @@
+---
+description: End-to-end feature workflow — plan, implement, PR, CI loop, human gates
+alwaysApply: true
+---
+
+# Feature workflow
+
+Use this for any non-trivial feature. For epics, one feature = one branch = one PR (parallel features use separate git worktrees).
+
+## 1. Plan
+
+- Switch to **Plan mode** (Cursor) or ask Claude to plan only without editing (CLI: be explicit in the prompt).
+- Produce a short written plan; wait for human approval before coding.
+
+## 2. Implement (local)
+
+- One feature per worktree when working in parallel:
+  `git worktree add ../<repo>-wt/<feature-slug> main && cd ../<repo>-wt/<feature-slug>`
+- Match existing code style. Run before opening a PR:
+  - `npm run lint` (or project equivalent)
+  - `npm run test:unit` (required)
+  - `npm run test:e2e` (best-effort unless the feature is UI-critical — then required before PR; see gates below)
+
+## 3. Open PR
+
+- Title: Conventional Commits format (`feat(scope): subject`).
+- Trivial PRs (docs-only, version bump, typo): add label `no-claude-loop`.
+- UI / UX / flows that need human eyes: add label `awaiting-e2e`.
+- Want to review yourself before the bot keeps fixing: add label `human-gate`.
+- Example:
+  `gh pr create --title "feat(scope): …" --body "…" --label awaiting-e2e`
+
+## 4. CI review loop (automatic)
+
+- Push triggers Claude review + up to 3 fix iterations (subscription-billed).
+- Labels pause automation:
+  - `human-gate` — no auto-fix rounds; you review manually. Remove label to resume.
+  - `awaiting-e2e` — on CI pass, bot waits for you to run e2e and remove the label.
+- Watch the PR on GitHub (notifications) or Actions tab.
+
+## 5. Finalize
+
+- After CI loop passes (and e2e gate cleared if applicable), run **`/babysit`** (skill) to chase merge-ready state: comments, CI, conflicts.
+- Merge when green and you are satisfied.
+
+## Headless (no IDE)
+
+- Open a GitHub Issue per feature; comment `@claude implement per issue description`.
+- Same CI loop applies to the resulting PR. Use labels on the PR as above.
+
+## Parallel features
+
+- Never implement two features in the same worktree.
+- If two features touch the same files, sequence them — do not rely on parallel PRs.

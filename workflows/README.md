@@ -8,7 +8,8 @@ repo's `.github/` directory — so each one ships with a small `install.sh` that
 
 | Workflow | Purpose | Install |
 |---|---|---|
-| [`claude-review-loop/`](claude-review-loop/) | Automated PR review + fix loop using the Claude GitHub App, billed against your Pro/Max subscription. | `claude-review-loop/install.sh /path/to/repo` |
+| [`claude-review-loop/`](claude-review-loop/) | Automated PR review + fix loop using the Claude GitHub App, billed against your Pro/Max subscription. Human gates via labels (`human-gate`, `awaiting-e2e`). | `claude-review-loop/install.sh /path/to/repo` |
+| [`feature-dev/`](feature-dev/) | Portable plan → implement → PR procedure (Cursor rules + Claude/AGENTS snippets + lint hook). Not Cursor-only. | `feature-dev/install.sh /path/to/repo` (after review loop) |
 
 ## Adding a new workflow
 

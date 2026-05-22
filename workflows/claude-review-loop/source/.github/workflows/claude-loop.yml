@@ -21,6 +21,7 @@ jobs:
       MIN_CONFIDENCE: 4
       PR: ${{ github.event.pull_request.number }}
       REVIEW_ID: ${{ github.event.review.id }}
+      NOTIFY_USER: ${{ vars.HUMAN_GATE_NOTIFY || github.repository_owner }}
 
     steps:
       - name: Checkout PR head
@@ -50,10 +51,22 @@ jobs:
             --jq '[.comments[].body | select(test("<!-- claude-loop:iter:"))] | length')
           ITER_NEXT=$((ITER_PREV + 1))
 
+          LABELS=$(gh pr view "$PR" --json labels -q '[.labels[].name] | join(",")')
+          HAS_HUMAN_GATE=0
+          HAS_E2E_GATE=0
+          echo "$LABELS" | grep -q 'human-gate' && HAS_HUMAN_GATE=1
+          echo "$LABELS" | grep -q 'awaiting-e2e' && HAS_E2E_GATE=1
+
           if [[ $CONFIDENCE -ge $MIN_CONFIDENCE && $CRITICAL -eq 0 && $UNRESOLVED -eq 0 ]]; then
-            DECISION=pass
+            if [[ $HAS_E2E_GATE -eq 1 ]]; then
+              DECISION=gate_e2e
+            else
+              DECISION=pass
+            fi
           elif [[ $ITER_PREV -ge $MAX_ITER ]]; then
             DECISION=max
+          elif [[ $HAS_HUMAN_GATE -eq 1 ]]; then
+            DECISION=gate_human
           else
             DECISION=continue
           fi
@@ -71,12 +84,57 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CONF: ${{ steps.decide.outputs.confidence }}
+          NOTIFY: ${{ env.NOTIFY_USER }}
         run: |
           gh pr comment "$PR" --body-file - <<EOF
           Claude review loop: PASSED
 
           Confidence: ${CONF}/5 — Critical: 0 — Unresolved: 0
+
+          @${NOTIFY} — ready for your review / merge when satisfied.
           EOF
+          gh pr edit "$PR" --add-reviewer "$NOTIFY" 2>/dev/null || true
+
+      - name: Post e2e gate message
+        if: steps.decide.outputs.decision == 'gate_e2e'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONF: ${{ steps.decide.outputs.confidence }}
+          NOTIFY: ${{ env.NOTIFY_USER }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: CI review PASSED — **e2e gate active**
+
+          Confidence: ${CONF}/5 — Critical: 0 — Unresolved: 0
+
+          @${NOTIFY} — run e2e locally (or in your environment), verify the UI/flow, then:
+          - Remove the \`awaiting-e2e\` label when satisfied, or
+          - Merge when you are happy (loop will not auto-fix while this label is present).
+
+          To resume automated fix rounds after e2e, remove \`human-gate\` if present and push
+          or re-request review.
+          EOF
+          gh pr edit "$PR" --add-reviewer "$NOTIFY" 2>/dev/null || true
+
+      - name: Post human gate hold message
+        if: steps.decide.outputs.decision == 'gate_human'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONF: ${{ steps.decide.outputs.confidence }}
+          CRIT: ${{ steps.decide.outputs.critical }}
+          UNRES: ${{ steps.decide.outputs.unresolved }}
+          NOTIFY: ${{ env.NOTIFY_USER }}
+        run: |
+          gh pr comment "$PR" --body-file - <<EOF
+          Claude review loop: **paused** (\`human-gate\` label)
+
+          Review posted — Confidence: ${CONF}/5, Critical: ${CRIT}, Unresolved: ${UNRES}.
+          Automated fix rounds are disabled until you remove \`human-gate\`.
+
+          @${NOTIFY} — review the PR and inline comments. When ready for the bot to continue
+          fixing, remove the label and comment \`@claude continue review loop\` or push a small commit.
+          EOF
+          gh pr edit "$PR" --add-reviewer "$NOTIFY" 2>/dev/null || true
 
       - name: Post max-iter message
         if: steps.decide.outputs.decision == 'max'
