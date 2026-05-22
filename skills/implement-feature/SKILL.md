@@ -1,97 +1,88 @@
 ---
 name: implement-feature
 description: >-
-  End-to-end feature implementation from project docs through PR and CI review loop.
-  Use when the user says implement feature, ship feature, build from docs, /implement-feature,
-  or names a doc like milky-way-integration.md or a task from docs/tasks.md.
+  Implement a complete feature from project docs through PR and CI review loop.
+  Use for implement feature, ship feature, build from docs, /implement-feature,
+  or any doc/task/feature name. Means the WHOLE feature — not one subtask or phase
+  unless the user explicitly scopes down (e.g. "Phase 1 only", "Task 12.1 only").
 ---
 
 # Implement feature
 
-Ship a feature from spec to an open PR. CI runs the Claude review loop after you push; you are notified on GitHub.
+**"Implement feature" = ship the full feature.** All related tasks, phases, and acceptance criteria in the docs — one continuous run until done or blocked.
 
-## Inputs
+Do **not** stop after the first subtask, phase, or MVP slice to ask "want the rest?" That is wrong unless the user narrowed scope.
 
-User may give: task id (`Task 2.4`), feature name (`milky way`, `milkyway`), or doc path (`docs/milky-way-integration.md`). Resolve all relevant docs before coding.
+## Scope down only when the user explicitly says
 
-## 1. Discover docs
+Examples: "Phase 1 only", "MVP only", "Task 12.1 only", "just the dome overlay".
 
-Search and read (at minimum):
+If they name a doc or feature without narrowing → **full feature**.
 
-- The named doc, if provided
-- `docs/features/*.feature` matching the feature name
-- Matching unchecked items in `docs/tasks.md`
-- `docs/spec.md` if it references this feature
-- `AGENTS.md` / `CLAUDE.md` for repo conventions
+## 1. Discover scope (read everything)
 
-If scope is ambiguous, ask one short question; otherwise proceed.
+Find **all** work for this feature:
 
-## 2. Plan
+- Named doc (e.g. `docs/milky-way-integration.md`) — **every phase**, not only Phase 1
+- `docs/features/<name>.feature` — all scenarios
+- `docs/tasks.md` — **every unchecked task** in that feature's section (e.g. 12.1, 12.2, 12.3)
+- `docs/spec.md` if linked
 
-Produce a brief plan: files to touch, approach, tests. Do not edit code until the plan is clear (user already approved by invoking this skill).
+Build one checklist of acceptance criteria. Implement until the checklist is complete.
+
+## 2. Plan once
+
+Brief plan covering the **entire** feature. Then implement — no mid-run scope check-ins.
 
 ## 3. Branch
-
-From latest `main`:
 
 ```bash
 git fetch origin main
 git checkout -b feat/<short-slug> origin/main
 ```
 
-For parallel work, use a worktree instead:
+Use a worktree only if another feature PR is already open on this repo.
 
-```bash
-git worktree add ../<repo>-wt/<short-slug> -b feat/<short-slug> origin/main
-```
+## 4. Implement everything
 
-## 4. Implement
-
-- Match existing code style and architecture
-- Keep files under ~300 lines; split if needed
+- Complete all tasks/phases in the checklist
+- Match repo conventions; split files if >300 lines
 - Conventional commits as you go
+- Check off completed items in `docs/tasks.md` when done
 
 ## 5. Verify
-
-Run (or project equivalents from `package.json`):
 
 ```bash
 npm run lint
 npm run test:unit
 ```
 
-Run `npm run test:e2e` when the feature changes UI, routes, or user-visible flows.
+Run e2e when UI is involved. Fix failures you introduced; note pre-existing failures separately.
 
-## 6. Open PR
+## 6. Open one PR
 
 ```bash
 git push -u origin HEAD
-gh pr create --title "feat(<scope>): <subject>" --body "<summary + test plan>"
+gh pr create --title "feat(<scope>): <subject>" --body "<what shipped — list all tasks/phases completed>"
 ```
 
-Labels:
+Labels (only when applicable):
 
 | Situation | Label |
 |---|---|
-| UI / UX / visual flows | `awaiting-e2e` |
-| User wants to review before bot auto-fixes | `human-gate` |
-| Docs-only / typo / deps-only | `no-claude-loop` |
-| Default | none |
+| User asked for preview gate / UI they will eyeball | `awaiting-e2e` |
+| User asked to review before bot auto-fixes | `human-gate` |
+| Trivial docs-only | `no-claude-loop` |
+| **Default** | **none** |
 
 Do **not** merge.
 
 ## 7. Hand off
 
-Tell the user:
-
-- PR URL and number
-- Labels applied
-- CI will review and auto-fix up to 3 rounds
-- If `awaiting-e2e`: wait for Vercel preview on the **latest** commit, verify, remove label, merge
-- Optional finalize: `/babysit`
+Report: PR link, everything completed, what's left only if truly blocked (missing API keys, ambiguous spec). CI handles review after push.
 
 ## Do not
 
-- Skip lint/tests before PR unless user explicitly overrides
-- Merge or enable auto-merge
-- Run greploop locally (CI handles review)
+- Deliver Phase 1 alone when asked to implement the feature
+- Ask "want Phase 2?" — implement it
+- Add `awaiting-e2e` unless user wanted a preview gate or said UI review
