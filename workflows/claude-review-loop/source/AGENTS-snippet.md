@@ -7,7 +7,8 @@ This repo runs an automated Claude review-fix loop on every PR (subscription-bil
 1. PR is opened or updated → `.github/workflows/claude-code-review.yml` reviews against
    `.github/PR-REVIEW-RUBRIC.md` and posts a review with a machine-readable summary block.
 2. `.github/workflows/claude-loop.yml` parses the summary and decides:
-   - **Pass** if `Confidence ≥ 4/5 AND Critical == 0 AND Unresolved == 0` → done.
+   - **Pass** if `Confidence ≥ 4/5 AND Critical == 0 AND Unresolved == 0` → **auto-merge**
+     (squash, when required checks pass) unless `human-gate` is on the PR.
    - **Stop** if iteration count reached `MAX_ITER` (default **3**) → manual review.
    - **Continue** otherwise → push a fix commit. The new commit triggers the review workflow
      again, which posts a new summary, which feeds back into this decision.
@@ -24,13 +25,14 @@ Add the **`no-claude-loop`** label so the loop and review do not burn quota. Thi
 agent-created PRs too: if you are an agent opening a PR that matches the criteria above, apply
 the label as part of `gh pr create`.
 
-### Human gates (stay in the loop)
+### Labels
 
 | Label | Effect |
 |---|---|
-| `human-gate` | CI review still runs; **no automated fix rounds**. You are added as reviewer and @mentioned. Remove label + `@claude continue review loop` (or push) to resume auto-fix. |
-| `awaiting-e2e` | On CI pass, bot posts an **e2e checkpoint** instead of "fully done". Run e2e locally, verify UI, remove label when satisfied. Does not block fix rounds while score is still low. |
+| `human-gate` | Review loop runs to completion; on pass, **hold auto-merge** until you review and merge manually. Use for UI/e2e checks or when you want eyes on the PR before ship. |
 | `no-claude-loop` | Disables review + loop entirely. |
+
+Legacy: `awaiting-e2e` is treated the same as `human-gate` (merge hold). Prefer `human-gate` on new PRs.
 
 **Get notified:** Watch the repo on GitHub, or set repository variable `HUMAN_GATE_NOTIFY`
 to your GitHub username (defaults to repo owner). The loop @mentions you and requests review.

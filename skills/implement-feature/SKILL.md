@@ -18,7 +18,7 @@ description: >-
 - **Multiple** features, an epic, or a list of tasks/features
 - Run mode is unclear (parallel vs sequential vs GitHub-only)
 - Scope is ambiguous (whole feature vs one phase/task — and user did not already narrow it)
-- User might want `awaiting-e2e` / `human-gate` and did not say
+- User might want `human-gate` and did not say
 
 When asking, offer:
 
@@ -30,7 +30,7 @@ When asking, offer:
 | `parallel-gh` | **Several features, parallel via GitHub** | Fire-and-forget: Issue per feature + `@claude implement…` (no shared IDE context). |
 | `parallel-wt` | **Several features, parallel in Cursor** | One worktree + branch per feature; you open a window per worktree. |
 
-Optional second question in the same ask (only if relevant): labels (`none` · `awaiting-e2e` · `human-gate`) or scope (full vs Phase X).
+Optional second question in the same ask (only if relevant): labels (`none` · `human-gate`) or scope (full vs Phase X).
 
 Do **not** ask for confirmation on a clear single-feature request. Start implementing.
 
@@ -81,14 +81,14 @@ Skip new branch if continuing the same feature on an existing branch.
 npm run lint && npm run test:unit
 ```
 
-E2e when UI changes. Then `gh pr create` with labels the user chose. **Do not merge.**
+E2e when UI changes. Then `gh pr create` with labels the user chose. **Do not merge manually** — CI auto-merges on pass unless `human-gate`.
 
 ## Hand off
 
-PR URL(s), mode used, what's done. CI handles review. Optional: `/babysit` when ready to merge.
+PR URL(s), mode used, what's done. CI handles review + auto-merge unless `human-gate`. Optional: `/babysit` if the loop stalls.
 
 ## Do not
 
 - Ship only Phase 1 when user asked for the feature
-- Auto-add `awaiting-e2e` unless user chose preview gate
+- Auto-add `human-gate` unless user chose hands-off auto-merge
 - Run multiple unrelated features in one chat without `parallel-gh` or separate worktrees

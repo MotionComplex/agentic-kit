@@ -1,5 +1,5 @@
 ---
-description: End-to-end feature workflow — plan, implement, PR, CI loop, human gates
+description: End-to-end feature workflow — plan, implement, PR, CI loop, auto-merge
 alwaysApply: true
 ---
 
@@ -19,29 +19,28 @@ Use this for any non-trivial feature. For epics, one feature = one branch = one 
 - Match existing code style. Run before opening a PR:
   - `npm run lint` (or project equivalent)
   - `npm run test:unit` (required)
-  - `npm run test:e2e` (best-effort unless the feature is UI-critical — then required before PR; see gates below)
+  - `npm run test:e2e` (best-effort unless the feature is UI-critical — then required before PR)
 
 ## 3. Open PR
 
 - Title: Conventional Commits format (`feat(scope): subject`).
 - Trivial PRs (docs-only, version bump, typo): add label `no-claude-loop`.
-- UI / UX / flows that need human eyes: add label `awaiting-e2e`.
-- Want to review yourself before the bot keeps fixing: add label `human-gate`.
+- Want to review preview / e2e yourself before merge: add label `human-gate`.
 - Example:
-  `gh pr create --title "feat(scope): …" --body "…" --label awaiting-e2e`
+  `gh pr create --title "feat(scope): …" --body "…" --label human-gate`
 
 ## 4. CI review loop (automatic)
 
 - Push triggers Claude review + up to 3 fix iterations (subscription-billed).
-- Labels pause automation:
-  - `human-gate` — no auto-fix rounds; you review manually. Remove label to resume.
-  - `awaiting-e2e` — on CI pass, bot waits for you to run e2e and remove the label.
+- On pass with **no** `human-gate`: PR **auto-merges** when required checks pass.
+- With `human-gate`: loop still runs to completion; merge is held until you review and merge manually.
 - Watch the PR on GitHub (notifications) or Actions tab.
 
 ## 5. Finalize
 
-- After CI loop passes (and e2e gate cleared if applicable), run **`/babysit`** (skill) to chase merge-ready state: comments, CI, conflicts.
-- Merge when green and you are satisfied.
+- Default path: loop passes → auto-merge. No action needed.
+- With `human-gate`: review (Vercel preview / e2e as needed), then merge when satisfied.
+- If the loop stops at max iterations or CI fails: run **`/babysit`** to chase merge-ready state.
 
 ## Headless (no IDE)
 

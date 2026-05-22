@@ -110,10 +110,19 @@ Copy install matches this kit's existing pattern (one-shot scaffolds) and keeps 
 repo self-contained. Update story is "re-run installer with --force when you want to pull
 upstream changes".
 
+## Auto-merge on pass
+
+When the loop passes and the PR has no `human-gate` label, `claude-loop.yml` runs
+`gh pr merge --squash --auto`. GitHub merges when required checks pass (branch protection
+still applies).
+
+`human-gate` holds merge only — the fix loop always runs to completion. Legacy `awaiting-e2e`
+is treated as an alias for `human-gate`.
+
 ## Explicitly out of scope
 
 - **Dependency vulnerability scanning** — Dependabot + `npm audit` already do this better.
   See "tech-guardian" follow-up note in `source/AGENTS-snippet.md`.
 - **Cross-PR memory / learning** — every PR is reviewed independently.
-- **Human approval gating** — branch protection rules on the target repo handle this; the
-  loop only produces signal, it doesn't bypass anything.
+
+Branch protection rules on the target repo still apply; auto-merge waits for required checks.

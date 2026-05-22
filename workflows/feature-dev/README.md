@@ -31,16 +31,15 @@ claude    # then: /install-github-app
 ~/dev/agentic-kit/workflows/feature-dev/install.sh /path/to/repo
 ```
 
-## Labels (human gates)
+## Labels
 
 Create once per repo (installer prints commands if missing):
 
 ```bash
-gh label create human-gate --description "Pause automated fix rounds; human reviews first" --color FBCA04
-gh label create awaiting-e2e --description "Require manual e2e verification before treating PR as done" --color 0E8A16
+gh label create human-gate --description "Hold auto-merge; human reviews before merge" --color FBCA04
 ```
 
-Optional: `gh variable set HUMAN_GATE_NOTIFY --body "your-github-username"` for @mentions in loop comments.
+Optional: `gh variable set HUMAN_GATE_NOTIFY --body "your-github-username"` for @mentions when merge is held.
 
 ## Parallel features
 

@@ -123,13 +123,11 @@ cat <<EOF
 
 EOF
 
-GATE_OK=0; E2E_OK=0
+GATE_OK=0
 if [[ $GH_OK -eq 1 ]]; then
   gh label list 2>/dev/null | awk -F'\t' '{print $1}' | grep -qx human-gate && GATE_OK=1
-  gh label list 2>/dev/null | awk -F'\t' '{print $1}' | grep -qx awaiting-e2e && E2E_OK=1
 fi
-echo "  [$( [[ $GATE_OK -eq 1 ]] && echo ok || echo todo )] human-gate label (optional gate)"
-echo "  [$( [[ $E2E_OK -eq 1 ]] && echo ok || echo todo )] awaiting-e2e label (optional gate)"
+echo "  [$( [[ $GATE_OK -eq 1 ]] && echo ok || echo todo )] human-gate label (optional merge hold)"
 echo
 
 NEED_ACTION=0
@@ -166,15 +164,12 @@ Next: create labels
 EOF
     NEED_ACTION=1
   fi
-  if [[ $GATE_OK -eq 0 || $E2E_OK -eq 0 ]]; then
+  if [[ $GATE_OK -eq 0 ]]; then
     cat <<'EOF'
-Next: create human gate labels (optional but recommended)
+Next: create human gate label (optional but recommended)
   gh label create human-gate \
-    --description "Pause automated fix rounds; human reviews first" \
+    --description "Hold auto-merge; human reviews before merge" \
     --color FBCA04
-  gh label create awaiting-e2e \
-    --description "Require manual e2e verification before treating PR as done" \
-    --color 0E8A16
 
   Optional: gh variable set HUMAN_GATE_NOTIFY --body "your-github-username"
 

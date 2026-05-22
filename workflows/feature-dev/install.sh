@@ -136,7 +136,7 @@ fi
 echo
 echo "Checking labels..."
 cd "$TARGET"
-for spec in "human-gate:Pause automated fix rounds:FBCA04" "awaiting-e2e:Require manual e2e:0E8A16"; do
+for spec in "human-gate:Hold auto-merge for review:FBCA04"; do
   name="${spec%%:*}"
   rest="${spec#*:}"
   desc="${rest%%:*}"
