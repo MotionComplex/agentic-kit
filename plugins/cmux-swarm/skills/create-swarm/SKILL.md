@@ -8,7 +8,7 @@ description: >-
   "orchestrate workers in cmux". Encodes the concrete cmux patterns (spawn, lazy-PTY,
   brief-file dispatch, commit/footer monitoring, git-worktree isolation, per-worker
   browser) so a swarm runs deterministically.
-compatibility: "macOS + the cmux app (auto-installable via Homebrew). Workers run `claude --dangerously-skip-permissions`, so use only on repos/tasks you trust. Pairs with /code-check (filtered checks) and /visual-check (filtered browser checks) — dispatch those to workers. All cmux primitives live in swarm.sh alongside this file."
+compatibility: "macOS + the cmux app (auto-installable via the /cmux-swarm:cmux-bootstrap command). Workers run `claude --dangerously-skip-permissions`, so use only on repos/tasks you trust. Pairs with the sibling plugin skills /cmux-swarm:code-check (filtered checks) and /cmux-swarm:visual-check (filtered browser checks) — dispatch those to workers. All cmux primitives live in swarm.sh inside this plugin."
 ---
 
 # Create Swarm
@@ -21,9 +21,10 @@ merge their work back. The user talks mainly to you, but can also talk to any wo
 **workspace** (tab) named `🤖 W<n>` running one `claude` session; you address its terminal
 by `--workspace <ws> --surface <surf>`.
 
-**The helper does the mechanics.** `swarm.sh` (alongside this file — installed at
-`~/.claude/skills/create-swarm/swarm.sh`) implements every cmux primitive below. Call it;
-don't re-derive the commands each run. `swarm.sh help` lists subcommands.
+**The helper does the mechanics.** `swarm.sh` (bundled in this plugin at
+`${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh`) implements every cmux primitive below.
+Call it; don't re-derive the commands each run. `swarm.sh help` lists subcommands.
+(`${CLAUDE_PLUGIN_ROOT}` is substituted to the plugin's install dir at runtime.)
 
 ---
 
@@ -40,13 +41,16 @@ Also clarify, if not obvious:
 
 ## Step 2 — Bootstrap cmux (install-if-missing)
 
+Run the bundled command **`/cmux-swarm:cmux-bootstrap`** — it detects cmux and, if missing,
+offers to `brew install --cask cmux` (or prints the download link). Equivalent direct calls:
+
 ```bash
-bash ~/.claude/skills/create-swarm/swarm.sh check-cmux     # prints path, or MISSING
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" check-cmux     # prints path, or MISSING
 ```
 
 - **Present** → continue silently.
 - **MISSING** → ask the user whether to install. On yes:
-  `bash ~/.claude/skills/create-swarm/swarm.sh install-cmux` (runs `brew install --cask cmux`).
+  `bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" install-cmux` (runs `brew install --cask cmux`).
   If Homebrew is absent, the helper prints the download link instead — relay it and stop.
 
 This skill only runs **inside** a cmux session (the orchestrator must itself be a cmux
@@ -58,7 +62,7 @@ user relaunch Claude inside cmux.
 For each worker `n` in `1..N-1`:
 
 ```bash
-bash ~/.claude/skills/create-swarm/swarm.sh spawn <n> <repo>
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn <n> <repo>
 # → WORKSPACE=workspace:<k>
 #   SURFACE=surface:<m>
 ```
@@ -83,14 +87,14 @@ auto-submits early (newlines trigger send). Instead:
 2. Dispatch a short pointer:
 
 ```bash
-bash ~/.claude/skills/create-swarm/swarm.sh dispatch <ws> <surf> /tmp/<task-id>.md "<one-line gist>"
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" dispatch <ws> <surf> /tmp/<task-id>.md "<one-line gist>"
 # sends:  "Read /tmp/<task-id>.md in full and execute. <one-line gist>"  then Enter
 ```
 
 3. Label the tab so the team is legible at a glance:
 
 ```bash
-bash ~/.claude/skills/create-swarm/swarm.sh rename <ws> <surf> "W1 · <current task>"
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" rename <ws> <surf> "W1 · <current task>"
 ```
 
 Update the label whenever the worker's task changes.
@@ -108,7 +112,7 @@ If two or more workers will edit the **same repo**, give each its own worktree s
 clobber each other's working tree:
 
 ```bash
-bash ~/.claude/skills/create-swarm/swarm.sh worktree <repo> <branch> <sibling-dir> <base>
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" worktree <repo> <branch> <sibling-dir> <base>
 # git worktree add -b <branch> <sibling-dir> <base>; symlinks node_modules; copies .env*
 ```
 
@@ -123,9 +127,9 @@ Use the strongest signal the task affords:
 
 1. **Commit-aware (best for code tasks).** Arm before dispatch, then wait:
    ```bash
-   SHA=$(bash ~/.claude/skills/create-swarm/swarm.sh head <repo>)
+   SHA=$(bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" head <repo>)
    # ... dispatch ...
-   bash ~/.claude/skills/create-swarm/swarm.sh wait-commit <repo> "$SHA" 1800   # prints new sha
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" wait-commit <repo> "$SHA" 1800   # prints new sha
    ```
    A new commit = the worker finished a unit of work.
 
@@ -145,8 +149,8 @@ Read a worker's screen any time: `swarm.sh read <ws> <surf> [lines]`.
 
 If a worker does a browser/visual check, it must launch its **own isolated headed browser**
 (Playwright with a unique temp `user-data-dir`) — **never** a single shared browser or shared
-MCP browser, which locks across concurrent agents. The `/visual-check` skill already does
-this; instruct workers to use it rather than a shared session.
+MCP browser, which locks across concurrent agents. The `/cmux-swarm:visual-check` skill
+already does this; instruct workers to use it rather than a shared session.
 
 ## Step 8 — Wind down
 

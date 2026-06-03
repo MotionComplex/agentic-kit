@@ -1,0 +1,14 @@
+{
+  "name": "agentic-kit",
+  "owner": {
+    "name": "MotionComplex"
+  },
+  "description": "Personal Claude Code marketplace. Hosts the cmux-swarm plugin; the rest of the kit ships as symlinked skills via install.sh.",
+  "plugins": [
+    {
+      "name": "cmux-swarm",
+      "source": "./plugins/cmux-swarm",
+      "description": "Orchestrate a team of Claude Code agents in cmux (create-swarm) plus filtered code-check and visual-check skills and a cmux bootstrap command."
+    }
+  ]
+}

@@ -18,13 +18,14 @@ Run the project's checks, return **only what failed** plus a one-line pass summa
 is signal density: a worker reporting back to an orchestrator, or you in a fix loop, should
 not re-read thousands of lines of green output.
 
-The mechanics live in `code-check.sh` (alongside this file — installed at
-`~/.claude/skills/code-check/code-check.sh`).
+The mechanics live in `code-check.sh` (bundled in this plugin at
+`${CLAUDE_PLUGIN_ROOT}/skills/code-check/code-check.sh` — the variable is substituted to the
+plugin's install dir at runtime).
 
 ## Step 1 — Run it
 
 ```bash
-bash ~/.claude/skills/code-check/code-check.sh --dir <project-root>
+bash "${CLAUDE_PLUGIN_ROOT}/skills/code-check/code-check.sh" --dir <project-root>
 ```
 
 It auto-detects the ecosystem and runs the checks it finds:

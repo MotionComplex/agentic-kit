@@ -20,9 +20,10 @@ temp `user-data-dir`**, so it is safe for multiple swarm workers to run at once 
 browser/MCP profile would lock. It returns only signal: pass/fail, the screenshot(s) for any
 failing step, and a one-line reason. No DOM dumps.
 
-The runner lives in `visual-check.mjs` (alongside this file — installed at
-`~/.claude/skills/visual-check/visual-check.mjs`). It's distinct from `/visual-e2e`: that skill
-wires a CI vision-review pipeline; this is the quick local check.
+The runner lives in `visual-check.mjs` (bundled in this plugin at
+`${CLAUDE_PLUGIN_ROOT}/skills/visual-check/visual-check.mjs` — the variable is substituted to
+the plugin's install dir at runtime). It's distinct from `/visual-e2e`: that skill wires a CI
+vision-review pipeline; this is the quick local check.
 
 ## Step 1 — Make sure the dev server is up
 
@@ -62,9 +63,9 @@ Copy `example.config.json` (alongside this file) and edit it to your scenario. S
 ## Step 3 — Run it
 
 ```bash
-node ~/.claude/skills/visual-check/visual-check.mjs --config <your.json>
+node "${CLAUDE_PLUGIN_ROOT}/skills/visual-check/visual-check.mjs" --config <your.json>
 # overrides: --base <url>  --out <dir>
-# CI / no display:  HEADLESS=1 node ~/.claude/skills/visual-check/visual-check.mjs --config ...
+# CI / no display:  HEADLESS=1 node "${CLAUDE_PLUGIN_ROOT}/skills/visual-check/visual-check.mjs" --config ...
 ```
 
 You can also pass the config inline: `--json '{"baseURL":"…","steps":[…]}'`.
@@ -95,7 +96,7 @@ agents would contend for one profile and stall.
 ## When NOT to use this
 
 - You want CI to capture + a model to *judge* quality over time → `/visual-e2e`.
-- Pure logic/no-UI change → `/code-check`.
+- Pure logic/no-UI change → `/cmux-swarm:code-check`.
 - You need a full functional e2e suite with fixtures/retries → write proper Playwright specs.
 
 ## Pitfalls

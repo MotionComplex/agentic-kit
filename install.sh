@@ -20,6 +20,15 @@ for entry in "$KIT_DIR"/skills/*/; do
   entry="${entry%/}"
   name="$(basename "$entry")"
 
+  # cmux-swarm ships as a standalone plugin (plugins/cmux-swarm), installed via
+  #   /plugin marketplace add <this-repo>  →  /plugin install cmux-swarm@agentic-kit
+  # Do NOT also symlink it as loose skills, or create-swarm/code-check/visual-check
+  # would be registered twice. Skip it here regardless of where it lives.
+  if [[ "$name" == "cmux-swarm" ]]; then
+    echo "skip $name: provided by the cmux-swarm plugin (see plugins/cmux-swarm)"
+    continue
+  fi
+
   if [[ -f "$entry/SKILL.md" ]]; then
     targets+=("$name"$'\t'"$entry")
     continue

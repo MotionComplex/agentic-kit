@@ -1,0 +1,18 @@
+{
+  "name": "cmux-swarm",
+  "displayName": "CMUX Swarm",
+  "version": "1.0.0",
+  "description": "Orchestrate a team of Claude Code agents in cmux: spawn workers, dispatch tasks via brief files, monitor by commit / footer-marker / anchored DONE, and isolate parallel edits with git worktrees. Bundles filtered code-check and visual-check skills for low-token worker reporting, plus a cmux install-if-missing bootstrap command.",
+  "author": {
+    "name": "MotionComplex"
+  },
+  "keywords": [
+    "cmux",
+    "agents",
+    "orchestration",
+    "swarm",
+    "playwright",
+    "code-check",
+    "visual-check"
+  ]
+}
