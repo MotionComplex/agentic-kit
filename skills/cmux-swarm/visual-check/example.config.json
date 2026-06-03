@@ -1,0 +1,27 @@
+{
+  "baseURL": "http://localhost:5173",
+  "viewport": { "width": 1280, "height": 800 },
+  "steps": [
+    {
+      "id": "home",
+      "goto": "/",
+      "waitFor": 600,
+      "assert": [
+        { "label": "page renders a heading", "js": "!!document.querySelector('h1')" },
+        { "label": "no visible error banner", "js": "!document.querySelector('.error, [role=alert]')" }
+      ]
+    },
+    {
+      "id": "planner-open",
+      "goto": "/",
+      "actions": [
+        { "click": "#open-planner" },
+        { "waitForSelector": ".planner" }
+      ],
+      "waitFor": 400,
+      "assert": [
+        { "label": "planner panel is visible", "js": "getComputedStyle(document.querySelector('.planner')).display !== 'none'" }
+      ]
+    }
+  ]
+}
