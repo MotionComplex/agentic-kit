@@ -14,12 +14,22 @@ compatibility: "macOS + the cmux app (auto-installable via the /cmux-swarm:cmux-
 # Create Swarm
 
 Turn the current Claude Code session into the **orchestrator** of a CMUX agent team. You
-spawn worker sessions (`W1…Wn`), dispatch tasks to them via brief files, monitor them, and
+spawn worker sessions (`W0…W<n>`), dispatch tasks to them via brief files, monitor them, and
 merge their work back. The user talks mainly to you, but can also talk to any worker directly.
 
-**CMUX object model:** `window → workspace → pane → surface`. Each worker is its own
-**workspace** (tab) named `🤖 W<n>` running one `claude` session; you address its terminal
-by `--workspace <ws> --surface <surf>`.
+**Naming scheme:** the team's workspace is named after a **constellation** — `🐙 Team Orion`,
+`🐙 Team Cygnus`, `🐙 Team Lyra`, … (first free name from the `TEAM_NAMES` list in `swarm.sh`) —
+the orchestrator's tab is `🧠 Orchestrator`, worker tabs are `🤖 W0`, `🤖 W1`, … (0-based).
+
+**CMUX object model:** `window → workspace → pane → surface`. Each worker is one `claude`
+session named `🤖 W<n>`, in one of two layouts (you address its terminal by
+`--workspace <ws> --surface <surf>` either way):
+
+- **Split view (default):** every worker is a **pane in the orchestrator's own workspace** —
+  orchestrator left, workers stacked in a column on the right. The whole team is visible at
+  once. Best for ≤ 4 workers; beyond that the panes get cramped.
+- **Tabs:** every worker is its own **workspace** (tab). Use for big teams or when the user
+  prefers tabs.
 
 **The helper does the mechanics.** `swarm.sh` (bundled in this plugin at
 `${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh`) implements every cmux primitive below.
@@ -31,10 +41,13 @@ Call it; don't re-derive the commands each run. `swarm.sh help` lists subcommand
 ## Step 1 — How many agents?
 
 Ask the user the team size. **Default 3** = 1 orchestrator (this session) + 2 workers
-(`W1`, `W2`). Use the AskUserQuestion tool with options like `2 (1+1)`, `3 (1+2,
-recommended)`, `4 (1+3)`, `5 (1+4)`. The worker count is `N − 1`.
+(`W0`, `W1`). Use the AskUserQuestion tool with options like `2 (1+1)`, `3 (1+2,
+recommended)`, `4 (1+3)`, `5 (1+4)`. The worker count is `N − 1`, numbered `W0…W<N-2>`.
 
 Also clarify, if not obvious:
+- **Layout?** Default to **split view** for ≤ 4 workers (everything in one workspace);
+  offer **tabs** for larger teams or if the user prefers them. Fold this into the same
+  AskUserQuestion (second question) rather than asking twice.
 - **Same repo or separate?** If multiple workers will **edit the same working tree**, you
   need **git worktrees** (Step 5). Read-only/analysis workers don't.
 - **Target repo** for the workers (defaults to the orchestrator's cwd).
@@ -59,7 +72,36 @@ user relaunch Claude inside cmux.
 
 ## Step 3 — Spawn the workers
 
-For each worker `n` in `1..N-1`:
+First, label this session as the team's brain — its **tab** becomes `🧠 Orchestrator` and
+its **workspace** becomes `🐙 Team <constellation>` (first free name from `TEAM_NAMES`; idempotent):
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" name-orchestrator
+```
+
+### Split view (default)
+
+Spawn W0 with no anchor (it splits **right** of the orchestrator), then chain each further
+worker below the previous one by passing the previous worker's `PANE` ref as the anchor:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-split 0 <repo>
+# → WORKSPACE=workspace:<k>   (the orchestrator's own workspace)
+#   SURFACE=surface:<m>
+#   PANE=pane:<p>
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-split 1 <repo> pane:<p>   # below W0
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-split 2 <repo> <W1's PANE> # below W1
+```
+
+**Spawn sequentially, not in parallel** — each call needs the previous worker's `PANE` ref,
+and concurrent moves race on the layout. Under the hood `spawn-split` stages each worker in a
+hidden temp workspace (`new-pane` can't take `--cwd`/`--command`; `new-workspace` can), moves
+the surface into the orchestrator's workspace, splits it off, closes the empty shell, and
+waits for the PTY to attach (it attaches when the pane first renders).
+
+### Tabs
+
+For each worker `n` in `0..N-2`:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn <n> <repo>
@@ -70,10 +112,14 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn <n> <repo>
 `spawn` does three things you must not skip:
 1. `cmux new-workspace --name "🤖 W<n>" --cwd <repo> --command "<claude> --dangerously-skip-permissions" --focus false` — creates the tab and launches Claude in it. (The helper finds the claude binary; on this machine `/Users/elias/.local/bin/claude`.)
 2. **Forces the PTY** with `cmux select-workspace --workspace <ws>` **once**. A freshly created workspace does **not** attach a PTY until rendered — skip this and `read-screen` returns *"Terminal surface not found"*.
-3. Resolves and prints the `WORKSPACE`/`SURFACE` refs (by matching the unique `🤖 W<n>` name). **Record these per worker** — every later call needs them.
+3. Resolves and prints the `WORKSPACE`/`SURFACE` refs (by matching the unique `🤖 W<n>` name).
 
-Lost the refs later? `swarm.sh refs <n>` re-resolves them. To see the whole tree:
-`cmux tree` / `cmux list-workspaces`.
+### Both layouts
+
+**Record the printed refs per worker** — every later call needs them. Lost them? `swarm.sh
+refs <n>` re-resolves both layouts (in split view it scans the tree for the `🤖 W<n>` tab
+label, which Claude may overwrite while working — so recording at spawn time is the reliable
+path). To see the whole tree: `cmux tree` / `cmux list-workspaces`.
 
 Give each worker a moment to finish booting Claude, then proceed.
 
@@ -94,7 +140,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" dispatch <ws> <surf> /
 3. Label the tab so the team is legible at a glance:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" rename <ws> <surf> "W1 · <current task>"
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" rename <ws> <surf> "🤖 W0 · <current task>"
 ```
 
 Update the label whenever the worker's task changes.
@@ -155,8 +201,9 @@ already does this; instruct workers to use it rather than a shared session.
 ## Step 8 — Wind down
 
 When the work lands: merge worktree branches, `swarm.sh reset` idle workers for reuse, or
-`cmux close-workspace --workspace <ws>` to retire a worker. Summarize what each worker
-produced (commits/branches) back to the user.
+retire a worker — `cmux close-surface --surface <surf> --workspace <ws>` in split view,
+`cmux close-workspace --workspace <ws>` in tab mode. Summarize what each worker produced
+(commits/branches) back to the user.
 
 ---
 
@@ -166,9 +213,11 @@ produced (commits/branches) back to the user.
 |---|---|
 | Is cmux installed? | `swarm.sh check-cmux` |
 | Install cmux | `swarm.sh install-cmux` |
-| Spawn worker n | `swarm.sh spawn <n> <repo>` → `WORKSPACE`/`SURFACE` |
+| Label this session | `swarm.sh name-orchestrator` → 🧠 Orchestrator tab + 🐙 Team <constellation> workspace |
+| Spawn worker (split view) | `swarm.sh spawn-split <n> <repo> [anchor-pane]` → `WORKSPACE`/`SURFACE`/`PANE` |
+| Spawn worker (tab) | `swarm.sh spawn <n> <repo>` → `WORKSPACE`/`SURFACE` |
 | Re-find worker n's refs | `swarm.sh refs <n>` |
-| Relabel tab | `swarm.sh rename <ws> <surf> "W1 · task"` |
+| Relabel tab | `swarm.sh rename <ws> <surf> "🤖 W0 · task"` |
 | Dispatch a brief | `swarm.sh dispatch <ws> <surf> /tmp/x.md "gist"` |
 | Raw send + Enter | `swarm.sh send <ws> <surf> "text"` |
 | Reset context | `swarm.sh reset <ws> <surf>` |
@@ -179,12 +228,15 @@ produced (commits/branches) back to the user.
 | Isolate parallel edits | `swarm.sh worktree <repo> <branch> <dir> <base>` |
 | See the team | `cmux tree` / `cmux list-workspaces` |
 | Interrupt a worker | `cmux send-key --workspace <ws> --surface <surf> ctrl+c` |
-| Retire a worker | `cmux close-workspace --workspace <ws>` |
+| Retire a worker (split) | `cmux close-surface --surface <surf> --workspace <ws>` |
+| Retire a worker (tab) | `cmux close-workspace --workspace <ws>` |
 
 ## Pitfalls
 
 - **Skipping the PTY force.** No `select-workspace` after `new-workspace` → `read-screen` says
-  *"Terminal surface not found"*. `spawn` does it for you; don't bypass it.
+  *"Terminal surface not found"*. `spawn`/`spawn-split` handle it for you; don't bypass them.
+- **Parallel `spawn-split` calls.** Each split anchors on the previous worker's pane and
+  concurrent layout moves race. Spawn split-view workers one at a time, in order.
 - **Pasting long prompts.** Multi-line paste auto-submits early. Always use brief files + a
   short pointer (`dispatch`).
 - **Bare `DONE:` markers.** They echo from the dispatched prompt → false "done". Anchor to a

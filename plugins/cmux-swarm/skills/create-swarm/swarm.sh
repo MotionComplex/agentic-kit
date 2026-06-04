@@ -10,9 +10,18 @@
 #   swarm.sh check-cmux                         → prints cmux path, or "MISSING"
 #   swarm.sh install-cmux                       → brew install --cask cmux (asks nothing; caller confirms)
 #   swarm.sh find-claude                        → prints the claude binary path
-#   swarm.sh spawn <n> <repo>                   → spawn worker W<n> in <repo>, launch claude, force PTY
+#   swarm.sh spawn <n> <repo>                   → spawn worker W<n> as its own workspace (tab), launch claude, force PTY
 #                                                 prints:  WORKSPACE=<ref>\nSURFACE=<ref>
-#   swarm.sh refs <n>                           → re-resolve "WORKSPACE/SURFACE" for an existing W<n>
+#   swarm.sh spawn-split <n> <repo> [anchor-pane]
+#                                               → spawn worker W<n> as a SPLIT PANE in the caller's workspace.
+#                                                 No anchor: splits right of the workspace (first worker).
+#                                                 With anchor (a pane ref from a previous spawn-split): splits below it.
+#                                                 prints:  WORKSPACE=<ref>\nSURFACE=<ref>\nPANE=<ref>
+#   swarm.sh refs <n>                           → re-resolve "WORKSPACE/SURFACE" for an existing W<n> (tab or split)
+#   swarm.sh name-orchestrator [title]          → label the caller's TAB (default "🧠 Orchestrator", like the
+#                                                 workers' 🤖 tabs) and rename the caller's WORKSPACE to
+#                                                 "🐙 Team <constellation>" (first free name from TEAM_NAMES —
+#                                                 Orion, Cygnus, Lyra, …; numbered fallback if exhausted)
 #   swarm.sh rename <ws> <surf> <title>         → relabel the worker's tab (call as its task changes)
 #   swarm.sh dispatch <ws> <surf> <brief> <gist>→ send "Read <brief> in full and execute. <gist>" + Enter
 #   swarm.sh send <ws> <surf> <text>            → send raw text + Enter (no brief-file wrapping)
@@ -62,6 +71,24 @@ first_surface_of() {
   local ws="$1"
   "$CMUX" list-pane-surfaces --workspace "$ws" 2>/dev/null | grep -oE 'surface:[0-9]+' | head -1
 }
+# Refs of the session calling this script (the orchestrator), from `cmux identify`.
+caller_field() {
+  "$CMUX" identify 2>/dev/null \
+    | awk -v k="\"$1\"" '/"caller"/{f=1} f && index($0,k){gsub(/[",]/,"",$3); print $3; exit}'
+}
+caller_ws()      { caller_field workspace_ref; }
+caller_surface() { caller_field surface_ref; }
+# Pane that holds a given surface within a workspace (exact-ref match, surface:4 ≠ surface:42).
+pane_of_surface() {
+  local ws="$1" surf="$2" p
+  for p in $("$CMUX" list-panes --workspace "$ws" 2>/dev/null | grep -oE 'pane:[0-9]+'); do
+    if "$CMUX" list-pane-surfaces --workspace "$ws" --pane "$p" 2>/dev/null \
+       | grep -oE 'surface:[0-9]+' | grep -qx "$surf"; then
+      echo "$p"; return 0
+    fi
+  done
+  return 1
+}
 
 # --- commands ----------------------------------------------------------------
 cmd_check_cmux() {
@@ -106,15 +133,110 @@ cmd_spawn() {
   echo "SURFACE=$surf"
 }
 
+# Split-pane spawn: worker lives as a pane in the CALLER's workspace instead of its own tab.
+# new-pane can't take --cwd/--command, so stage in a hidden temp workspace (which can),
+# move the surface over, split it off, and close the empty shell.
+cmd_spawn_split() {
+  need_cmux
+  local n="$1" repo="$2" anchor="${3:-}"
+  local name="🤖 W${n}"
+  local tmpname="⏳ spawn-W${n}"
+  local claude_bin; claude_bin="$(find_claude)"
+  local ws; ws="$(caller_ws)"
+  [[ -n "$ws" ]] || die "could not identify caller workspace (spawn-split must run inside cmux)"
+  "$CMUX" new-workspace \
+    --name "$tmpname" \
+    --cwd "$repo" \
+    --command "$claude_bin --dangerously-skip-permissions" \
+    --focus false >/dev/null
+  local tmp_ws; tmp_ws="$(ws_ref_by_name "$tmpname")"
+  [[ -n "$tmp_ws" ]] || die "could not resolve temp workspace '$tmpname' after new-workspace"
+  local surf; surf="$(first_surface_of "$tmp_ws")"
+  [[ -n "$surf" ]] || die "could not resolve surface ref for $tmp_ws"
+  if [[ -n "$anchor" ]]; then
+    # Stack below the previous worker: join its pane, then split downward.
+    "$CMUX" move-surface --surface "$surf" --pane "$anchor" --focus false >/dev/null
+    "$CMUX" split-off --surface "$surf" down --workspace "$ws" --focus false >/dev/null
+  else
+    # First worker: new column right of the orchestrator.
+    "$CMUX" move-surface --surface "$surf" --workspace "$ws" --focus false >/dev/null
+    "$CMUX" split-off --surface "$surf" right --workspace "$ws" --focus false >/dev/null
+  fi
+  "$CMUX" close-workspace --workspace "$tmp_ws" >/dev/null 2>&1 || true
+  "$CMUX" rename-tab --workspace "$ws" --surface "$surf" "$name" >/dev/null 2>&1 || true
+  # LAZY-PTY GOTCHA, split flavour: the PTY attaches when the pane first RENDERS. The caller's
+  # workspace is normally visible, so this is near-instant — but if the user is viewing another
+  # workspace, force a render by selecting the caller's workspace once.
+  local waited=0
+  until "$CMUX" read-screen --workspace "$ws" --surface "$surf" >/dev/null 2>&1; do
+    (( waited == 5 )) && "$CMUX" select-workspace --workspace "$ws" >/dev/null 2>&1
+    (( waited >= 15 )) && die "PTY did not attach for $surf after 15s"
+    sleep 1; waited=$((waited+1))
+  done
+  local pane; pane="$(pane_of_surface "$ws" "$surf" || true)"
+  echo "WORKSPACE=$ws"
+  echo "SURFACE=$surf"
+  echo "PANE=${pane:-unknown}"
+}
+
 cmd_refs() {
   need_cmux
   local n="$1"
   local name="🤖 W${n}"
-  local ws; ws="$(ws_ref_by_name "$name")"
-  [[ -n "$ws" ]] || die "no workspace named '$name'"
-  local surf; surf="$(first_surface_of "$ws")"
-  echo "WORKSPACE=$ws"
-  echo "SURFACE=$surf"
+  # Tab mode: the worker is its own workspace. (|| true: no match must not trip set -e —
+  # split-mode workers have no workspace of their own, we fall through to the tree scan.)
+  local ws; ws="$(ws_ref_by_name "$name" || true)"
+  if [[ -n "$ws" ]]; then
+    local surf; surf="$(first_surface_of "$ws")"
+    echo "WORKSPACE=$ws"
+    echo "SURFACE=$surf"
+    return 0
+  fi
+  # Split mode: the worker is a surface labelled "🤖 W<n>" somewhere in the tree.
+  # (Best effort — Claude may overwrite the tab title while working; record refs at spawn time.)
+  local line
+  line="$("$CMUX" tree --all 2>/dev/null \
+    | awk -v label="\"${name}\"" '
+        /workspace workspace:[0-9]+/ { match($0, /workspace:[0-9]+/); w=substr($0,RSTART,RLENGTH) }
+        index($0, label) && /surface surface:[0-9]+/ {
+          match($0, /surface:[0-9]+/); print w, substr($0,RSTART,RLENGTH); exit
+        }')"
+  [[ -n "$line" ]] || die "no workspace or surface named '$name'"
+  echo "WORKSPACE=${line%% *}"
+  echo "SURFACE=${line##* }"
+}
+
+# Team workspaces are named after constellations, claimed in this order.
+TEAM_NAMES=(Orion Cygnus Lyra Andromeda Cassiopeia Pegasus Draco Aquila Phoenix
+            Perseus Hydra Centaurus Gemini Leo Scorpius Taurus Corvus Vela Ara Lupus)
+
+# Label the orchestrator so the swarm is legible: 🧠 = orchestrator tab, 🤖 = worker tabs,
+# 🐙 Team <constellation> = the workspace holding the whole team.
+cmd_name_orchestrator() {
+  need_cmux
+  local title="${1:-🧠 Orchestrator}"
+  local ws; ws="$(caller_ws)"
+  [[ -n "$ws" ]] || die "could not identify caller workspace (must run inside cmux)"
+  local surf; surf="$(caller_surface)"
+  [[ -n "$surf" ]] || die "could not identify caller surface"
+  # Tab label — same mechanism as the workers' 🤖 W<n> labels.
+  "$CMUX" rename-tab --workspace "$ws" --surface "$surf" "$title"
+  # Workspace label — keep an existing 🐙 Team name (idempotent re-runs), else claim the
+  # first constellation not already used by another workspace.
+  if "$CMUX" list-workspaces 2>/dev/null | grep -E "${ws}[^0-9]" | grep -qF "🐙 Team "; then
+    return 0
+  fi
+  local team="" t
+  for t in "${TEAM_NAMES[@]}"; do
+    if ! "$CMUX" list-workspaces 2>/dev/null | grep -qF "🐙 Team ${t}"; then team="$t"; break; fi
+  done
+  if [[ -z "$team" ]]; then
+    # All constellations taken — fall back to a numbered team.
+    local n=0
+    while "$CMUX" list-workspaces 2>/dev/null | grep -qF "🐙 Team ${n}"; do n=$((n+1)); done
+    team="${n}"
+  fi
+  "$CMUX" workspace-action --action rename --workspace "$ws" --title "🐙 Team ${team}"
 }
 
 cmd_rename() {
@@ -220,6 +342,8 @@ case "$sub" in
   find-claude)  cmd_find_claude "$@" ;;
   head)         cmd_head "$@" ;;
   spawn)        cmd_spawn "$@" ;;
+  spawn-split)  cmd_spawn_split "$@" ;;
+  name-orchestrator) cmd_name_orchestrator "$@" ;;
   refs)         cmd_refs "$@" ;;
   rename)       cmd_rename "$@" ;;
   dispatch)     cmd_dispatch "$@" ;;
@@ -231,6 +355,6 @@ case "$sub" in
   wait-commit)  cmd_wait_commit "$@" ;;
   worktree)     cmd_worktree "$@" ;;
   ""|-h|--help|help)
-    sed -n '2,40p' "$0" ;;
+    sed -n '2,48p' "$0" ;;
   *) die "unknown subcommand: $sub (run: swarm.sh help)" ;;
 esac
