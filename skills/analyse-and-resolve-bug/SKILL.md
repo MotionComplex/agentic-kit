@@ -162,7 +162,8 @@ lint clean). Reference the changed files.
 **Do not commit or push until the user asks.** When they do:
 
 - Stage only the relevant files (skip build artifacts like `tsconfig.tsbuildinfo`).
-- Commit message: `fix [DXPSM-<id>]: <summary>` with a body explaining the root cause and the fix,
+- Commit message: `fix [<id>]: <summary>` (bare ADO work-item number — never a `DXPSM-` prefix,
+  that's the Confluence service-management project) with a body explaining the root cause and the fix,
   ending with the `Co-Authored-By` trailer the environment specifies.
 - Push the feature branch with `-u origin <branch>`.
 - Offer to open the PR, and ask the target (`release/3.2` if release-bound, else `develop`); link
