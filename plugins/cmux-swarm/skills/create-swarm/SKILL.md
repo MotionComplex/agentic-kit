@@ -159,14 +159,16 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard 3     
 ```
 
 ```
-🐙 Team Orion · 2 worker(s) · 1 ⚙ / 1 💤 · queue 2/5 done
-W0  ⚙ WORKING  fix-auth                       ↑2    4m
-W1  💤 IDLE     —                              ·     ·
+🐙 Team Orion · agentic-kit@main · 1/2 busy · queue 2/5 done
+W0  ⠧ fix-auth                          agentic-kit         +2    4m
+W1  ✓ -                                 agentic-kit-w1       -     -
 ```
 
-Per worker: state (⚙ working / 💤 idle / ❓ unknown / ✖ gone), current task (the dispatch
-gist), commits landed since dispatch (`↑n`), and time since dispatch. The header shows the
-team name, worker counts, and — if you report it — queue progress:
+Per worker: state (animated ⠧ spinner = working, green ✓ = idle, dim ? = unknown,
+red ✖ = gone), current task (the dispatch gist), worktree/repo basename, commits landed
+since dispatch (`+n`, green when > 0), and time since dispatch. The header shows the team
+name, the team repo with its **current branch**, the busy count, and — if you report it —
+queue progress:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue <done> <total>   # update header counter
@@ -181,7 +183,9 @@ How it behaves:
   refresh; retired ones drop off. Disable auto-fit with `spawn-dashboard <interval> 0`.
 - Retire workers via `swarm.sh retire <ws> <surf>` (instead of raw `close-surface` /
   `close-workspace`) so the dashboard stays in sync.
-- Works in both layouts; run `name-orchestrator` first so the header shows the team name.
+- Works in both layouts; run `name-orchestrator` first so the header shows the team
+  name and the team repo (it records the orchestrator's cwd for the `repo@branch` part).
+- Worker data refreshes once per interval; the spinner animates at 4 fps in between.
 
 ## Step 4 — Dispatch tasks (brief files, not pasted prompts)
 

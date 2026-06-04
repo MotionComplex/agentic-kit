@@ -33,9 +33,12 @@
 #   swarm.sh head <repo>                        → prints current HEAD sha (use before dispatch to arm wait-commit)
 #   swarm.sh worktree <repo> <branch> <dir> <base>
 #                                               → git worktree add + symlink node_modules + copy .env* (parallel edits)
-#   swarm.sh spawn-dashboard [interval]         → sticky team-status pane above the orchestrator (auto-fits its height)
-#   swarm.sh dashboard                          → render the team overview once (one line per worker)
-#   swarm.sh dashboard-loop [interval]          → self-refreshing dashboard; runs INSIDE the dashboard pane
+#   swarm.sh spawn-dashboard [interval] [autofit 1|0]
+#                                               → sticky team-status pane above the orchestrator (auto-fits its
+#                                                 height; animated spinner on working workers; repo@branch header)
+#   swarm.sh dashboard [ws] [icon]              → render the team overview once (one line per worker)
+#   swarm.sh dashboard-loop [interval] [autofit] [ws] [surf]
+#                                               → self-refreshing dashboard; runs INSIDE the dashboard pane
 #   swarm.sh queue <done> <total>               → record task-queue progress (shown in the dashboard header)
 #   swarm.sh retire <ws> <surf>                 → close a worker (split pane or tab) + drop it from the dashboard
 #
@@ -106,6 +109,7 @@ pane_of_surface() {
 #   W|<n>|<ws>|<surf>|<repo>|<task>|<dispatch_epoch>|<base_sha>
 #   Q|<done>|<total>
 #   T|<team label>
+#   R|<team repo>   (the orchestrator's cwd, recorded by name-orchestrator)
 # Pinned to /tmp (not $TMPDIR): the dashboard pane is launched by the cmux app and may
 # carry a different TMPDIR than the orchestrator's shell — both must resolve one file.
 # Optional $1 = explicit workspace ref (the dashboard pane passes it; `cmux identify`
@@ -116,13 +120,19 @@ state_file() {
   [[ -n "$ws" ]] || return 1
   echo "/tmp/cmux-swarm-${ws//:/-}.state"
 }
-state_set_team() {  # <label>
+state_set_row() {  # <tag> <value> — replace the single row with this tag
   local f; f="$(state_file)" || return 0
   local tmp="${f}.tmp"
-  awk -F'|' '$1!="T"' "$f" 2>/dev/null > "$tmp" || true
-  echo "T|${1//|/ }" >> "$tmp"
+  awk -F'|' -v t="$1" '$1!=t' "$f" 2>/dev/null > "$tmp" || true
+  echo "$1|${2//|/ }" >> "$tmp"
   mv "$tmp" "$f"
 }
+state_row() {  # <tag> [ws] — read the single row with this tag
+  local f; f="$(state_file "${2:-}")" || return 1
+  [[ -f "$f" ]] || return 1
+  grep "^$1|" "$f" 2>/dev/null | tail -1 | cut -d'|' -f2-
+}
+state_set_team() { state_set_row T "$1"; }
 state_team() {  # [ws]
   local f; f="$(state_file "${1:-}")" || return 1
   [[ -f "$f" ]] || return 1
@@ -293,6 +303,7 @@ cmd_name_orchestrator() {
   [[ -n "$surf" ]] || die "could not identify caller surface"
   # Tab label — same mechanism as the workers' 🤖 W<n> labels.
   "$CMUX" rename-tab --workspace "$ws" --surface "$surf" "$title"
+  state_set_row R "$PWD"   # team repo — shown as repo@branch in the dashboard header
   # Workspace label — keep an existing 🐙 Team name (idempotent re-runs), else claim the
   # first constellation not already used by another workspace. cmux auto-titles can
   # overwrite the workspace label, so the claimed name is also persisted in the state
@@ -434,16 +445,22 @@ cmd_queue() {  # <done> <total>
   mv "$tmp" "$f"
 }
 
-# Render the team overview once. One line per worker:
-#   W0 ⚙ WORKING  fix-auth   ↑2  4m     (state · task · commits since dispatch · time since dispatch)
-# Optional $1 = the team's (orchestrator's) workspace ref; defaults to the caller's.
+# Render the team overview once. Layout (worker rows use single-width glyphs ONLY —
+# double-width emoji are what broke column alignment in v1):
+#   🐙 Team Orion · agentic-kit@main · 1/2 busy · queue 2/5 done
+#   W0 ⠧ fix-auth                          agentic-kit         ↑2    4m
+#   W1 ✓ —                                 agentic-kit-w1       ·     ·
+# $1 = the team's (orchestrator's) workspace ref; defaults to the caller's.
+# $2 = icon for WORKING rows (default ⠿). The dashboard-loop passes a \x01 placeholder
+#      and substitutes rotating spinner frames per tick without re-fetching the data.
 cmd_dashboard() {
   need_cmux
-  local f ws now
-  ws="${1:-}"
+  local ws="${1:-}" spin="${2:-⠿}"
   [[ -n "$ws" ]] || ws="$(caller_ws)"
-  f="$(state_file "$ws")" || die "must run inside cmux"
-  now="$(date +%s)"
+  local f; f="$(state_file "$ws")" || die "must run inside cmux"
+  local now; now="$(date +%s)"
+  local dim=$'\e[2m' off=$'\e[0m' grn=$'\e[32m' ylw=$'\e[33m' red=$'\e[31m' bld=$'\e[1m'
+  local sep=" ${dim}·${off} "
   # Team label: prefer the persisted T row (cmux auto-titles can overwrite the
   # workspace label), fall back to the workspace's current title.
   local team
@@ -453,34 +470,54 @@ cmd_dashboard() {
       | sed -E 's/^[*[:space:]]*workspace:[0-9]+[[:space:]]+//; s/[[:space:]]*\[selected\][[:space:]]*$//')"
   fi
   [[ -n "$team" ]] || team="(team)"
+  local hdr="${bld}${team}${off}"
+  # repo@branch — the team repo from the R row, else the first worker's repo.
+  local trepo tbranch=""
+  trepo="$(state_row R "$ws" || true)"
+  if [[ -z "$trepo" && -f "$f" ]]; then
+    trepo="$(grep '^W|' "$f" 2>/dev/null | head -1 | cut -d'|' -f5 || true)"
+  fi
+  if [[ -n "$trepo" ]]; then
+    tbranch="$(git -C "$trepo" branch --show-current 2>/dev/null || true)"
+    [[ -n "$tbranch" ]] || tbranch="$(git -C "$trepo" rev-parse --short HEAD 2>/dev/null || true)"
+    hdr+="${sep}$(basename "$trepo")${dim}@${off}${tbranch:-?}"
+  fi
   if [[ ! -f "$f" ]] || ! grep -q '^W|' "$f"; then
-    echo "$team · no workers registered yet"
+    printf '%s%s%sno workers yet%s\n' "$hdr" "$sep" "$dim" "$off"
     return 0
   fi
-  local queue=""
-  local qline; qline="$(grep '^Q|' "$f" 2>/dev/null | tail -1 || true)"
-  if [[ -n "$qline" ]]; then
-    queue=" · queue $(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline") done"
-  fi
-  local rows="" working=0 idle=0 count=0
-  local tag n wws wsurf repo task epoch sha st icon screen commits age
+  local rows="" busy=0 gone=0 count=0
+  local tag n wws wsurf repo task epoch sha icon screen commits wt age
   while IFS='|' read -r tag n wws wsurf repo task epoch sha; do
     [[ "$tag" == "W" ]] || continue
     count=$((count+1))
     if screen="$("$CMUX" read-screen --workspace "$wws" --surface "$wsurf" 2>/dev/null)"; then
-      if   grep -qiF "esc to interrupt" <<<"$screen"; then st="WORKING"; icon="⚙";  working=$((working+1))
-      elif grep -qiF "for agents"       <<<"$screen"; then st="IDLE";    icon="💤"; idle=$((idle+1))
-      else st="UNKNOWN"; icon="❓"; fi
-    else st="GONE"; icon="✖"; fi
-    commits="·"
+      if   grep -qiF "esc to interrupt" <<<"$screen"; then icon="${ylw}${spin}${off}"; busy=$((busy+1))
+      elif grep -qiF "for agents"       <<<"$screen"; then icon="${grn}✓${off}"
+      else icon="${dim}?${off}"; fi
+    else icon="${red}✖${off}"; gone=$((gone+1)); fi
+    # Pad plain text first, colorize after — escape bytes would skew printf's %-N
+    # padding. Padded fields are ASCII-only for the same reason (printf pads by bytes).
+    commits="$(printf '%3s' '-')"; commits="${dim}${commits}${off}"
     if [[ -n "$repo" && -n "$sha" ]]; then
-      commits="↑$(git -C "$repo" rev-list --count "${sha}..HEAD" 2>/dev/null || echo '?')"
+      local cnum; cnum="$(git -C "$repo" rev-list --count "${sha}..HEAD" 2>/dev/null || echo '?')"
+      commits="$(printf '%3s' "+${cnum}")"
+      if [[ "$cnum" != "0" ]]; then commits="${grn}${commits}${off}"; else commits="${dim}${commits}${off}"; fi
     fi
-    age="·"
-    if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(fmt_age $((now - epoch)))"; fi
-    rows+="$(printf 'W%-2s %s %-7s  %-30.30s %4s %5s' "$n" "$icon" "$st" "${task:-—}" "$commits" "$age")"$'\n'
+    age="$(printf '%4s' '-')"
+    if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(printf '%4s' "$(fmt_age $((now - epoch)))")"; fi
+    age="${dim}${age}${off}"
+    task="${task:--}"; task="$(printf '%-34s' "${task:0:34}")"
+    wt="$(basename "${repo:--}")"; wt="$(printf '%-18s' "${wt:0:18}")"
+    rows+="$(printf 'W%-2s' "$n") ${icon} ${task} ${dim}${wt}${off} ${commits} ${age}"$'\n'
   done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
-  printf '%s · %d worker(s) · %d ⚙ / %d 💤%s\n' "$team" "$count" "$working" "$idle" "$queue"
+  hdr+="${sep}${busy}/${count} busy"
+  if (( gone > 0 )); then hdr+="${sep}${red}${gone} gone${off}"; fi
+  local qline; qline="$(grep '^Q|' "$f" 2>/dev/null | tail -1 || true)"
+  if [[ -n "$qline" ]]; then
+    hdr+="${sep}queue $(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline") done"
+  fi
+  printf '%s\n' "$hdr"
   printf '%s' "$rows"
 }
 
@@ -538,16 +575,31 @@ autofit_pane() {  # <content> <ws> <surf>
 # ws/surf = the pane's own refs, passed explicitly by spawn-dashboard: `cmux identify`
 # inside this pane falls back to the FOCUSED surface (its spawn-time env points at the
 # closed staging workspace), so self-resolution must not go through identify.
+# Data is fetched once per interval; while any worker is WORKING the \x01 icon
+# placeholder is re-rendered with rotating spinner frames at 4 fps. Frames live in an
+# array (not a sliced string) so a C-locale pane can't split the multibyte glyphs.
 cmd_dashboard_loop() {
-  local interval="${1:-5}" autofit="${2:-1}" ws="${3:-}" surf="${4:-}" out
+  local interval="${1:-5}" autofit="${2:-1}" ws="${3:-}" surf="${4:-}"
+  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) idx=0 steps raw out k
   set +e   # the loop is a daemon — render errors must not kill it
   tput civis 2>/dev/null || true
   trap 'tput cnorm 2>/dev/null || true' EXIT
+  steps=$(( interval * 4 )); (( steps >= 1 )) || steps=1
   while true; do
-    out="$(cmd_dashboard "$ws" 2>&1 || true)"
-    printf '\033[H\033[2J%s\n' "$out"
-    if [[ "$autofit" == "1" ]]; then autofit_pane "$out" "$ws" "$surf" || true; fi
-    sleep "$interval"
+    raw="$(cmd_dashboard "$ws" $'\x01' 2>&1 || true)"
+    if [[ "$autofit" == "1" ]]; then autofit_pane "$raw" "$ws" "$surf" || true; fi
+    if [[ "$raw" == *$'\x01'* ]]; then
+      for (( k = 0; k < steps; k++ )); do
+        out="${raw//$'\x01'/${frames[idx % 10]}}"; idx=$((idx+1))
+        out="${out//$'\n'/$'\e[K\n'}"                 # clear-to-EOL per line: no flicker,
+        printf '\033[H%s\033[K\033[J' "$out"          # no full-screen clear needed
+        sleep 0.25
+      done
+    else
+      out="${raw//$'\n'/$'\e[K\n'}"
+      printf '\033[H%s\033[K\033[J' "$out"
+      sleep "$interval"
+    fi
   done
 }
 
