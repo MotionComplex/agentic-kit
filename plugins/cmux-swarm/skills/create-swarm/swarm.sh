@@ -51,6 +51,9 @@
 #   2. footer marker (status/wait-idle) — "esc to interrupt"=working, "for agents"=idle.
 #   3. anchored DONE:/BLOCKED: <task-id> in the final screen line (caller greps `read`).
 set -euo pipefail
+# Char-based (not byte-based) string lengths — the dashboard's border math measures
+# strings containing multibyte glyphs, and the dashboard pane may run with locale C.
+export LC_ALL=en_US.UTF-8
 
 # --- binary resolution -------------------------------------------------------
 CMUX_APP_BIN="/Applications/cmux.app/Contents/Resources/bin/cmux"
@@ -447,14 +450,18 @@ cmd_queue() {  # <done> <total> — or "clear"/no args to remove the counter fro
   mv "$tmp" "$f"
 }
 
-# Render the team overview once. Layout — text hierarchy in terminal terms: BOLD for
-# the team name and the column labels, normal for live values, DIM for labels/metadata;
-# wide 2-space gutters and a blank line separating the team section from the table:
-#    🐙 Team Orion    agentic-kit@main    busy 1/2    queue 2/5
-#
-#          TASK                                  WORKTREE            COMMIT    AGE
-#    W0  ⠧  fix-auth                              agentic-kit            +2     4m
-#    W1  ✓  -                                     agentic-kit-w1          -      -
+# Render the team overview once. Layout — a dim rounded box with the bold team name
+# embedded in the top border; inside: an info line (live values, dim labels), a blank
+# spacer, bold column labels, then one row per worker:
+#    ╭─ 🐙 Team Orion ───────────────────────────────────────────────────────────╮
+#    │ agentic-kit@main    busy 1/2    queue 2/5                                 │
+#    │                                                                           │
+#    │       TASK                                  WORKTREE          COMMIT  AGE │
+#    │ W0  ⠧  fix-auth                             agentic-kit           +2   4m │
+#    ╰───────────────────────────────────────────────────────────────────────────╯
+# Right-border alignment: every interior line is padded to a fixed inner width; the
+# plain (escape-free) width is tracked alongside each colored string, and worker/header
+# rows have constant width by construction (ASCII-only printf-padded fields).
 # Worker rows use single-width glyphs and ASCII-only padded fields (printf pads by
 # bytes, double-width emoji and multibyte chars are what broke alignment in v1).
 # $1 = the team's (orchestrator's) workspace ref; defaults to the caller's.
@@ -477,7 +484,6 @@ cmd_dashboard() {
       | sed -E 's/^[*[:space:]]*workspace:[0-9]+[[:space:]]+//; s/[[:space:]]*\[selected\][[:space:]]*$//')"
   fi
   [[ -n "$team" ]] || team="(team)"
-  local hdr=" ${bld}${team}${off}"
   # repo@branch — the team repo from the R row, else the first worker's repo.
   local trepo tbranch=""
   trepo="$(state_row R "$ws" || true)"
@@ -487,14 +493,35 @@ cmd_dashboard() {
   if [[ -n "$trepo" ]]; then
     tbranch="$(git -C "$trepo" branch --show-current 2>/dev/null || true)"
     [[ -n "$tbranch" ]] || tbranch="$(git -C "$trepo" rev-parse --short HEAD 2>/dev/null || true)"
-    hdr+="${gap}$(basename "$trepo")${dim}@${off}${tbranch:-?}"
   fi
-  # Table geometry. Row:  " %-3s  %s  %-38s  %-18s  %6s  %5s".  A BLANK line separates
-  # the team section from the table (a dim ─ divider is near-invisible on dark themes),
-  # and the column labels are BOLD so the header row reads as a header, not a value row.
+  # ----- box helpers. Interior width WIN; table row width is 82 by construction:
+  # " %-3s  %s  %-38s  %-18s  %6s  %5s" = 1+3+2+1+2+38+2+18+2+6+2+5.
+  local WIN=83
+  local tdw=${#team}
+  if [[ "$team" == *"🐙"* ]]; then tdw=$((tdw+1)); fi   # emoji renders double-width
+  local fill=$(( WIN - tdw - 3 ))
+  if (( fill < 1 )); then fill=1; fi
+  local btop=" ${dim}╭─${off} ${bld}${team}${off} ${dim}$(printf '─%.0s' $(seq "$fill"))╮${off}"
+  local bbot=" ${dim}╰$(printf '─%.0s' $(seq "$WIN"))╯${off}"
+  local bblank=" ${dim}│${off}$(printf '%*s' "$WIN" '')${dim}│${off}"
+  box() {  # <colored content> <plain width> → one bordered interior line
+    local pad=$(( WIN - $2 ))
+    if (( pad < 0 )); then pad=0; fi
+    printf ' %s│%s%s%*s%s│%s\n' "$dim" "$off" "$1" "$pad" '' "$dim" "$off"
+  }
+  # Info line — lives INSIDE the box; the top border carries only the team name.
+  local info="" infop=""
+  if [[ -n "$trepo" ]]; then
+    local rb; rb="$(basename "$trepo")"
+    info+=" ${rb}${dim}@${off}${tbranch:-?}"
+    infop+=" ${rb}@${tbranch:-?}"
+  fi
   local colhdr=" ${bld}$(printf '%-3s  %s  %-38s  %-18s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'COMMIT' 'AGE')${off}"
   if [[ ! -f "$f" ]] || ! grep -q '^W|' "$f"; then
-    printf '%s\n\n %sno workers yet%s\n' "$hdr" "$dim" "$off"
+    printf '%s\n' "$btop"
+    if [[ -n "$infop" ]]; then box "$info" "${#infop}"; fi
+    box " ${dim}no workers yet${off}" 15
+    printf '%s\n' "$bbot"
     return 0
   fi
   local rows="" busy=0 gone=0 count=0
@@ -522,16 +549,26 @@ cmd_dashboard() {
     task="${task:--}"; tcol="$(printf '%-38s' "${task:0:38}")"
     if (( working )); then tcol="${tcol}"; else tcol="${dim}${tcol}${off}"; fi
     wt="$(basename "${repo:--}")"; wt="$(printf '%-18s' "${wt:0:18}")"
-    rows+=" $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${commits}  ${age}"$'\n'
+    rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${commits}  ${age}" 82)"$'\n'
   done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
-  hdr+="${gap}${dim}busy${off} ${busy}/${count}"
-  if (( gone > 0 )); then hdr+="${gap}${red}${gone} gone${off}"; fi
+  info+="${gap}${dim}busy${off} ${busy}/${count}"
+  infop+="${gap}busy ${busy}/${count}"
+  if (( gone > 0 )); then
+    info+="${gap}${red}${gone} gone${off}"
+    infop+="${gap}${gone} gone"
+  fi
   local qline; qline="$(grep '^Q|' "$f" 2>/dev/null | tail -1 || true)"
   if [[ -n "$qline" ]]; then
-    hdr+="${gap}${dim}queue${off} $(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline")"
+    local qv; qv="$(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline")"
+    info+="${gap}${dim}queue${off} ${qv}"
+    infop+="${gap}queue ${qv}"
   fi
-  printf '%s\n\n%s\n' "$hdr" "$colhdr"
+  printf '%s\n' "$btop"
+  box "$info" "${#infop}"
+  printf '%s\n' "$bblank"
+  box "$colhdr" 82
   printf '%s' "$rows"
+  printf '%s\n' "$bbot"
 }
 
 # Auto-fit the dashboard pane's height to its content (runs inside the pane, so
@@ -545,14 +582,13 @@ autofit_pane() {  # <content> <ws> <surf>
   [[ -n "$ws" && -n "$surf" ]] || return 0
   want=$(( $(wc -l <<<"$content") + 1 ))
   (( want >= 3 )) || want=3
-  rows="$(tput lines 2>/dev/null || echo 0)"
-  (( rows > 0 )) || return 0
-  delta=$(( want - rows ))
-  if (( delta == 0 )); then return 0; fi
   pane="$(pane_of_surface "$ws" "$surf" || true)"; [[ -n "$pane" ]] || return 0
-  # Per-pane geometry "ref|x|y|cell_h" from the pretty-printed rpc JSON (alphabetical
-  # keys: cell_height_px … pixel_frame{height,width,x,y} … ref … rows; exact-match $1
-  # so selected_surface_ref/surface_refs lines don't hit the "ref" rule).
+  # Per-pane geometry "ref|x|y|cell_h|rows" from the pretty-printed rpc JSON
+  # (alphabetical keys: cell_height_px … pixel_frame{height,width,x,y} … ref … rows;
+  # exact-match $1 so selected_surface_ref/surface_refs lines don't hit the "ref" rule).
+  # The pane's CURRENT rows come from here too — NOT from `tput lines`: the PTY of a
+  # staged-then-moved surface keeps the 80x24 default winsize and never learns its
+  # real size, so tput reports 24 regardless of the actual grid.
   local geom
   geom="$("$CMUX" rpc pane.list "{\"workspace\":\"$ws\"}" 2>/dev/null | awk '
     function v(s) { gsub(/[",]/, "", s); sub(/\..*$/, "", s); return s }
@@ -561,20 +597,24 @@ autofit_pane() {  # <content> <ws> <surf>
     pf && $1 == "\"x\""        { x = v($3) }
     pf && $1 == "\"y\""        { y = v($3) }
     $1 == "\"ref\""            { ref = v($3); pf = 0 }
-    $1 == "\"rows\""           { print ref "|" x "|" y "|" cell }
+    $1 == "\"rows\""           { print ref "|" x "|" y "|" cell "|" v($3) }
   ')"
-  local self_x="" self_y="" cell=17 ref x y c
-  while IFS='|' read -r ref x y c; do
-    if [[ "$ref" == "$pane" ]]; then self_x="$x"; self_y="$y"; cell="${c:-17}"; fi
+  local self_x="" self_y="" cell=17 ref x y c r
+  rows=0
+  while IFS='|' read -r ref x y c r; do
+    if [[ "$ref" == "$pane" ]]; then self_x="$x"; self_y="$y"; cell="${c:-17}"; rows="${r:-0}"; fi
   done <<<"$geom"
   [[ -n "$self_y" ]] || return 0
+  (( rows > 0 )) || return 0
+  delta=$(( want - rows ))
+  if (( delta == 0 )); then return 0; fi
   local px=$(( (delta < 0 ? -delta : delta) * cell ))
   if (( delta > 0 )); then
     "$CMUX" resize-pane --pane "$pane" --workspace "$ws" -D --amount "$px" >/dev/null 2>&1 || true
   else
     # Nearest pane below in the same column.
     local below="" below_y=999999
-    while IFS='|' read -r ref x y c; do
+    while IFS='|' read -r ref x y c r; do
       if [[ "$ref" != "$pane" && "$x" == "$self_x" ]] && (( y > self_y && y < below_y )); then
         below="$ref"; below_y="$y"
       fi
