@@ -159,16 +159,18 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard 3     
 ```
 
 ```
-🐙 Team Orion · agentic-kit@main · 1/2 busy · queue 2/5 done
-W0  ⠧ fix-auth                          agentic-kit         +2    4m
-W1  ✓ -                                 agentic-kit-w1       -     -
+ 🐙 Team Orion    agentic-kit@main    busy 1/2    queue 2/5
+ ─────────────────────────────────────────────────────────────────────────────────
+         TASK                                    WORKTREE            COMMIT    AGE
+ W0   ⠧  fix-auth                                agentic-kit             +2     4m
+ W1   ✓  -                                       agentic-kit-w1           -      -
 ```
 
 Per worker: state (animated ⠧ spinner = working, green ✓ = idle, dim ? = unknown,
-red ✖ = gone), current task (the dispatch gist), worktree/repo basename, commits landed
-since dispatch (`+n`, green when > 0), and time since dispatch. The header shows the team
-name, the team repo with its **current branch**, the busy count, and — if you report it —
-queue progress:
+red ✖ = gone), current task (the dispatch gist — bright while working, dim once idle),
+worktree/repo basename, commits landed since dispatch (`+n`, green when > 0), and time
+since dispatch. The header shows the team name (bold), the team repo with its **current
+branch**, the busy count, and — if you report it — queue progress:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue <done> <total>   # update header counter

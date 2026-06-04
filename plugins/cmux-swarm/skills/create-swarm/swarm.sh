@@ -445,11 +445,16 @@ cmd_queue() {  # <done> <total>
   mv "$tmp" "$f"
 }
 
-# Render the team overview once. Layout (worker rows use single-width glyphs ONLY —
-# double-width emoji are what broke column alignment in v1):
-#   🐙 Team Orion · agentic-kit@main · 1/2 busy · queue 2/5 done
-#   W0 ⠧ fix-auth                          agentic-kit         ↑2    4m
-#   W1 ✓ —                                 agentic-kit-w1       ·     ·
+# Render the team overview once. Layout — text hierarchy in terminal terms: BOLD for
+# the team name (primary), normal for live values, DIM for labels/metadata (tertiary);
+# wide 2-space gutters, a divider, and labelled columns so numbers aren't floating:
+#    🐙 Team Orion    agentic-kit@main    busy 1/2    queue 2/5
+#    ──────────────────────────────────────────────────────────────────────────────
+#          TASK                                  WORKTREE            COMMIT    AGE
+#    W0  ⠧  fix-auth                              agentic-kit            +2     4m
+#    W1  ✓  -                                     agentic-kit-w1          -      -
+# Worker rows use single-width glyphs and ASCII-only padded fields (printf pads by
+# bytes, double-width emoji and multibyte chars are what broke alignment in v1).
 # $1 = the team's (orchestrator's) workspace ref; defaults to the caller's.
 # $2 = icon for WORKING rows (default ⠿). The dashboard-loop passes a \x01 placeholder
 #      and substitutes rotating spinner frames per tick without re-fetching the data.
@@ -460,7 +465,7 @@ cmd_dashboard() {
   local f; f="$(state_file "$ws")" || die "must run inside cmux"
   local now; now="$(date +%s)"
   local dim=$'\e[2m' off=$'\e[0m' grn=$'\e[32m' ylw=$'\e[33m' red=$'\e[31m' bld=$'\e[1m'
-  local sep=" ${dim}·${off} "
+  local gap='    '
   # Team label: prefer the persisted T row (cmux auto-titles can overwrite the
   # workspace label), fall back to the workspace's current title.
   local team
@@ -470,7 +475,7 @@ cmd_dashboard() {
       | sed -E 's/^[*[:space:]]*workspace:[0-9]+[[:space:]]+//; s/[[:space:]]*\[selected\][[:space:]]*$//')"
   fi
   [[ -n "$team" ]] || team="(team)"
-  local hdr="${bld}${team}${off}"
+  local hdr=" ${bld}${team}${off}"
   # repo@branch — the team repo from the R row, else the first worker's repo.
   local trepo tbranch=""
   trepo="$(state_row R "$ws" || true)"
@@ -480,44 +485,49 @@ cmd_dashboard() {
   if [[ -n "$trepo" ]]; then
     tbranch="$(git -C "$trepo" branch --show-current 2>/dev/null || true)"
     [[ -n "$tbranch" ]] || tbranch="$(git -C "$trepo" rev-parse --short HEAD 2>/dev/null || true)"
-    hdr+="${sep}$(basename "$trepo")${dim}@${off}${tbranch:-?}"
+    hdr+="${gap}$(basename "$trepo")${dim}@${off}${tbranch:-?}"
   fi
+  # Table geometry. Row:  " %-3s  %s  %-38s  %-18s  %6s  %5s"  → 80 cols total.
+  local divider=" ${dim}$(printf '─%.0s' $(seq 81))${off}"
+  local colhdr=" ${dim}$(printf '%-3s  %s  %-38s  %-18s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'COMMIT' 'AGE')${off}"
   if [[ ! -f "$f" ]] || ! grep -q '^W|' "$f"; then
-    printf '%s%s%sno workers yet%s\n' "$hdr" "$sep" "$dim" "$off"
+    printf '%s\n%s\n %sno workers yet%s\n' "$hdr" "$divider" "$dim" "$off"
     return 0
   fi
   local rows="" busy=0 gone=0 count=0
-  local tag n wws wsurf repo task epoch sha icon screen commits wt age
+  local tag n wws wsurf repo task epoch sha icon screen commits wt age tcol
   while IFS='|' read -r tag n wws wsurf repo task epoch sha; do
     [[ "$tag" == "W" ]] || continue
     count=$((count+1))
+    local working=0
     if screen="$("$CMUX" read-screen --workspace "$wws" --surface "$wsurf" 2>/dev/null)"; then
-      if   grep -qiF "esc to interrupt" <<<"$screen"; then icon="${ylw}${spin}${off}"; busy=$((busy+1))
+      if   grep -qiF "esc to interrupt" <<<"$screen"; then icon="${ylw}${spin}${off}"; busy=$((busy+1)); working=1
       elif grep -qiF "for agents"       <<<"$screen"; then icon="${grn}✓${off}"
       else icon="${dim}?${off}"; fi
     else icon="${red}✖${off}"; gone=$((gone+1)); fi
-    # Pad plain text first, colorize after — escape bytes would skew printf's %-N
-    # padding. Padded fields are ASCII-only for the same reason (printf pads by bytes).
-    commits="$(printf '%3s' '-')"; commits="${dim}${commits}${off}"
+    # Pad plain text first, colorize after — escape bytes would skew printf's padding.
+    commits="$(printf '%6s' '-')"; commits="${dim}${commits}${off}"
     if [[ -n "$repo" && -n "$sha" ]]; then
       local cnum; cnum="$(git -C "$repo" rev-list --count "${sha}..HEAD" 2>/dev/null || echo '?')"
-      commits="$(printf '%3s' "+${cnum}")"
+      commits="$(printf '%6s' "+${cnum}")"
       if [[ "$cnum" != "0" ]]; then commits="${grn}${commits}${off}"; else commits="${dim}${commits}${off}"; fi
     fi
-    age="$(printf '%4s' '-')"
-    if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(printf '%4s' "$(fmt_age $((now - epoch)))")"; fi
+    age="$(printf '%5s' '-')"
+    if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(printf '%5s' "$(fmt_age $((now - epoch)))")"; fi
     age="${dim}${age}${off}"
-    task="${task:--}"; task="$(printf '%-34s' "${task:0:34}")"
+    # Hierarchy: the ACTIVE task is the loudest cell on the row; finished/idle tasks dim.
+    task="${task:--}"; tcol="$(printf '%-38s' "${task:0:38}")"
+    if (( working )); then tcol="${tcol}"; else tcol="${dim}${tcol}${off}"; fi
     wt="$(basename "${repo:--}")"; wt="$(printf '%-18s' "${wt:0:18}")"
-    rows+="$(printf 'W%-2s' "$n") ${icon} ${task} ${dim}${wt}${off} ${commits} ${age}"$'\n'
+    rows+=" $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${commits}  ${age}"$'\n'
   done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
-  hdr+="${sep}${busy}/${count} busy"
-  if (( gone > 0 )); then hdr+="${sep}${red}${gone} gone${off}"; fi
+  hdr+="${gap}${dim}busy${off} ${busy}/${count}"
+  if (( gone > 0 )); then hdr+="${gap}${red}${gone} gone${off}"; fi
   local qline; qline="$(grep '^Q|' "$f" 2>/dev/null | tail -1 || true)"
   if [[ -n "$qline" ]]; then
-    hdr+="${sep}queue $(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline") done"
+    hdr+="${gap}${dim}queue${off} $(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline")"
   fi
-  printf '%s\n' "$hdr"
+  printf '%s\n%s\n%s\n' "$hdr" "$divider" "$colhdr"
   printf '%s' "$rows"
 }
 
