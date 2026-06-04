@@ -41,8 +41,9 @@ Call it; don't re-derive the commands each run. `swarm.sh help` lists subcommand
 ## Step 1 — How many agents?
 
 Ask the user the team size. **Default 3** = 1 orchestrator (this session) + 2 workers
-(`W0`, `W1`). Use the AskUserQuestion tool with options like `2 (1+1)`, `3 (1+2,
-recommended)`, `4 (1+3)`, `5 (1+4)`. The worker count is `N − 1`, numbered `W0…W<N-2>`.
+(`W0`, `W1`). Use the AskUserQuestion tool with options like `3 (1+2, recommended)`,
+`4 (1+3)`, `5 (1+4)`, `Dynamic (scale on demand)`. A fixed worker count is `N − 1`,
+numbered `W0…W<N-2>`; **Dynamic** spawns workers lazily as tasks demand (see below).
 
 Also clarify, if not obvious:
 - **Layout?** Default to **split view** for ≤ 4 workers (everything in one workspace);
@@ -51,6 +52,26 @@ Also clarify, if not obvious:
 - **Same repo or separate?** If multiple workers will **edit the same working tree**, you
   need **git worktrees** (Step 5). Read-only/analysis workers don't.
 - **Target repo** for the workers (defaults to the orchestrator's cwd).
+
+### Dynamic mode (scale on demand)
+
+If the user picked **Dynamic**, don't pre-spawn a fixed team in Step 3 — spawn lazily:
+
+- **Start with zero workers** (or one, if a task is already queued). Whenever a
+  dispatchable task exists and no worker is `IDLE`, spawn the next worker.
+- **Reuse before spawning.** Check existing workers with `swarm.sh status` — if one is
+  idle, `swarm.sh reset` it and dispatch there instead of growing the team.
+- **Keep a monotonic index counter.** The next worker is always `W<next>`; never reuse a
+  retired worker's number, so labels and `refs <n>` stay unambiguous.
+- **Cap the team.** Default max **4 workers**; ask the user before spawning beyond it.
+- **Layout:** split view is fine while the team stays ≤ 4 — record each new worker's
+  `PANE` so the next `spawn-split` can anchor below it. If the team may grow beyond 4,
+  prefer tabs.
+- **Scale down.** When the task queue empties, retire workers that stay idle (Step 8);
+  keep one warm if more work is likely.
+
+Everything else (bootstrap, spawn mechanics, dispatch, worktrees, monitoring) is
+identical — dynamic mode only changes *when* you spawn and retire.
 
 ## Step 2 — Bootstrap cmux (install-if-missing)
 
@@ -71,6 +92,9 @@ workspace). If `check-cmux` is MISSING you cannot be running in cmux — install
 user relaunch Claude inside cmux.
 
 ## Step 3 — Spawn the workers
+
+(In **dynamic mode**, run the spawn steps below per worker at the moment a task needs
+one, not all upfront — the mechanics are the same.)
 
 First, label this session as the team's brain — its **tab** becomes `🧠 Orchestrator` and
 its **workspace** becomes `🐙 Team <constellation>` (first free name from `TEAM_NAMES`; idempotent):
