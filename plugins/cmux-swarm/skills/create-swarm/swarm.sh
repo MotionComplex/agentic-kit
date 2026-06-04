@@ -39,7 +39,7 @@
 #   swarm.sh dashboard [ws] [icon]              → render the team overview once (one line per worker)
 #   swarm.sh dashboard-loop [interval] [autofit] [ws] [surf]
 #                                               → self-refreshing dashboard; runs INSIDE the dashboard pane
-#   swarm.sh queue <done> <total>               → record task-queue progress (shown in the dashboard header)
+#   swarm.sh queue <done> <total>               → record shipped/total task progress (header shows "shipped d/t")
 #   swarm.sh retire <ws> <surf>                 → close a worker (split pane or tab) + drop it from the dashboard
 #
 # Team state: spawn/dispatch/reset record workers in ${TMPDIR}/cmux-swarm-<orchestrator-ws>.state
@@ -498,14 +498,17 @@ cmd_queue() {  # <done> <total> — or "clear"/no args to remove the counter fro
 # Render the team overview once. Layout — a dim rounded box; the top border carries the
 # bold team name (left) and the team overview (right): repo@branch · busy · queue.
 # Inside: a blank spacer, bold column labels, then one row per worker:
-#    ╭─ 🐙 Team Orion ─────────────────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
-#    │                                                                                         │
-#    │       TASK                          WORKTREE        PORT    NETWORK          COMMIT AGE │
-#    │ W0  ⠧  fix-auth                     agentic-kit     :5173   192.168.1.7:5173     +2  4m │
-#    ╰─────────────────────────────────────────────────────────────────────────────────────────╯
+#    ╭─ 🐙 Team Orion ───────────────────────────────── agentic-kit@main · busy 1/2 · shipped 2/5 ─╮
+#    │                                                                                             │
+#    │       TASK                      WORKTREE      PORT    NETWORK           STATUS         AGE │
+#    │ W0  ⠧  fix-auth                 agentic-kit   :5173   192.168.1.7:5173  +2 ahead        4m │
+#    │ W1  ✓  dark-mode                ak-w1         :5174   -                 merged         12m │
+#    ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
 # PORT/NETWORK are auto-detected per refresh (lsof): listening TCP servers whose process
 # cwd is inside the worker's repo/worktree. NETWORK shows the LAN ip:port (green) when the
 # server is bound on all interfaces — i.e. reachable from phones on the same network.
+# STATUS is the task's git lifecycle (open → wip → +n ahead → +n pushed → merged), derived
+# from the worker's worktree against the team repo's HEAD; see the legend in cmd_dashboard.
 # If the overview can't fit the top border (long branch names), it falls back to a
 # right-aligned interior line.
 # Right-border alignment: every interior line is padded to a fixed inner width; the
@@ -522,7 +525,7 @@ cmd_dashboard() {
   [[ -n "$ws" ]] || ws="$(caller_ws)"
   local f; f="$(state_file "$ws")" || die "must run inside cmux"
   local now; now="$(date +%s)"
-  local dim=$'\e[2m' off=$'\e[0m' grn=$'\e[32m' ylw=$'\e[33m' red=$'\e[31m' bld=$'\e[1m'
+  local dim=$'\e[2m' off=$'\e[0m' grn=$'\e[32m' ylw=$'\e[33m' red=$'\e[31m' bld=$'\e[1m' cyn=$'\e[36m'
   # Team label: prefer the persisted T row (cmux auto-titles can overwrite the
   # workspace label), fall back to the workspace's current title.
   local team
@@ -542,9 +545,9 @@ cmd_dashboard() {
     tbranch="$(git -C "$trepo" branch --show-current 2>/dev/null || true)"
     [[ -n "$tbranch" ]] || tbranch="$(git -C "$trepo" rev-parse --short HEAD 2>/dev/null || true)"
   fi
-  # ----- box helpers. Interior width WIN; table row width is 99 by construction:
-  # " %-3s  %s  %-28s  %-14s  %-6s  %-21s  %6s  %5s" = 1+3+2+1+2+28+2+14+2+6+2+21+2+6+2+5.
-  local WIN=100
+  # ----- box helpers. Interior width WIN; table row width is 103 by construction:
+  # " %-3s  %s  %-28s  %-14s  %-6s  %-21s  %-10s  %5s" = 1+3+2+1+2+28+2+14+2+6+2+21+2+10+2+5.
+  local WIN=104
   local tdw=${#team}
   if [[ "$team" == *"🐙"* ]]; then tdw=$((tdw+1)); fi   # emoji renders double-width
   local bbot=" ${dim}╰$(printf '─%.0s' $(seq "$WIN"))╯${off}"
@@ -582,7 +585,7 @@ cmd_dashboard() {
     if (( ipad < 0 )); then ipad=0; fi
     box "$(printf '%*s' "$ipad" '')${info}" $(( ipad + ${#infop} ))
   }
-  local colhdr=" ${bld}$(printf '%-3s  %s  %-28s  %-14s  %-6s  %-21s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'PORT' 'NETWORK' 'COMMIT' 'AGE')${off}"
+  local colhdr=" ${bld}$(printf '%-3s  %s  %-28s  %-14s  %-6s  %-21s  %-10s  %5s' '' ' ' 'TASK' 'WORKTREE' 'PORT' 'NETWORK' 'STATUS' 'AGE')${off}"
   # Dev-server detection: one lsof snapshot per render, filtered per worker row.
   local psnap lan
   psnap="$(ports_snapshot || true)"
@@ -596,7 +599,7 @@ cmd_dashboard() {
     return 0
   fi
   local rows="" busy=0 gone=0 count=0
-  local tag n wws wsurf repo task epoch sha icon screen commits wt age tcol
+  local tag n wws wsurf repo task epoch sha icon screen wt age tcol
   while IFS='|' read -r tag n wws wsurf repo task epoch sha; do
     [[ "$tag" == "W" ]] || continue
     count=$((count+1))
@@ -606,13 +609,45 @@ cmd_dashboard() {
       elif grep -qiF "for agents"       <<<"$screen"; then icon="${grn}✓${off}"
       else icon="${dim}?${off}"; fi
     else icon="${red}✖${off}"; gone=$((gone+1)); fi
-    # Pad plain text first, colorize after — escape bytes would skew printf's padding.
-    commits="$(printf '%6s' '-')"; commits="${dim}${commits}${off}"
-    if [[ -n "$repo" && -n "$sha" ]]; then
-      local cnum; cnum="$(git -C "$repo" rev-list --count "${sha}..HEAD" 2>/dev/null || echo '?')"
-      commits="$(printf '%6s' "+${cnum}")"
-      if [[ "$cnum" != "0" ]]; then commits="${grn}${commits}${off}"; else commits="${dim}${commits}${off}"; fi
+    # STATUS — the task's git lifecycle, auto-derived from the worker's worktree:
+    #   -          no task dispatched
+    #   open       dispatched, nothing landed yet
+    #   wip        uncommitted changes, no commits yet
+    #   +n ahead   n commits since dispatch, not merged into the team repo's HEAD
+    #   +n pushed  those commits are also up on the branch's upstream
+    #   merged     worker HEAD is an ancestor of the team repo's HEAD
+    # A trailing * marks uncommitted changes on top of the shown state.
+    # (Pad plain ASCII first, colorize after — escape bytes and multibyte glyphs
+    #  would skew printf's byte-based padding.)
+    local scell stxt scol="$dim" cnum=0 dirty=""
+    if [[ -z "$task" ]]; then
+      stxt="-"
+    else
+      if [[ -n "$repo" && -n "$sha" ]]; then
+        cnum="$(git -C "$repo" rev-list --count "${sha}..HEAD" 2>/dev/null || echo 0)"
+      fi
+      if [[ -n "$repo" ]] && [[ -n "$(git -C "$repo" status --porcelain 2>/dev/null | head -1)" ]]; then
+        dirty="*"
+      fi
+      if (( cnum > 0 )); then
+        local whead=""
+        whead="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+        if [[ -n "$whead" && -n "$trepo" ]] \
+           && git -C "$trepo" merge-base --is-ancestor "$whead" HEAD 2>/dev/null; then
+          stxt="merged${dirty}"; scol="$grn"
+        elif [[ -z "$(git -C "$repo" rev-list "@{u}..HEAD" 2>/dev/null | head -1)" ]] \
+             && git -C "$repo" rev-parse "@{u}" >/dev/null 2>&1; then
+          stxt="+${cnum} pushed${dirty}"; scol="$cyn"
+        else
+          stxt="+${cnum} ahead${dirty}"; scol="$ylw"
+        fi
+      elif [[ -n "$dirty" ]]; then
+        stxt="wip"; scol="$ylw"
+      else
+        stxt="open"; scol="$dim"
+      fi
     fi
+    scell="$(printf '%-10s' "${stxt:0:10}")"; scell="${scol}${scell}${off}"
     age="$(printf '%5s' '-')"
     if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(printf '%5s' "$(fmt_age $((now - epoch)))")"; fi
     age="${dim}${age}${off}"
@@ -638,7 +673,7 @@ cmd_dashboard() {
     if [[ -n "$nport" ]]; then
       ncell="$(printf '%-21s' "${lan:-0.0.0.0}:${nport}")"; ncell="${grn}${ncell}${off}"
     fi
-    rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${pcell}  ${ncell}  ${commits}  ${age}" 99)"$'\n'
+    rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${pcell}  ${ncell}  ${scell}  ${age}" 103)"$'\n'
   done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
   if [[ -n "$infop" ]]; then info+="$isep"; infop+="$isepp"; fi
   info+="${dim}busy${off} ${busy}/${count}"
@@ -650,14 +685,16 @@ cmd_dashboard() {
   local qline; qline="$(grep '^Q|' "$f" 2>/dev/null | tail -1 || true)"
   if [[ -n "$qline" ]]; then
     local qv; qv="$(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline")"
-    info+="${isep}${dim}queue${off} ${qv}"
-    infop+="${isepp}queue ${qv}"
+    # Label is "shipped", not "queue": the counter is <done>/<total>, and "queue 3/6"
+    # misreads as "3 still waiting" when it means "3 of 6 shipped".
+    info+="${isep}${dim}shipped${off} ${qv}"
+    infop+="${isepp}shipped ${qv}"
   fi
   box_top
   printf '%s\n' "$btop"
   if [[ -n "$info_inside" ]]; then box_info_inside; fi
   printf '%s\n' "$bblank"
-  box "$colhdr" 99
+  box "$colhdr" 103
   printf '%s' "$rows"
   printf '%s\n' "$bbot"
 }

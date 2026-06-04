@@ -159,23 +159,39 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard 3     
 ```
 
 ```
- ╭─ 🐙 Team Orion ─────────────────────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
- │                                                                                             │
- │         TASK                          WORKTREE        PORT    NETWORK         COMMIT    AGE │
- │ W0   ⠧  fix-auth                      agentic-kit     :5173   192.168.1.7:5173    +2     4m │
- │ W1   ✓  -                             agentic-kit-w1  :5174   -                    -      - │
- ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭─ 🐙 Team Orion ───────────────────────────────────── agentic-kit@main · busy 1/2 · shipped 2/5 ─╮
+ │                                                                                                 │
+ │         TASK                          WORKTREE        PORT    NETWORK            STATUS     AGE │
+ │ W0   ⠧  fix-auth                      agentic-kit     :5173   192.168.1.7:5173   +2 ahead    4m │
+ │ W1   ✓  dark-mode                     agentic-kit-w1  :5174   -                  merged     12m │
+ ╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Per worker: state (animated ⠧ spinner = working, green ✓ = idle, dim ? = unknown,
 red ✖ = gone), current task (the dispatch gist — bright while working, dim once idle),
 worktree/repo basename, the worker's **dev server** (`PORT` = listening port(s), `+`
 when more than one; `NETWORK` = the LAN `ip:port` in green when the server is bound on
-all interfaces — open that URL on a phone on the same network), commits landed since
-dispatch (`+n`, green when > 0), and time since dispatch. PORT/NETWORK are auto-detected
-each refresh via `lsof` (listening TCP servers whose process cwd is inside the worker's
-worktree) — nothing to report manually. The header shows the team name (bold), the team
-repo with its **current branch**, the busy count, and — if you report it — queue progress:
+all interfaces — open that URL on a phone on the same network), the task's **git
+lifecycle** (`STATUS`), and time since dispatch. PORT/NETWORK are auto-detected each
+refresh via `lsof` (listening TCP servers whose process cwd is inside the worker's
+worktree) — nothing to report manually.
+
+`STATUS` is derived from the worker's worktree against the team repo's HEAD, so a row
+flips to green `merged` by itself the moment you merge that worker's branch:
+
+| STATUS | Meaning |
+|---|---|
+| dim `-` | no task dispatched |
+| dim `open` | dispatched, nothing landed yet |
+| yellow `wip` | uncommitted changes, no commits yet |
+| yellow `+n ahead` | n commits since dispatch, not yet merged into the team repo's HEAD |
+| cyan `+n pushed` | those commits are also up on the branch's upstream |
+| green `merged` | worker HEAD is an ancestor of the team repo's HEAD |
+
+A trailing `*` (e.g. `+2 ahead*`) marks uncommitted changes on top of the shown state.
+
+The header shows the team name (bold), the team repo with its **current branch**, the
+busy count, and — if you report it — queue progress:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue <done> <total>   # update header counter
@@ -183,7 +199,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue clear           
 ```
 
 The queue counter is **orchestrator-reported**: it only changes when you call `queue`,
-so update it as tasks complete and `queue clear` it when the batch is done.
+so update it as tasks complete and `queue clear` it when the batch is done. (The header
+labels it `shipped d/t` — it counts completed units, not waiting ones.)
 
 How it behaves:
 - **Data comes from the team state file** (`/tmp/cmux-swarm-<ws>.state`), which `spawn`,
