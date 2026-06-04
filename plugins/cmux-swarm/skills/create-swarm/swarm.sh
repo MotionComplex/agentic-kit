@@ -450,15 +450,16 @@ cmd_queue() {  # <done> <total> — or "clear"/no args to remove the counter fro
   mv "$tmp" "$f"
 }
 
-# Render the team overview once. Layout — a dim rounded box with the bold team name
-# embedded in the top border; inside: an info line (live values, dim labels), a blank
-# spacer, bold column labels, then one row per worker:
-#    ╭─ 🐙 Team Orion ───────────────────────────────────────────────────────────╮
-#    │ agentic-kit@main    busy 1/2    queue 2/5                                 │
-#    │                                                                           │
-#    │       TASK                                  WORKTREE          COMMIT  AGE │
-#    │ W0  ⠧  fix-auth                             agentic-kit           +2   4m │
-#    ╰───────────────────────────────────────────────────────────────────────────╯
+# Render the team overview once. Layout — a dim rounded box; the top border carries the
+# bold team name (left) and the team overview (right): repo@branch · busy · queue.
+# Inside: a blank spacer, bold column labels, then one row per worker:
+#    ╭─ 🐙 Team Orion ────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
+#    │                                                                            │
+#    │       TASK                                  WORKTREE           COMMIT  AGE │
+#    │ W0  ⠧  fix-auth                             agentic-kit            +2   4m │
+#    ╰────────────────────────────────────────────────────────────────────────────╯
+# If the overview can't fit the top border (long branch names), it falls back to a
+# right-aligned interior line.
 # Right-border alignment: every interior line is padded to a fixed inner width; the
 # plain (escape-free) width is tracked alongside each colored string, and worker/header
 # rows have constant width by construction (ASCII-only printf-padded fields).
@@ -474,7 +475,6 @@ cmd_dashboard() {
   local f; f="$(state_file "$ws")" || die "must run inside cmux"
   local now; now="$(date +%s)"
   local dim=$'\e[2m' off=$'\e[0m' grn=$'\e[32m' ylw=$'\e[33m' red=$'\e[31m' bld=$'\e[1m'
-  local gap='    '
   # Team label: prefer the persisted T row (cmux auto-titles can overwrite the
   # workspace label), fall back to the workspace's current title.
   local team
@@ -499,9 +499,6 @@ cmd_dashboard() {
   local WIN=83
   local tdw=${#team}
   if [[ "$team" == *"🐙"* ]]; then tdw=$((tdw+1)); fi   # emoji renders double-width
-  local fill=$(( WIN - tdw - 3 ))
-  if (( fill < 1 )); then fill=1; fi
-  local btop=" ${dim}╭─${off} ${bld}${team}${off} ${dim}$(printf '─%.0s' $(seq "$fill"))╮${off}"
   local bbot=" ${dim}╰$(printf '─%.0s' $(seq "$WIN"))╯${off}"
   local bblank=" ${dim}│${off}$(printf '%*s' "$WIN" '')${dim}│${off}"
   box() {  # <colored content> <plain width> → one bordered interior line
@@ -509,17 +506,39 @@ cmd_dashboard() {
     if (( pad < 0 )); then pad=0; fi
     printf ' %s│%s%s%*s%s│%s\n' "$dim" "$off" "$1" "$pad" '' "$dim" "$off"
   }
-  # Info line — lives INSIDE the box; the top border carries only the team name.
-  local info="" infop=""
+  # Team overview (repo@branch · busy · queue) — embedded in the TOP BORDER, right of
+  # the team name, so it reads as box chrome rather than competing with the table's
+  # alignment. If it can't fit (long branch names), it falls back to a right-aligned
+  # interior line instead.
+  local info="" infop="" isep="${dim} · ${off}" isepp=" · "
   if [[ -n "$trepo" ]]; then
     local rb; rb="$(basename "$trepo")"
-    info+=" ${rb}${dim}@${off}${tbranch:-?}"
-    infop+=" ${rb}@${tbranch:-?}"
+    info+="${rb}${dim}@${off}${tbranch:-?}"
+    infop+="${rb}@${tbranch:-?}"
   fi
+  local btop="" info_inside=""
+  box_top() {  # assemble btop once `info`/`infop` are complete
+    local idw=${#infop} fill
+    if (( idw > 0 )); then fill=$(( WIN - tdw - idw - 6 )); else fill=$(( WIN - tdw - 3 )); fi
+    if (( idw > 0 && fill >= 1 )); then
+      btop=" ${dim}╭─${off} ${bld}${team}${off} ${dim}$(printf '─%.0s' $(seq "$fill"))${off} ${info} ${dim}─╮${off}"
+      info_inside=""
+    else
+      fill=$(( WIN - tdw - 3 )); if (( fill < 1 )); then fill=1; fi
+      btop=" ${dim}╭─${off} ${bld}${team}${off} ${dim}$(printf '─%.0s' $(seq "$fill"))╮${off}"
+      info_inside="$infop"
+    fi
+  }
+  box_info_inside() {  # fallback: right-aligned overview line inside the box
+    local ipad=$(( WIN - ${#infop} - 1 ))
+    if (( ipad < 0 )); then ipad=0; fi
+    box "$(printf '%*s' "$ipad" '')${info}" $(( ipad + ${#infop} ))
+  }
   local colhdr=" ${bld}$(printf '%-3s  %s  %-38s  %-18s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'COMMIT' 'AGE')${off}"
   if [[ ! -f "$f" ]] || ! grep -q '^W|' "$f"; then
+    box_top
     printf '%s\n' "$btop"
-    if [[ -n "$infop" ]]; then box "$info" "${#infop}"; fi
+    if [[ -n "$info_inside" ]]; then box_info_inside; fi
     box " ${dim}no workers yet${off}" 15
     printf '%s\n' "$bbot"
     return 0
@@ -551,20 +570,22 @@ cmd_dashboard() {
     wt="$(basename "${repo:--}")"; wt="$(printf '%-18s' "${wt:0:18}")"
     rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${commits}  ${age}" 82)"$'\n'
   done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
-  info+="${gap}${dim}busy${off} ${busy}/${count}"
-  infop+="${gap}busy ${busy}/${count}"
+  if [[ -n "$infop" ]]; then info+="$isep"; infop+="$isepp"; fi
+  info+="${dim}busy${off} ${busy}/${count}"
+  infop+="busy ${busy}/${count}"
   if (( gone > 0 )); then
-    info+="${gap}${red}${gone} gone${off}"
-    infop+="${gap}${gone} gone"
+    info+="${isep}${red}${gone} gone${off}"
+    infop+="${isepp}${gone} gone"
   fi
   local qline; qline="$(grep '^Q|' "$f" 2>/dev/null | tail -1 || true)"
   if [[ -n "$qline" ]]; then
     local qv; qv="$(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline")"
-    info+="${gap}${dim}queue${off} ${qv}"
-    infop+="${gap}queue ${qv}"
+    info+="${isep}${dim}queue${off} ${qv}"
+    infop+="${isepp}queue ${qv}"
   fi
+  box_top
   printf '%s\n' "$btop"
-  box "$info" "${#infop}"
+  if [[ -n "$info_inside" ]]; then box_info_inside; fi
   printf '%s\n' "$bblank"
   box "$colhdr" 82
   printf '%s' "$rows"

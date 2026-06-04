@@ -159,13 +159,12 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard 3     
 ```
 
 ```
- ╭─ 🐙 Team Orion ───────────────────────────────────────────────────────────────────╮
- │ agentic-kit@main    busy 1/2    queue 2/5                                         │
- │                                                                                   │
- │         TASK                                    WORKTREE            COMMIT    AGE │
- │ W0   ⠧  fix-auth                                agentic-kit             +2     4m │
- │ W1   ✓  -                                       agentic-kit-w1           -      - │
- ╰───────────────────────────────────────────────────────────────────────────────────╯
+ ╭─ 🐙 Team Orion ──────────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
+ │                                                                                  │
+ │         TASK                                    WORKTREE           COMMIT    AGE │
+ │ W0   ⠧  fix-auth                                agentic-kit            +2     4m │
+ │ W1   ✓  -                                       agentic-kit-w1          -      - │
+ ╰──────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Per worker: state (animated ⠧ spinner = working, green ✓ = idle, dim ? = unknown,
