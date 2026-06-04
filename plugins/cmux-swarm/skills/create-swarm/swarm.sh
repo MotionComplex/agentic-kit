@@ -433,6 +433,51 @@ cmd_worktree() {
 }
 
 # --- dashboard ----------------------------------------------------------------
+# The machine's LAN address — what a phone on the same network dials. macOS-only
+# (this plugin is macOS-only anyway); en0 is Wi-Fi/primary, en1 the fallback.
+lan_ip() {
+  ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true
+}
+
+# One snapshot of every listening TCP server on the box: "cwd|port|bind" lines.
+# Two lsof calls total (listeners, then their cwds) — taken ONCE per dashboard
+# render, then filtered per worker, so cost doesn't scale with team size.
+ports_snapshot() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  local listen pids cwds
+  listen="$(lsof -nP -iTCP -sTCP:LISTEN -Fpn 2>/dev/null || true)"
+  [[ -n "$listen" ]] || return 0
+  pids="$(awk '/^p/{print substr($0,2)}' <<<"$listen" | sort -u | paste -sd, -)"
+  [[ -n "$pids" ]] || return 0
+  cwds="$(lsof -a -p "$pids" -d cwd -Fn 2>/dev/null || true)"
+  awk '
+    NR==FNR { if (/^p/) pid=substr($0,2); else if (/^n/) cwd[pid]=substr($0,2); next }
+    /^p/ { pid=substr($0,2); next }
+    /^n/ {
+      if (!(pid in cwd)) next
+      addr=substr($0,2)
+      port=addr; sub(/^.*:/,"",port)
+      if (port !~ /^[0-9]+$/) next
+      bind=addr; sub(/:[0-9]+$/,"",bind)
+      print cwd[pid] "|" port "|" bind
+    }
+  ' <(printf '%s\n' "$cwds") <(printf '%s\n' "$listen")
+}
+
+# Filter the snapshot to one worker's repo/worktree (cwd == repo or inside it).
+# Prints deduped "port|*" (bound on all interfaces → reachable over LAN) or
+# "port|local" lines, lowest port first. v4+v6 dual-binds collapse to one row.
+repo_ports() {  # <repo> <snapshot>
+  [[ -n "$1" && -n "${2:-}" ]] || return 0
+  awk -F'|' -v repo="$1" '
+    $1 == repo || index($1, repo "/") == 1 {
+      seen[$2] = 1
+      if ($3 == "*" || $3 == "0.0.0.0" || $3 == "[::]") exposed[$2] = 1
+    }
+    END { for (p in seen) print p "|" (p in exposed ? "*" : "local") }
+  ' <<<"$2" | sort -t'|' -k1,1n
+}
+
 fmt_age() {
   local s="$1"
   if   (( s < 60 ));   then echo "${s}s"
@@ -453,11 +498,14 @@ cmd_queue() {  # <done> <total> — or "clear"/no args to remove the counter fro
 # Render the team overview once. Layout — a dim rounded box; the top border carries the
 # bold team name (left) and the team overview (right): repo@branch · busy · queue.
 # Inside: a blank spacer, bold column labels, then one row per worker:
-#    ╭─ 🐙 Team Orion ────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
-#    │                                                                            │
-#    │       TASK                                  WORKTREE           COMMIT  AGE │
-#    │ W0  ⠧  fix-auth                             agentic-kit            +2   4m │
-#    ╰────────────────────────────────────────────────────────────────────────────╯
+#    ╭─ 🐙 Team Orion ─────────────────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
+#    │                                                                                         │
+#    │       TASK                          WORKTREE        PORT    NETWORK          COMMIT AGE │
+#    │ W0  ⠧  fix-auth                     agentic-kit     :5173   192.168.1.7:5173     +2  4m │
+#    ╰─────────────────────────────────────────────────────────────────────────────────────────╯
+# PORT/NETWORK are auto-detected per refresh (lsof): listening TCP servers whose process
+# cwd is inside the worker's repo/worktree. NETWORK shows the LAN ip:port (green) when the
+# server is bound on all interfaces — i.e. reachable from phones on the same network.
 # If the overview can't fit the top border (long branch names), it falls back to a
 # right-aligned interior line.
 # Right-border alignment: every interior line is padded to a fixed inner width; the
@@ -494,9 +542,9 @@ cmd_dashboard() {
     tbranch="$(git -C "$trepo" branch --show-current 2>/dev/null || true)"
     [[ -n "$tbranch" ]] || tbranch="$(git -C "$trepo" rev-parse --short HEAD 2>/dev/null || true)"
   fi
-  # ----- box helpers. Interior width WIN; table row width is 82 by construction:
-  # " %-3s  %s  %-38s  %-18s  %6s  %5s" = 1+3+2+1+2+38+2+18+2+6+2+5.
-  local WIN=83
+  # ----- box helpers. Interior width WIN; table row width is 99 by construction:
+  # " %-3s  %s  %-28s  %-14s  %-6s  %-21s  %6s  %5s" = 1+3+2+1+2+28+2+14+2+6+2+21+2+6+2+5.
+  local WIN=100
   local tdw=${#team}
   if [[ "$team" == *"🐙"* ]]; then tdw=$((tdw+1)); fi   # emoji renders double-width
   local bbot=" ${dim}╰$(printf '─%.0s' $(seq "$WIN"))╯${off}"
@@ -534,7 +582,11 @@ cmd_dashboard() {
     if (( ipad < 0 )); then ipad=0; fi
     box "$(printf '%*s' "$ipad" '')${info}" $(( ipad + ${#infop} ))
   }
-  local colhdr=" ${bld}$(printf '%-3s  %s  %-38s  %-18s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'COMMIT' 'AGE')${off}"
+  local colhdr=" ${bld}$(printf '%-3s  %s  %-28s  %-14s  %-6s  %-21s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'PORT' 'NETWORK' 'COMMIT' 'AGE')${off}"
+  # Dev-server detection: one lsof snapshot per render, filtered per worker row.
+  local psnap lan
+  psnap="$(ports_snapshot || true)"
+  lan="$(lan_ip || true)"
   if [[ ! -f "$f" ]] || ! grep -q '^W|' "$f"; then
     box_top
     printf '%s\n' "$btop"
@@ -565,10 +617,28 @@ cmd_dashboard() {
     if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(printf '%5s' "$(fmt_age $((now - epoch)))")"; fi
     age="${dim}${age}${off}"
     # Hierarchy: the ACTIVE task is the loudest cell on the row; finished/idle tasks dim.
-    task="${task:--}"; tcol="$(printf '%-38s' "${task:0:38}")"
+    task="${task:--}"; tcol="$(printf '%-28s' "${task:0:28}")"
     if (( working )); then tcol="${tcol}"; else tcol="${dim}${tcol}${off}"; fi
-    wt="$(basename "${repo:--}")"; wt="$(printf '%-18s' "${wt:0:18}")"
-    rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${commits}  ${age}" 82)"$'\n'
+    wt="$(basename "${repo:--}")"; wt="$(printf '%-14s' "${wt:0:14}")"
+    # Dev server: PORT = the worker's listening port(s); NETWORK = the LAN URL a
+    # phone on the same network can open (green = bound on all interfaces).
+    local pline port="" nport="" extra=0 pcell ncell ptxt
+    pline="$(repo_ports "${repo:-}" "$psnap")"
+    if [[ -n "$pline" ]]; then
+      extra=$(( $(wc -l <<<"$pline") - 1 ))
+      port="$(head -1 <<<"$pline" | cut -d'|' -f1)"                        # lowest port
+      nport="$(grep '|\*$' <<<"$pline" | head -1 | cut -d'|' -f1 || true)" # first LAN-exposed port
+    fi
+    pcell="$(printf '%-6s' '-')"; pcell="${dim}${pcell}${off}"
+    ncell="$(printf '%-21s' '-')"; ncell="${dim}${ncell}${off}"
+    if [[ -n "$port" ]]; then
+      ptxt=":${port}"; (( extra > 0 )) && ptxt+="+"
+      pcell="$(printf '%-6s' "${ptxt:0:6}")"
+    fi
+    if [[ -n "$nport" ]]; then
+      ncell="$(printf '%-21s' "${lan:-0.0.0.0}:${nport}")"; ncell="${grn}${ncell}${off}"
+    fi
+    rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${pcell}  ${ncell}  ${commits}  ${age}" 99)"$'\n'
   done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
   if [[ -n "$infop" ]]; then info+="$isep"; infop+="$isepp"; fi
   info+="${dim}busy${off} ${busy}/${count}"
@@ -587,7 +657,7 @@ cmd_dashboard() {
   printf '%s\n' "$btop"
   if [[ -n "$info_inside" ]]; then box_info_inside; fi
   printf '%s\n' "$bblank"
-  box "$colhdr" 82
+  box "$colhdr" 99
   printf '%s' "$rows"
   printf '%s\n' "$bbot"
 }

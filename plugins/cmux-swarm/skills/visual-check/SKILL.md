@@ -27,8 +27,17 @@ vision-review pipeline; this is the quick local check.
 
 ## Step 1 — Make sure the dev server is up
 
-Start the project's dev server (e.g. `npm run dev`) and note its URL (e.g.
-`http://localhost:5173`). The check navigates a real browser to it.
+Start the project's dev server and note its URL (e.g. `http://localhost:5173`). The check
+navigates a real browser to it. Two rules:
+
+- **Bind it on all interfaces**, not just localhost (e.g. `npm run dev -- --host 0.0.0.0`;
+  Vite: `--host`, Next.js: `-H 0.0.0.0`) — the user verifies changes on real mobile devices
+  over the LAN, and the swarm dashboard's NETWORK column only lights up for exposed servers.
+  In a swarm, use a unique port per worker so parallel servers don't collide.
+- **Run it in the background and LEAVE IT RUNNING after the check** — do not kill it when
+  the check passes. The user manually verifies visual changes (desktop + mobile) against
+  the still-running server. Report both URLs (local and `http://<lan-ip>:<port>`) with your
+  result; only stop the server when explicitly told to.
 
 ## Step 2 — Write a config
 

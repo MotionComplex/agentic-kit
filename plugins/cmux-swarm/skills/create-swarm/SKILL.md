@@ -159,19 +159,23 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard 3     
 ```
 
 ```
- ╭─ 🐙 Team Orion ──────────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
- │                                                                                  │
- │         TASK                                    WORKTREE           COMMIT    AGE │
- │ W0   ⠧  fix-auth                                agentic-kit            +2     4m │
- │ W1   ✓  -                                       agentic-kit-w1          -      - │
- ╰──────────────────────────────────────────────────────────────────────────────────╯
+ ╭─ 🐙 Team Orion ─────────────────────────────────── agentic-kit@main · busy 1/2 · queue 2/5 ─╮
+ │                                                                                             │
+ │         TASK                          WORKTREE        PORT    NETWORK         COMMIT    AGE │
+ │ W0   ⠧  fix-auth                      agentic-kit     :5173   192.168.1.7:5173    +2     4m │
+ │ W1   ✓  -                             agentic-kit-w1  :5174   -                    -      - │
+ ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Per worker: state (animated ⠧ spinner = working, green ✓ = idle, dim ? = unknown,
 red ✖ = gone), current task (the dispatch gist — bright while working, dim once idle),
-worktree/repo basename, commits landed since dispatch (`+n`, green when > 0), and time
-since dispatch. The header shows the team name (bold), the team repo with its **current
-branch**, the busy count, and — if you report it — queue progress:
+worktree/repo basename, the worker's **dev server** (`PORT` = listening port(s), `+`
+when more than one; `NETWORK` = the LAN `ip:port` in green when the server is bound on
+all interfaces — open that URL on a phone on the same network), commits landed since
+dispatch (`+n`, green when > 0), and time since dispatch. PORT/NETWORK are auto-detected
+each refresh via `lsof` (listening TCP servers whose process cwd is inside the worker's
+worktree) — nothing to report manually. The header shows the team name (bold), the team
+repo with its **current branch**, the busy count, and — if you report it — queue progress:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue <done> <total>   # update header counter
@@ -200,7 +204,8 @@ How it behaves:
 auto-submits early (newlines trigger send). Instead:
 
 1. Write the full task to `/tmp/<task-id>.md` (scope, files, acceptance criteria, and the
-   exact done-marker you want — see monitoring).
+   exact done-marker you want — see monitoring). If the task touches UI, include the
+   **dev-server rules** from Step 7 verbatim (LAN-exposed, leave running after verification).
 2. Dispatch a short pointer:
 
 ```bash
@@ -269,11 +274,26 @@ If a worker does a browser/visual check, it must launch its **own isolated heade
 MCP browser, which locks across concurrent agents. The `/cmux-swarm:visual-check` skill
 already does this; instruct workers to use it rather than a shared session.
 
+### Dev-server rules (put these in every UI-touching brief)
+
+1. **Expose the dev server on the network**, not just localhost — start it bound on all
+   interfaces (e.g. `npm run dev -- --host 0.0.0.0`; Vite: `--host`, Next.js: `-H 0.0.0.0`,
+   Astro/Nuxt: `--host`) and pick a **unique port per worker** (e.g. `517<n>` for W`<n>`)
+   so parallel workers don't collide. The user verifies changes on real mobile devices on
+   the same network; an exposed server shows up green in the dashboard's NETWORK column.
+2. **Leave the dev server running after verification.** When a worker finishes its work and
+   checks pass, it must **not** kill the dev server — the user manually verifies any visual
+   change (desktop and mobile) against the still-running server. Report the local and
+   network URLs in the completion message. Servers are only shut down at wind-down
+   (Step 8), or when the orchestrator explicitly says so.
+
 ## Step 8 — Wind down
 
 When the work lands: merge worktree branches, `swarm.sh reset` idle workers for reuse, or
 retire a worker — `swarm.sh retire <ws> <surf>` (handles both layouts and keeps the
 dashboard in sync). Summarize what each worker produced (commits/branches) back to the user.
+Dev servers left running for manual verification (Step 7) are stopped **only now**, after
+the user confirms they're done checking — never as part of a worker's own task completion.
 
 ---
 
@@ -317,6 +337,10 @@ dashboard in sync). Summarize what each worker produced (commits/branches) back 
   `user-data-dir` per worker.
 - **Trusting a single idle frame.** Output streams in bursts; require idle to persist
   (`wait-idle` handles this).
+- **Workers killing their dev server on completion.** The user verifies visual changes
+  manually (including on phones via the NETWORK column URL) — briefs must say *leave the
+  server running, bound on all interfaces* (Step 7), or the dashboard goes dark the moment
+  the worker finishes.
 
 ## When NOT to use this
 
