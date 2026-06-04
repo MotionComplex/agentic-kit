@@ -33,6 +33,15 @@
 #   swarm.sh head <repo>                        → prints current HEAD sha (use before dispatch to arm wait-commit)
 #   swarm.sh worktree <repo> <branch> <dir> <base>
 #                                               → git worktree add + symlink node_modules + copy .env* (parallel edits)
+#   swarm.sh spawn-dashboard [interval]         → sticky team-status pane above the orchestrator (auto-fits its height)
+#   swarm.sh dashboard                          → render the team overview once (one line per worker)
+#   swarm.sh dashboard-loop [interval]          → self-refreshing dashboard; runs INSIDE the dashboard pane
+#   swarm.sh queue <done> <total>               → record task-queue progress (shown in the dashboard header)
+#   swarm.sh retire <ws> <surf>                 → close a worker (split pane or tab) + drop it from the dashboard
+#
+# Team state: spawn/dispatch/reset record workers in ${TMPDIR}/cmux-swarm-<orchestrator-ws>.state
+# (rows "W|n|ws|surf|repo|task|dispatch_epoch|base_sha", one "Q|done|total"). The dashboard
+# reads it; workers spawned without swarm.sh won't appear.
 #
 # Monitoring philosophy (most robust → least):
 #   1. commit-aware  (wait-commit)  — best signal for code tasks.
@@ -90,6 +99,67 @@ pane_of_surface() {
   return 1
 }
 
+# --- team state (powers the dashboard) ----------------------------------------
+# One file per team, keyed by the ORCHESTRATOR's workspace ref (spawn/dispatch/reset all
+# run from the orchestrator session, and the dashboard pane lives in its workspace, so
+# they all resolve the same file). Rows:
+#   W|<n>|<ws>|<surf>|<repo>|<task>|<dispatch_epoch>|<base_sha>
+#   Q|<done>|<total>
+#   T|<team label>
+# Pinned to /tmp (not $TMPDIR): the dashboard pane is launched by the cmux app and may
+# carry a different TMPDIR than the orchestrator's shell — both must resolve one file.
+# Optional $1 = explicit workspace ref (the dashboard pane passes it; `cmux identify`
+# inside that pane falls back to the FOCUSED surface, so it must not rely on it).
+state_file() {
+  local ws="${1:-}"
+  [[ -n "$ws" ]] || ws="$(caller_ws || true)"
+  [[ -n "$ws" ]] || return 1
+  echo "/tmp/cmux-swarm-${ws//:/-}.state"
+}
+state_set_team() {  # <label>
+  local f; f="$(state_file)" || return 0
+  local tmp="${f}.tmp"
+  awk -F'|' '$1!="T"' "$f" 2>/dev/null > "$tmp" || true
+  echo "T|${1//|/ }" >> "$tmp"
+  mv "$tmp" "$f"
+}
+state_team() {  # [ws]
+  local f; f="$(state_file "${1:-}")" || return 1
+  [[ -f "$f" ]] || return 1
+  grep '^T|' "$f" 2>/dev/null | tail -1 | cut -d'|' -f2
+}
+state_register() {  # <n> <ws> <surf> <repo>
+  local f; f="$(state_file)" || return 0
+  local tmp="${f}.tmp"
+  awk -F'|' -v n="$1" '!($1=="W" && $2==n)' "$f" 2>/dev/null > "$tmp" || true
+  echo "W|$1|$2|$3|$4||0|" >> "$tmp"
+  mv "$tmp" "$f"
+}
+state_on_dispatch() {  # <ws> <surf> <task>
+  local f; f="$(state_file)" || return 0
+  [[ -f "$f" ]] || return 0
+  local task="${3//|/ }" now repo sha=""
+  now="$(date +%s)"
+  repo="$(awk -F'|' -v w="$1" -v s="$2" '$1=="W" && $3==w && $4==s {print $5; exit}' "$f")"
+  if [[ -n "$repo" ]]; then sha="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"; fi
+  local tmp="${f}.tmp"
+  awk -F'|' -v OFS='|' -v w="$1" -v s="$2" -v t="$task" -v e="$now" -v b="$sha" '
+    $1=="W" && $3==w && $4==s { $6=t; $7=e; $8=b } { print }' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+state_on_reset() {  # <ws> <surf>
+  local f; f="$(state_file)" || return 0
+  [[ -f "$f" ]] || return 0
+  local tmp="${f}.tmp"
+  awk -F'|' -v OFS='|' -v w="$1" -v s="$2" '
+    $1=="W" && $3==w && $4==s { $6=""; $7=0; $8="" } { print }' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+state_remove() {  # <ws> <surf>
+  local f; f="$(state_file)" || return 0
+  [[ -f "$f" ]] || return 0
+  local tmp="${f}.tmp"
+  awk -F'|' -v w="$1" -v s="$2" '!($1=="W" && $3==w && $4==s)' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
 # --- commands ----------------------------------------------------------------
 cmd_check_cmux() {
   if [[ -n "$CMUX" ]]; then echo "$CMUX"; else echo "MISSING"; fi
@@ -129,6 +199,7 @@ cmd_spawn() {
   "$CMUX" select-workspace --workspace "$ws" >/dev/null
   local surf; surf="$(first_surface_of "$ws")"
   [[ -n "$surf" ]] || die "could not resolve surface ref for $ws"
+  state_register "$n" "$ws" "$surf" "$repo"
   echo "WORKSPACE=$ws"
   echo "SURFACE=$surf"
 }
@@ -174,6 +245,7 @@ cmd_spawn_split() {
     sleep 1; waited=$((waited+1))
   done
   local pane; pane="$(pane_of_surface "$ws" "$surf" || true)"
+  state_register "$n" "$ws" "$surf" "$repo"
   echo "WORKSPACE=$ws"
   echo "SURFACE=$surf"
   echo "PANE=${pane:-unknown}"
@@ -222,11 +294,20 @@ cmd_name_orchestrator() {
   # Tab label — same mechanism as the workers' 🤖 W<n> labels.
   "$CMUX" rename-tab --workspace "$ws" --surface "$surf" "$title"
   # Workspace label — keep an existing 🐙 Team name (idempotent re-runs), else claim the
-  # first constellation not already used by another workspace.
-  if "$CMUX" list-workspaces 2>/dev/null | grep -E "${ws}[^0-9]" | grep -qF "🐙 Team "; then
+  # first constellation not already used by another workspace. cmux auto-titles can
+  # overwrite the workspace label, so the claimed name is also persisted in the state
+  # file (T row) — that's what the dashboard displays and what re-runs reuse.
+  local team="" t
+  team="$(state_team || true)"
+  if [[ -n "$team" ]]; then
+    "$CMUX" workspace-action --action rename --workspace "$ws" --title "$team"
     return 0
   fi
-  local team="" t
+  team="$("$CMUX" list-workspaces 2>/dev/null | grep -E "${ws}[^0-9]" | grep -oE "🐙 Team [[:alnum:]]+" | head -1 || true)"
+  if [[ -n "$team" ]]; then
+    state_set_team "$team"   # workspace already labelled — persist it for the dashboard
+    return 0
+  fi
   for t in "${TEAM_NAMES[@]}"; do
     if ! "$CMUX" list-workspaces 2>/dev/null | grep -qF "🐙 Team ${t}"; then team="$t"; break; fi
   done
@@ -237,6 +318,7 @@ cmd_name_orchestrator() {
     team="${n}"
   fi
   "$CMUX" workspace-action --action rename --workspace "$ws" --title "🐙 Team ${team}"
+  state_set_team "🐙 Team ${team}"
 }
 
 cmd_rename() {
@@ -253,6 +335,7 @@ cmd_dispatch() {
   # Pasting a long multi-line prompt directly auto-submits early — the brief file avoids that.
   "$CMUX" send --workspace "$ws" --surface "$surf" "Read $brief in full and execute. $gist"
   "$CMUX" send-key --workspace "$ws" --surface "$surf" enter
+  state_on_dispatch "$ws" "$surf" "$gist"
 }
 
 cmd_send() {
@@ -267,6 +350,7 @@ cmd_reset() {
   local ws="$1" surf="$2"
   "$CMUX" send --workspace "$ws" --surface "$surf" "/clear"
   "$CMUX" send-key --workspace "$ws" --surface "$surf" enter
+  state_on_reset "$ws" "$surf"
 }
 
 cmd_read() {
@@ -334,6 +418,191 @@ cmd_worktree() {
   echo "BRANCH=$branch"
 }
 
+# --- dashboard ----------------------------------------------------------------
+fmt_age() {
+  local s="$1"
+  if   (( s < 60 ));   then echo "${s}s"
+  elif (( s < 3600 )); then echo "$((s/60))m"
+  else                      echo "$((s/3600))h"; fi
+}
+
+cmd_queue() {  # <done> <total>
+  local f; f="$(state_file)" || die "must run inside cmux"
+  local tmp="${f}.tmp"
+  awk -F'|' '$1!="Q"' "$f" 2>/dev/null > "$tmp" || true
+  echo "Q|$1|$2" >> "$tmp"
+  mv "$tmp" "$f"
+}
+
+# Render the team overview once. One line per worker:
+#   W0 ⚙ WORKING  fix-auth   ↑2  4m     (state · task · commits since dispatch · time since dispatch)
+# Optional $1 = the team's (orchestrator's) workspace ref; defaults to the caller's.
+cmd_dashboard() {
+  need_cmux
+  local f ws now
+  ws="${1:-}"
+  [[ -n "$ws" ]] || ws="$(caller_ws)"
+  f="$(state_file "$ws")" || die "must run inside cmux"
+  now="$(date +%s)"
+  # Team label: prefer the persisted T row (cmux auto-titles can overwrite the
+  # workspace label), fall back to the workspace's current title.
+  local team
+  team="$(state_team "$ws" || true)"
+  if [[ -z "$team" ]]; then
+    team="$("$CMUX" list-workspaces 2>/dev/null | grep -E "${ws}([^0-9]|\$)" | head -1 \
+      | sed -E 's/^[*[:space:]]*workspace:[0-9]+[[:space:]]+//; s/[[:space:]]*\[selected\][[:space:]]*$//')"
+  fi
+  [[ -n "$team" ]] || team="(team)"
+  if [[ ! -f "$f" ]] || ! grep -q '^W|' "$f"; then
+    echo "$team · no workers registered yet"
+    return 0
+  fi
+  local queue=""
+  local qline; qline="$(grep '^Q|' "$f" 2>/dev/null | tail -1 || true)"
+  if [[ -n "$qline" ]]; then
+    queue=" · queue $(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline") done"
+  fi
+  local rows="" working=0 idle=0 count=0
+  local tag n wws wsurf repo task epoch sha st icon screen commits age
+  while IFS='|' read -r tag n wws wsurf repo task epoch sha; do
+    [[ "$tag" == "W" ]] || continue
+    count=$((count+1))
+    if screen="$("$CMUX" read-screen --workspace "$wws" --surface "$wsurf" 2>/dev/null)"; then
+      if   grep -qiF "esc to interrupt" <<<"$screen"; then st="WORKING"; icon="⚙";  working=$((working+1))
+      elif grep -qiF "for agents"       <<<"$screen"; then st="IDLE";    icon="💤"; idle=$((idle+1))
+      else st="UNKNOWN"; icon="❓"; fi
+    else st="GONE"; icon="✖"; fi
+    commits="·"
+    if [[ -n "$repo" && -n "$sha" ]]; then
+      commits="↑$(git -C "$repo" rev-list --count "${sha}..HEAD" 2>/dev/null || echo '?')"
+    fi
+    age="·"
+    if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(fmt_age $((now - epoch)))"; fi
+    rows+="$(printf 'W%-2s %s %-7s  %-30.30s %4s %5s' "$n" "$icon" "$st" "${task:-—}" "$commits" "$age")"$'\n'
+  done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
+  printf '%s · %d worker(s) · %d ⚙ / %d 💤%s\n' "$team" "$count" "$working" "$idle" "$queue"
+  printf '%s' "$rows"
+}
+
+# Auto-fit the dashboard pane's height to its content (runs inside the pane, so
+# `tput lines` is its own height). One adjustment per refresh → converges in a cycle or two.
+# cmux resize-pane semantics (verified): the direction picks which border to move, the
+# amount is in PIXELS, and a move always GROWS the pane (amount must be > 0). So:
+# grow the dashboard = its own bottom border down (-D); shrink it = grow the pane
+# directly BELOW it upward (-U on that neighbor).
+autofit_pane() {  # <content> <ws> <surf>
+  local content="$1" ws="$2" surf="$3" want rows delta pane
+  [[ -n "$ws" && -n "$surf" ]] || return 0
+  want=$(( $(wc -l <<<"$content") + 1 ))
+  (( want >= 3 )) || want=3
+  rows="$(tput lines 2>/dev/null || echo 0)"
+  (( rows > 0 )) || return 0
+  delta=$(( want - rows ))
+  if (( delta == 0 )); then return 0; fi
+  pane="$(pane_of_surface "$ws" "$surf" || true)"; [[ -n "$pane" ]] || return 0
+  # Per-pane geometry "ref|x|y|cell_h" from the pretty-printed rpc JSON (alphabetical
+  # keys: cell_height_px … pixel_frame{height,width,x,y} … ref … rows; exact-match $1
+  # so selected_surface_ref/surface_refs lines don't hit the "ref" rule).
+  local geom
+  geom="$("$CMUX" rpc pane.list "{\"workspace\":\"$ws\"}" 2>/dev/null | awk '
+    function v(s) { gsub(/[",]/, "", s); sub(/\..*$/, "", s); return s }
+    $1 == "\"cell_height_px\"" { cell = v($3) }
+    $1 == "\"pixel_frame\""    { pf = 1 }
+    pf && $1 == "\"x\""        { x = v($3) }
+    pf && $1 == "\"y\""        { y = v($3) }
+    $1 == "\"ref\""            { ref = v($3); pf = 0 }
+    $1 == "\"rows\""           { print ref "|" x "|" y "|" cell }
+  ')"
+  local self_x="" self_y="" cell=17 ref x y c
+  while IFS='|' read -r ref x y c; do
+    if [[ "$ref" == "$pane" ]]; then self_x="$x"; self_y="$y"; cell="${c:-17}"; fi
+  done <<<"$geom"
+  [[ -n "$self_y" ]] || return 0
+  local px=$(( (delta < 0 ? -delta : delta) * cell ))
+  if (( delta > 0 )); then
+    "$CMUX" resize-pane --pane "$pane" --workspace "$ws" -D --amount "$px" >/dev/null 2>&1 || true
+  else
+    # Nearest pane below in the same column.
+    local below="" below_y=999999
+    while IFS='|' read -r ref x y c; do
+      if [[ "$ref" != "$pane" && "$x" == "$self_x" ]] && (( y > self_y && y < below_y )); then
+        below="$ref"; below_y="$y"
+      fi
+    done <<<"$geom"
+    [[ -n "$below" ]] || return 0
+    "$CMUX" resize-pane --pane "$below" --workspace "$ws" -U --amount "$px" >/dev/null 2>&1 || true
+  fi
+}
+
+# The loop that runs inside the dashboard pane. Args: [interval] [autofit 1|0] [ws] [surf]
+# ws/surf = the pane's own refs, passed explicitly by spawn-dashboard: `cmux identify`
+# inside this pane falls back to the FOCUSED surface (its spawn-time env points at the
+# closed staging workspace), so self-resolution must not go through identify.
+cmd_dashboard_loop() {
+  local interval="${1:-5}" autofit="${2:-1}" ws="${3:-}" surf="${4:-}" out
+  set +e   # the loop is a daemon — render errors must not kill it
+  tput civis 2>/dev/null || true
+  trap 'tput cnorm 2>/dev/null || true' EXIT
+  while true; do
+    out="$(cmd_dashboard "$ws" 2>&1 || true)"
+    printf '\033[H\033[2J%s\n' "$out"
+    if [[ "$autofit" == "1" ]]; then autofit_pane "$out" "$ws" "$surf" || true; fi
+    sleep "$interval"
+  done
+}
+
+# Spawn the sticky status pane: split UP from the orchestrator's own pane, running
+# dashboard-loop. Stage-and-move like spawn-split, but with a PLAIN shell — the loop
+# command is sent AFTER the split, so the pane's own ws/surf refs can be passed as args
+# (identify is focus-fallback-unreliable inside the pane; see cmd_dashboard_loop).
+cmd_spawn_dashboard() {
+  need_cmux
+  local interval="${1:-5}" autofit="${2:-1}"
+  local ws surf pane
+  ws="$(caller_ws)";       [[ -n "$ws" ]] || die "spawn-dashboard must run inside cmux"
+  surf="$(caller_surface)"; [[ -n "$surf" ]] || die "could not identify caller surface"
+  pane="$(pane_of_surface "$ws" "$surf")" || die "could not find caller pane"
+  local script; script="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  local tmpname="⏳ spawn-dash"
+  "$CMUX" new-workspace \
+    --name "$tmpname" \
+    --cwd "${TMPDIR:-/tmp}" \
+    --focus false >/dev/null
+  local tws; tws="$(ws_ref_by_name "$tmpname")"
+  [[ -n "$tws" ]] || die "could not resolve temp workspace '$tmpname'"
+  local dsurf; dsurf="$(first_surface_of "$tws")"
+  [[ -n "$dsurf" ]] || die "could not resolve surface ref for $tws"
+  "$CMUX" move-surface --surface "$dsurf" --pane "$pane" --focus false >/dev/null
+  "$CMUX" split-off --surface "$dsurf" up --workspace "$ws" --focus false >/dev/null
+  "$CMUX" close-workspace --workspace "$tws" >/dev/null 2>&1 || true
+  "$CMUX" rename-tab --workspace "$ws" --surface "$dsurf" "📊 Swarm" >/dev/null 2>&1 || true
+  local waited=0
+  until "$CMUX" read-screen --workspace "$ws" --surface "$dsurf" >/dev/null 2>&1; do
+    (( waited >= 15 )) && die "PTY did not attach for $dsurf after 15s"
+    sleep 1; waited=$((waited+1))
+  done
+  # Launch the loop with the pane's own refs baked in.
+  "$CMUX" send --workspace "$ws" --surface "$dsurf" \
+    "exec bash '$script' dashboard-loop $interval $autofit $ws $dsurf"
+  "$CMUX" send-key --workspace "$ws" --surface "$dsurf" enter
+  # split-off can steal focus despite --focus false — give it back to the caller.
+  "$CMUX" focus-pane --pane "$pane" --workspace "$ws" >/dev/null 2>&1 || true
+  echo "WORKSPACE=$ws"
+  echo "SURFACE=$dsurf"
+}
+
+cmd_retire() {  # <ws> <surf> — close a worker pane/tab and drop it from the dashboard
+  need_cmux
+  local ws="$1" surf="$2"
+  local ows; ows="$(caller_ws || true)"
+  if [[ "$ws" == "$ows" ]]; then
+    "$CMUX" close-surface --surface "$surf" --workspace "$ws" >/dev/null   # split mode
+  else
+    "$CMUX" close-workspace --workspace "$ws" >/dev/null                   # tab mode
+  fi
+  state_remove "$ws" "$surf"
+}
+
 # --- dispatch ----------------------------------------------------------------
 sub="${1:-}"; shift || true
 case "$sub" in
@@ -354,7 +623,12 @@ case "$sub" in
   wait-idle)    cmd_wait_idle "$@" ;;
   wait-commit)  cmd_wait_commit "$@" ;;
   worktree)     cmd_worktree "$@" ;;
+  spawn-dashboard) cmd_spawn_dashboard "$@" ;;
+  dashboard)       cmd_dashboard "$@" ;;
+  dashboard-loop)  cmd_dashboard_loop "$@" ;;
+  queue)           cmd_queue "$@" ;;
+  retire)          cmd_retire "$@" ;;
   ""|-h|--help|help)
-    sed -n '2,48p' "$0" ;;
+    awk 'NR>1 { if (!/^#/) exit; print }' "$0" ;;
   *) die "unknown subcommand: $sub (run: swarm.sh help)" ;;
 esac

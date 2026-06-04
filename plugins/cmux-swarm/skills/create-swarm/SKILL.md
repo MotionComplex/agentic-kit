@@ -71,7 +71,8 @@ If the user picked **Dynamic**, don't pre-spawn a fixed team in Step 3 — spawn
   keep one warm if more work is likely.
 
 Everything else (bootstrap, spawn mechanics, dispatch, worktrees, monitoring) is
-identical — dynamic mode only changes *when* you spawn and retire.
+identical — dynamic mode only changes *when* you spawn and retire. The status dashboard
+(Step 3.5) is especially useful here: it shows joins, retirements, and idle workers live.
 
 ## Step 2 — Bootstrap cmux (install-if-missing)
 
@@ -146,6 +147,41 @@ label, which Claude may overwrite while working — so recording at spawn time i
 path). To see the whole tree: `cmux tree` / `cmux list-workspaces`.
 
 Give each worker a moment to finish booting Claude, then proceed.
+
+## Step 3.5 — Sticky status dashboard (optional, recommended)
+
+Give the team a live overview: a thin self-refreshing pane pinned **above the
+orchestrator's own pane**, one line per worker:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard        # 5s refresh
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard 3     # custom interval
+```
+
+```
+🐙 Team Orion · 2 worker(s) · 1 ⚙ / 1 💤 · queue 2/5 done
+W0  ⚙ WORKING  fix-auth                       ↑2    4m
+W1  💤 IDLE     —                              ·     ·
+```
+
+Per worker: state (⚙ working / 💤 idle / ❓ unknown / ✖ gone), current task (the dispatch
+gist), commits landed since dispatch (`↑n`), and time since dispatch. The header shows the
+team name, worker counts, and — if you report it — queue progress:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue <done> <total>   # update header counter
+```
+
+How it behaves:
+- **Data comes from the team state file** (`/tmp/cmux-swarm-<ws>.state`), which `spawn`,
+  `spawn-split`, `dispatch`, `reset`, and `retire` maintain automatically — workers
+  spawned **without** swarm.sh won't appear.
+- **Height is dynamic**: the pane auto-fits to its content every refresh (cmux's minimum
+  pane height applies, ~6 rows). New workers appear and grow the pane on the next
+  refresh; retired ones drop off. Disable auto-fit with `spawn-dashboard <interval> 0`.
+- Retire workers via `swarm.sh retire <ws> <surf>` (instead of raw `close-surface` /
+  `close-workspace`) so the dashboard stays in sync.
+- Works in both layouts; run `name-orchestrator` first so the header shows the team name.
 
 ## Step 4 — Dispatch tasks (brief files, not pasted prompts)
 
@@ -225,9 +261,8 @@ already does this; instruct workers to use it rather than a shared session.
 ## Step 8 — Wind down
 
 When the work lands: merge worktree branches, `swarm.sh reset` idle workers for reuse, or
-retire a worker — `cmux close-surface --surface <surf> --workspace <ws>` in split view,
-`cmux close-workspace --workspace <ws>` in tab mode. Summarize what each worker produced
-(commits/branches) back to the user.
+retire a worker — `swarm.sh retire <ws> <surf>` (handles both layouts and keeps the
+dashboard in sync). Summarize what each worker produced (commits/branches) back to the user.
 
 ---
 
@@ -250,10 +285,11 @@ retire a worker — `cmux close-surface --surface <surf> --workspace <ws>` in sp
 | Wait until idle | `swarm.sh wait-idle <ws> <surf> [timeout]` |
 | Wait for a commit | `SHA=$(swarm.sh head <repo>); swarm.sh wait-commit <repo> "$SHA"` |
 | Isolate parallel edits | `swarm.sh worktree <repo> <branch> <dir> <base>` |
+| Sticky status pane | `swarm.sh spawn-dashboard [interval] [autofit 1\|0]` |
+| Report queue progress | `swarm.sh queue <done> <total>` |
 | See the team | `cmux tree` / `cmux list-workspaces` |
 | Interrupt a worker | `cmux send-key --workspace <ws> --surface <surf> ctrl+c` |
-| Retire a worker (split) | `cmux close-surface --surface <surf> --workspace <ws>` |
-| Retire a worker (tab) | `cmux close-workspace --workspace <ws>` |
+| Retire a worker (either layout) | `swarm.sh retire <ws> <surf>` |
 
 ## Pitfalls
 
