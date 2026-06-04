@@ -160,7 +160,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-dashboard 3     
 
 ```
  🐙 Team Orion    agentic-kit@main    busy 1/2    queue 2/5
- ─────────────────────────────────────────────────────────────────────────────────
+
          TASK                                    WORKTREE            COMMIT    AGE
  W0   ⠧  fix-auth                                agentic-kit             +2     4m
  W1   ✓  -                                       agentic-kit-w1           -      -
@@ -174,7 +174,11 @@ branch**, the busy count, and — if you report it — queue progress:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue <done> <total>   # update header counter
+bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" queue clear            # remove it again
 ```
+
+The queue counter is **orchestrator-reported**: it only changes when you call `queue`,
+so update it as tasks complete and `queue clear` it when the batch is done.
 
 How it behaves:
 - **Data comes from the team state file** (`/tmp/cmux-swarm-<ws>.state`), which `spawn`,

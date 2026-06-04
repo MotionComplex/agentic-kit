@@ -437,19 +437,21 @@ fmt_age() {
   else                      echo "$((s/3600))h"; fi
 }
 
-cmd_queue() {  # <done> <total>
+cmd_queue() {  # <done> <total> — or "clear"/no args to remove the counter from the header
   local f; f="$(state_file)" || die "must run inside cmux"
   local tmp="${f}.tmp"
   awk -F'|' '$1!="Q"' "$f" 2>/dev/null > "$tmp" || true
-  echo "Q|$1|$2" >> "$tmp"
+  if [[ -n "${1:-}" && "$1" != "clear" ]]; then
+    echo "Q|$1|$2" >> "$tmp"
+  fi
   mv "$tmp" "$f"
 }
 
 # Render the team overview once. Layout — text hierarchy in terminal terms: BOLD for
-# the team name (primary), normal for live values, DIM for labels/metadata (tertiary);
-# wide 2-space gutters, a divider, and labelled columns so numbers aren't floating:
+# the team name and the column labels, normal for live values, DIM for labels/metadata;
+# wide 2-space gutters and a blank line separating the team section from the table:
 #    🐙 Team Orion    agentic-kit@main    busy 1/2    queue 2/5
-#    ──────────────────────────────────────────────────────────────────────────────
+#
 #          TASK                                  WORKTREE            COMMIT    AGE
 #    W0  ⠧  fix-auth                              agentic-kit            +2     4m
 #    W1  ✓  -                                     agentic-kit-w1          -      -
@@ -487,11 +489,12 @@ cmd_dashboard() {
     [[ -n "$tbranch" ]] || tbranch="$(git -C "$trepo" rev-parse --short HEAD 2>/dev/null || true)"
     hdr+="${gap}$(basename "$trepo")${dim}@${off}${tbranch:-?}"
   fi
-  # Table geometry. Row:  " %-3s  %s  %-38s  %-18s  %6s  %5s"  → 80 cols total.
-  local divider=" ${dim}$(printf '─%.0s' $(seq 81))${off}"
-  local colhdr=" ${dim}$(printf '%-3s  %s  %-38s  %-18s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'COMMIT' 'AGE')${off}"
+  # Table geometry. Row:  " %-3s  %s  %-38s  %-18s  %6s  %5s".  A BLANK line separates
+  # the team section from the table (a dim ─ divider is near-invisible on dark themes),
+  # and the column labels are BOLD so the header row reads as a header, not a value row.
+  local colhdr=" ${bld}$(printf '%-3s  %s  %-38s  %-18s  %6s  %5s' '' ' ' 'TASK' 'WORKTREE' 'COMMIT' 'AGE')${off}"
   if [[ ! -f "$f" ]] || ! grep -q '^W|' "$f"; then
-    printf '%s\n%s\n %sno workers yet%s\n' "$hdr" "$divider" "$dim" "$off"
+    printf '%s\n\n %sno workers yet%s\n' "$hdr" "$dim" "$off"
     return 0
   fi
   local rows="" busy=0 gone=0 count=0
@@ -527,7 +530,7 @@ cmd_dashboard() {
   if [[ -n "$qline" ]]; then
     hdr+="${gap}${dim}queue${off} $(cut -d'|' -f2 <<<"$qline")/$(cut -d'|' -f3 <<<"$qline")"
   fi
-  printf '%s\n%s\n%s\n' "$hdr" "$divider" "$colhdr"
+  printf '%s\n\n%s\n' "$hdr" "$colhdr"
   printf '%s' "$rows"
 }
 
