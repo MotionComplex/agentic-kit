@@ -104,6 +104,34 @@ its **workspace** becomes `🐙 Team <constellation>` (first free name from `TEA
 bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" name-orchestrator
 ```
 
+### Pick the model per task (model fit)
+
+Workers do **not** have to run the orchestrator's model. Match the model+effort to the
+task and pass them to `spawn`/`spawn-split` via the `SWARM_MODEL` / `SWARM_EFFORT` env
+vars (empty = inherit the session default, the legacy behaviour). The chosen model shows
+in the dashboard's **MODEL** column, so fit is visible at a glance.
+
+- `SWARM_MODEL` — `opus` | `sonnet` | `haiku` (alias) or a full id (`claude-opus-4-8`)
+- `SWARM_EFFORT` — `low` | `medium` | `high` | `xhigh` | `max`
+
+**Default heuristic** (state what you picked and why; the user can override anytime):
+
+| Task shape | Model | Effort |
+|---|---|---|
+| Architecture, gnarly debugging, security review, ambiguous/under-specified work | `opus` | `high`/`xhigh` |
+| Well-scoped features, tests, normal edits | `sonnet` | `medium` |
+| Renames, search/grep, formatting, doc tweaks, log triage | `haiku` | `low` |
+
+```bash
+# e.g. a well-scoped implementation task → sonnet/medium
+SWARM_MODEL=sonnet SWARM_EFFORT=medium \
+  bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" spawn-split 0 <repo>
+```
+
+This applies to **both** layouts and is especially useful in **dynamic mode**: when a
+task arrives, classify it, pick the model, and spawn that worker with the matching
+`SWARM_MODEL`/`SWARM_EFFORT`.
+
 ### Split view (default)
 
 Spawn W0 with no anchor (it splits **right** of the orchestrator), then chain each further
@@ -323,6 +351,7 @@ the user confirms they're done checking — never as part of a worker's own task
 | Label this session | `swarm.sh name-orchestrator` → 🧠 Orchestrator tab + 🐙 Team <constellation> workspace |
 | Spawn worker (split view) | `swarm.sh spawn-split <n> <repo> [anchor-pane]` → `WORKSPACE`/`SURFACE`/`PANE` |
 | Spawn worker (tab) | `swarm.sh spawn <n> <repo>` → `WORKSPACE`/`SURFACE` |
+| Spawn with a task-fit model | `SWARM_MODEL=sonnet SWARM_EFFORT=medium swarm.sh spawn-split <n> <repo>` (shows in dashboard MODEL) |
 | Re-find worker n's refs | `swarm.sh refs <n>` |
 | Relabel tab | `swarm.sh rename <ws> <surf> "🤖 W0 · task"` |
 | Dispatch a brief | `swarm.sh dispatch <ws> <surf> /tmp/x.md "gist"` |

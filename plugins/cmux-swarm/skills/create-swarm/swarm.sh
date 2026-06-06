@@ -17,6 +17,10 @@
 #                                                 No anchor: splits right of the workspace (first worker).
 #                                                 With anchor (a pane ref from a previous spawn-split): splits below it.
 #                                                 prints:  WORKSPACE=<ref>\nSURFACE=<ref>\nPANE=<ref>
+#     Per-worker model/effort — match the model to the task (env vars, empty = inherit default):
+#       SWARM_MODEL=sonnet SWARM_EFFORT=medium swarm.sh spawn-split <n> <repo>
+#       SWARM_MODEL : opus|sonnet|haiku|<full id>   SWARM_EFFORT : low|medium|high|xhigh|max
+#       The chosen model shows in the dashboard's MODEL column.
 #   swarm.sh refs <n>                           → re-resolve "WORKSPACE/SURFACE" for an existing W<n> (tab or split)
 #   swarm.sh name-orchestrator [title]          → label the caller's TAB (default "🧠 Orchestrator", like the
 #                                                 workers' 🤖 tabs) and rename the caller's WORKSPACE to
@@ -43,7 +47,7 @@
 #   swarm.sh retire <ws> <surf>                 → close a worker (split pane or tab) + drop it from the dashboard
 #
 # Team state: spawn/dispatch/reset record workers in ${TMPDIR}/cmux-swarm-<orchestrator-ws>.state
-# (rows "W|n|ws|surf|repo|task|dispatch_epoch|base_sha", one "Q|done|total"). The dashboard
+# (rows "W|n|ws|surf|repo|task|dispatch_epoch|base_sha|model", one "Q|done|total"). The dashboard
 # reads it; workers spawned without swarm.sh won't appear.
 #
 # Monitoring philosophy (most robust → least):
@@ -68,6 +72,34 @@ find_claude() {
   elif [[ -x "$HOME/.local/bin/claude" ]]; then echo "$HOME/.local/bin/claude"
   elif [[ -x "$CLAUDE_APP_BIN" ]]; then echo "$CLAUDE_APP_BIN"
   else echo "claude"; fi   # last resort: assume on PATH at runtime
+}
+
+# Per-worker model/effort. The orchestrator picks a model that fits the task and exports
+# SWARM_MODEL / SWARM_EFFORT for that one spawn; empty = inherit the session default
+# (the legacy behaviour — workers matched the orchestrator's model). Honoured by both
+# spawn and spawn-split.
+#   SWARM_MODEL  : opus | sonnet | haiku | <full id e.g. claude-opus-4-8>   (claude --model)
+#   SWARM_EFFORT : low | medium | high | xhigh | max                        (claude --effort)
+worker_launch() {  # <claude_bin> → the full "claude … " --command string for a worker
+  local c="$1 --dangerously-skip-permissions"
+  [[ -n "${SWARM_MODEL:-}"  ]] && c="$c --model ${SWARM_MODEL}"
+  [[ -n "${SWARM_EFFORT:-}" ]] && c="$c --effort ${SWARM_EFFORT}"
+  printf '%s' "$c"
+}
+# Compact dashboard token for the chosen model+effort, e.g. "opus/hi", "sonnet/md",
+# "haiku" (no effort), or "-" (inherited default). Stored in the team state (field 9).
+# ASCII separator on purpose: the dashboard printf-pads by bytes, so a multibyte glyph
+# here would skew column alignment.
+worker_model_label() {
+  local m="${SWARM_MODEL:-}" e="${SWARM_EFFORT:-}" etag=""
+  [[ -z "$m" && -z "$e" ]] && { printf -- '-'; return; }
+  case "$e" in
+    low) etag=lo;; medium) etag=md;; high) etag=hi;; xhigh) etag=xhi;; max) etag=max;;
+    "") etag="";; *) etag="$e";;
+  esac
+  if   [[ -n "$m" && -n "$etag" ]]; then printf '%s/%s' "$m" "$etag"
+  elif [[ -n "$m" ]];              then printf '%s' "$m"
+  else                                  printf '/%s' "$etag"; fi
 }
 CMUX="$(cmux_bin || true)"
 
@@ -109,7 +141,7 @@ pane_of_surface() {
 # One file per team, keyed by the ORCHESTRATOR's workspace ref (spawn/dispatch/reset all
 # run from the orchestrator session, and the dashboard pane lives in its workspace, so
 # they all resolve the same file). Rows:
-#   W|<n>|<ws>|<surf>|<repo>|<task>|<dispatch_epoch>|<base_sha>
+#   W|<n>|<ws>|<surf>|<repo>|<task>|<dispatch_epoch>|<base_sha>|<model>
 #   Q|<done>|<total>
 #   T|<team label>
 #   R|<team repo>   (the orchestrator's cwd, recorded by name-orchestrator)
@@ -141,11 +173,13 @@ state_team() {  # [ws]
   [[ -f "$f" ]] || return 1
   grep '^T|' "$f" 2>/dev/null | tail -1 | cut -d'|' -f2
 }
-state_register() {  # <n> <ws> <surf> <repo>
+state_register() {  # <n> <ws> <surf> <repo> [model-label]
   local f; f="$(state_file)" || return 0
   local tmp="${f}.tmp"
   awk -F'|' -v n="$1" '!($1=="W" && $2==n)' "$f" 2>/dev/null > "$tmp" || true
-  echo "W|$1|$2|$3|$4||0|" >> "$tmp"
+  # Fields: W|n|ws|surf|repo|task|epoch|sha|model. Model is field 9 (append-only so the
+  # task/epoch/sha awk in dispatch/reset, which rebuilds $0 with OFS, preserves it).
+  echo "W|$1|$2|$3|$4||0||${5:-}" >> "$tmp"
   mv "$tmp" "$f"
 }
 state_on_dispatch() {  # <ws> <surf> <task>
@@ -203,7 +237,7 @@ cmd_spawn() {
   "$CMUX" new-workspace \
     --name "$name" \
     --cwd "$repo" \
-    --command "$claude_bin --dangerously-skip-permissions" \
+    --command "$(worker_launch "$claude_bin")" \
     --focus false >/dev/null
   local ws; ws="$(ws_ref_by_name "$name")"
   [[ -n "$ws" ]] || die "could not resolve workspace ref for '$name' after new-workspace"
@@ -212,7 +246,7 @@ cmd_spawn() {
   "$CMUX" select-workspace --workspace "$ws" >/dev/null
   local surf; surf="$(first_surface_of "$ws")"
   [[ -n "$surf" ]] || die "could not resolve surface ref for $ws"
-  state_register "$n" "$ws" "$surf" "$repo"
+  state_register "$n" "$ws" "$surf" "$repo" "$(worker_model_label)"
   echo "WORKSPACE=$ws"
   echo "SURFACE=$surf"
 }
@@ -231,7 +265,7 @@ cmd_spawn_split() {
   "$CMUX" new-workspace \
     --name "$tmpname" \
     --cwd "$repo" \
-    --command "$claude_bin --dangerously-skip-permissions" \
+    --command "$(worker_launch "$claude_bin")" \
     --focus false >/dev/null
   local tmp_ws; tmp_ws="$(ws_ref_by_name "$tmpname")"
   [[ -n "$tmp_ws" ]] || die "could not resolve temp workspace '$tmpname' after new-workspace"
@@ -258,7 +292,7 @@ cmd_spawn_split() {
     sleep 1; waited=$((waited+1))
   done
   local pane; pane="$(pane_of_surface "$ws" "$surf" || true)"
-  state_register "$n" "$ws" "$surf" "$repo"
+  state_register "$n" "$ws" "$surf" "$repo" "$(worker_model_label)"
   echo "WORKSPACE=$ws"
   echo "SURFACE=$surf"
   echo "PANE=${pane:-unknown}"
@@ -498,12 +532,14 @@ cmd_queue() {  # <done> <total> — or "clear"/no args to remove the counter fro
 # Render the team overview once. Layout — a dim rounded box; the top border carries the
 # bold team name (left) and the team overview (right): repo@branch · busy · queue.
 # Inside: a blank spacer, bold column labels, then one row per worker:
-#    ╭─ 🐙 Team Orion ───────────────────────────────── agentic-kit@main · busy 1/2 · shipped 2/5 ─╮
-#    │                                                                                             │
-#    │       TASK                      WORKTREE      PORT    NETWORK           STATUS         AGE │
-#    │ W0  ⠧  fix-auth                 agentic-kit   :5173   192.168.1.7:5173  +2 ahead        4m │
-#    │ W1  ✓  dark-mode                ak-w1         :5174   -                 merged         12m │
-#    ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
+#    ╭─ 🐙 Team Orion ─────────────────────────────────── agentic-kit@main · busy 1/2 · shipped 2/5 ─╮
+#    │                                                                                               │
+#    │       TASK                  MODEL       WORKTREE      PORT    NETWORK           STATUS     AGE │
+#    │ W0  ⠧  fix-auth             opus/hi     agentic-kit   :5173   192.168.1.7:5173  +2 ahead    4m │
+#    │ W1  ✓  dark-mode            sonnet/md   ak-w1         :5174   -                 merged     12m │
+#    ╰───────────────────────────────────────────────────────────────────────────────────────────────╯
+# MODEL is the worker's per-task model+effort (magenta opus / cyan sonnet / green haiku;
+# dim "-" = inherited session default), chosen by the orchestrator at spawn time.
 # PORT/NETWORK are auto-detected per refresh (lsof): listening TCP servers whose process
 # cwd is inside the worker's repo/worktree. NETWORK shows the LAN ip:port (green) when the
 # server is bound on all interfaces — i.e. reachable from phones on the same network.
@@ -525,7 +561,7 @@ cmd_dashboard() {
   [[ -n "$ws" ]] || ws="$(caller_ws)"
   local f; f="$(state_file "$ws")" || die "must run inside cmux"
   local now; now="$(date +%s)"
-  local dim=$'\e[2m' off=$'\e[0m' grn=$'\e[32m' ylw=$'\e[33m' red=$'\e[31m' bld=$'\e[1m' cyn=$'\e[36m'
+  local dim=$'\e[2m' off=$'\e[0m' grn=$'\e[32m' ylw=$'\e[33m' red=$'\e[31m' bld=$'\e[1m' cyn=$'\e[36m' mag=$'\e[35m'
   # Team label: prefer the persisted T row (cmux auto-titles can overwrite the
   # workspace label), fall back to the workspace's current title.
   local team
@@ -545,9 +581,10 @@ cmd_dashboard() {
     tbranch="$(git -C "$trepo" branch --show-current 2>/dev/null || true)"
     [[ -n "$tbranch" ]] || tbranch="$(git -C "$trepo" rev-parse --short HEAD 2>/dev/null || true)"
   fi
-  # ----- box helpers. Interior width WIN; table row width is 103 by construction:
-  # " %-3s  %s  %-28s  %-14s  %-6s  %-21s  %-10s  %5s" = 1+3+2+1+2+28+2+14+2+6+2+21+2+10+2+5.
-  local WIN=104
+  # ----- box helpers. Interior width WIN; table row width is 111 by construction:
+  # " %-3s  %s  %-24s  %-10s  %-14s  %-6s  %-21s  %-10s  %5s"
+  #   = 1+3+2+1+2+24+2+10+2+14+2+6+2+21+2+10+2+5 = 111.
+  local WIN=112
   local tdw=${#team}
   if [[ "$team" == *"🐙"* ]]; then tdw=$((tdw+1)); fi   # emoji renders double-width
   local bbot=" ${dim}╰$(printf '─%.0s' $(seq "$WIN"))╯${off}"
@@ -585,7 +622,7 @@ cmd_dashboard() {
     if (( ipad < 0 )); then ipad=0; fi
     box "$(printf '%*s' "$ipad" '')${info}" $(( ipad + ${#infop} ))
   }
-  local colhdr=" ${bld}$(printf '%-3s  %s  %-28s  %-14s  %-6s  %-21s  %-10s  %5s' '' ' ' 'TASK' 'WORKTREE' 'PORT' 'NETWORK' 'STATUS' 'AGE')${off}"
+  local colhdr=" ${bld}$(printf '%-3s  %s  %-24s  %-10s  %-14s  %-6s  %-21s  %-10s  %5s' '' ' ' 'TASK' 'MODEL' 'WORKTREE' 'PORT' 'NETWORK' 'STATUS' 'AGE')${off}"
   # Dev-server detection: one lsof snapshot per render, filtered per worker row.
   local psnap lan
   psnap="$(ports_snapshot || true)"
@@ -599,8 +636,8 @@ cmd_dashboard() {
     return 0
   fi
   local rows="" busy=0 gone=0 count=0
-  local tag n wws wsurf repo task epoch sha icon screen wt age tcol
-  while IFS='|' read -r tag n wws wsurf repo task epoch sha; do
+  local tag n wws wsurf repo task epoch sha model icon screen wt age tcol mcell
+  while IFS='|' read -r tag n wws wsurf repo task epoch sha model; do
     [[ "$tag" == "W" ]] || continue
     count=$((count+1))
     local working=0
@@ -652,8 +689,15 @@ cmd_dashboard() {
     if [[ "$epoch" =~ ^[0-9]+$ && "$epoch" -gt 0 ]]; then age="$(printf '%5s' "$(fmt_age $((now - epoch)))")"; fi
     age="${dim}${age}${off}"
     # Hierarchy: the ACTIVE task is the loudest cell on the row; finished/idle tasks dim.
-    task="${task:--}"; tcol="$(printf '%-28s' "${task:0:28}")"
+    task="${task:--}"; tcol="$(printf '%-24s' "${task:0:24}")"
     if (( working )); then tcol="${tcol}"; else tcol="${dim}${tcol}${off}"; fi
+    # MODEL — the per-worker model+effort (field 9), tier-coloured for quick scanning:
+    # magenta opus / cyan sonnet / green haiku / dim for inherited-default ("-").
+    local mcol="$dim" mtxt="${model:--}"
+    case "$model" in
+      opus*)   mcol="$mag";; sonnet*) mcol="$cyn";; haiku*) mcol="$grn";; *) mcol="$dim";;
+    esac
+    mcell="$(printf '%-10s' "${mtxt:0:10}")"; mcell="${mcol}${mcell}${off}"
     wt="$(basename "${repo:--}")"; wt="$(printf '%-14s' "${wt:0:14}")"
     # Dev server: PORT = the worker's listening port(s); NETWORK = the LAN URL a
     # phone on the same network can open (green = bound on all interfaces).
@@ -673,7 +717,7 @@ cmd_dashboard() {
     if [[ -n "$nport" ]]; then
       ncell="$(printf '%-21s' "${lan:-0.0.0.0}:${nport}")"; ncell="${grn}${ncell}${off}"
     fi
-    rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${dim}${wt}${off}  ${pcell}  ${ncell}  ${scell}  ${age}" 103)"$'\n'
+    rows+="$(box " $(printf '%-3s' "W$n")  ${icon}  ${tcol}  ${mcell}  ${dim}${wt}${off}  ${pcell}  ${ncell}  ${scell}  ${age}" 111)"$'\n'
   done < <(grep '^W|' "$f" | sort -t'|' -k2,2n)
   if [[ -n "$infop" ]]; then info+="$isep"; infop+="$isepp"; fi
   info+="${dim}busy${off} ${busy}/${count}"
@@ -694,7 +738,7 @@ cmd_dashboard() {
   printf '%s\n' "$btop"
   if [[ -n "$info_inside" ]]; then box_info_inside; fi
   printf '%s\n' "$bblank"
-  box "$colhdr" 103
+  box "$colhdr" 111
   printf '%s' "$rows"
   printf '%s\n' "$bbot"
 }
