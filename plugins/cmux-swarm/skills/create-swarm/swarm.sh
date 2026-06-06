@@ -705,6 +705,12 @@ cmd_dashboard() {
 # amount is in PIXELS, and a move always GROWS the pane (amount must be > 0). So:
 # grow the dashboard = its own bottom border down (-D); shrink it = grow the pane
 # directly BELOW it upward (-U on that neighbor).
+# Echoes "1" on stdout iff it issued a real resize this call — the loop uses that to do a
+# one-shot full clear (the resize reflows the grid async; see cmd_dashboard_loop).
+# Back-off state lives in a file (this runs in a $(...) subshell, so shell globals here
+# would not survive to the next call): if our last resize toward the same target left the
+# pane's actual rows unchanged, the pane is pinned (neighbour at min height) and hammering
+# it every cycle just churns the layout — wait for the content to change instead.
 autofit_pane() {  # <content> <ws> <surf>
   local content="$1" ws="$2" surf="$3" want rows delta pane
   [[ -n "$ws" && -n "$surf" ]] || return 0
@@ -735,7 +741,13 @@ autofit_pane() {  # <content> <ws> <surf>
   [[ -n "$self_y" ]] || return 0
   (( rows > 0 )) || return 0
   delta=$(( want - rows ))
-  if (( delta == 0 )); then return 0; fi
+  # Back-off bookkeeping (see header comment).
+  local fitf="/tmp/cmux-swarm-${ws//:/-}.dashfit" lw=-1 lr=-1
+  [[ -f "$fitf" ]] && read -r lw lr <"$fitf" 2>/dev/null
+  if (( delta == 0 )); then printf '%s %s' "$want" "$rows" >"$fitf" 2>/dev/null || true; return 0; fi
+  # Pinned: same target as last time and the pane didn't budge → stop hammering it.
+  if (( want == lw && rows == lr )); then return 0; fi
+  printf '%s %s' "$want" "$rows" >"$fitf" 2>/dev/null || true
   local px=$(( (delta < 0 ? -delta : delta) * cell ))
   if (( delta > 0 )); then
     "$CMUX" resize-pane --pane "$pane" --workspace "$ws" -D --amount "$px" >/dev/null 2>&1 || true
@@ -750,6 +762,7 @@ autofit_pane() {  # <content> <ws> <surf>
     [[ -n "$below" ]] || return 0
     "$CMUX" resize-pane --pane "$below" --workspace "$ws" -U --amount "$px" >/dev/null 2>&1 || true
   fi
+  printf 1
 }
 
 # The loop that runs inside the dashboard pane. Args: [interval] [autofit 1|0] [ws] [surf]
@@ -761,24 +774,41 @@ autofit_pane() {  # <content> <ws> <surf>
 # array (not a sliced string) so a C-locale pane can't split the multibyte glyphs.
 cmd_dashboard_loop() {
   local interval="${1:-5}" autofit="${2:-1}" ws="${3:-}" surf="${4:-}"
-  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) idx=0 steps raw out k
+  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) idx=0 steps raw out k lead did
   set +e   # the loop is a daemon — render errors must not kill it
   tput civis 2>/dev/null || true
   trap 'tput cnorm 2>/dev/null || true' EXIT
   steps=$(( interval * 4 )); (( steps >= 1 )) || steps=1
+  # Single-renderer lock: only ONE loop may drive a given workspace's pane. If the skill
+  # is re-run, a second dashboard is spawned, or a stale loop survives a reload, the newest
+  # loop's PID wins the lock and older loops step aside next tick — two loops both printing
+  # at \033[H and both autofitting is itself a cause of stacked headers + resize thrash.
+  local lock=""
+  if [[ -n "$ws" ]]; then lock="/tmp/cmux-swarm-${ws//:/-}.dashlock"; echo $$ >"$lock"; fi
   while true; do
+    [[ -n "$lock" && "$(cat "$lock" 2>/dev/null)" != "$$" ]] && exit 0
     raw="$(cmd_dashboard "$ws" $'\x01' 2>&1 || true)"
-    if [[ "$autofit" == "1" ]]; then autofit_pane "$raw" "$ws" "$surf" || true; fi
+    did=0
+    if [[ "$autofit" == "1" ]]; then
+      [[ "$(autofit_pane "$raw" "$ws" "$surf")" == 1 ]] && did=1
+    fi
+    # A real resize reflows the PTY grid asynchronously; drawing into the still-small grid
+    # scrolls the frame's top into scrollback, which reappears as stacked headers once the
+    # pane grows. After a resize: settle briefly, then draw with a full screen+scrollback
+    # clear so nothing stale survives. Steady state keeps the cheap no-flicker path.
+    lead=$'\033[H'
+    if (( did )); then lead=$'\033[H\033[2J\033[3J'; sleep 0.15; fi
     if [[ "$raw" == *$'\x01'* ]]; then
       for (( k = 0; k < steps; k++ )); do
         out="${raw//$'\x01'/${frames[idx % 10]}}"; idx=$((idx+1))
         out="${out//$'\n'/$'\e[K\n'}"                 # clear-to-EOL per line: no flicker,
-        printf '\033[H%s\033[K\033[J' "$out"          # no full-screen clear needed
+        printf '%s%s\033[K\033[J' "$lead" "$out"       # full clear only on the post-resize frame
+        lead=$'\033[H'
         sleep 0.25
       done
     else
       out="${raw//$'\n'/$'\e[K\n'}"
-      printf '\033[H%s\033[K\033[J' "$out"
+      printf '%s%s\033[K\033[J' "$lead" "$out"
       sleep "$interval"
     fi
   done
