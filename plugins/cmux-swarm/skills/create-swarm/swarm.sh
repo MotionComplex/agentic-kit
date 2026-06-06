@@ -839,9 +839,14 @@ cmd_spawn_dashboard() {
   "$CMUX" split-off --surface "$dsurf" up --workspace "$ws" --focus false >/dev/null
   "$CMUX" close-workspace --workspace "$tws" >/dev/null 2>&1 || true
   "$CMUX" rename-tab --workspace "$ws" --surface "$dsurf" "📊 Swarm" >/dev/null 2>&1 || true
+  # Force the orchestrator's own workspace to render — a cmux pane only attaches its PTY
+  # once its workspace is the rendered/active one. When Claude starts up, the active tab
+  # is often some OTHER workspace, so this dashboard pane never renders and read-screen
+  # below times out (same failure as Pitfall #1 "Skipping the PTY force" for `spawn`).
+  "$CMUX" select-workspace --workspace "$ws" >/dev/null 2>&1 || true
   local waited=0
   until "$CMUX" read-screen --workspace "$ws" --surface "$dsurf" >/dev/null 2>&1; do
-    (( waited >= 15 )) && die "PTY did not attach for $dsurf after 15s"
+    (( waited >= 30 )) && die "PTY did not attach for $dsurf after 30s"
     sleep 1; waited=$((waited+1))
   done
   # Launch the loop with the pane's own refs baked in.
