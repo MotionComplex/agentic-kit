@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "motion-trace": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/bin/start.js"]
+    }
+  }
+}

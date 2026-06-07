@@ -54,6 +54,10 @@
 #   1. commit-aware  (wait-commit)  — best signal for code tasks.
 #   2. footer marker (status/wait-idle) — "esc to interrupt"=working, "for agents"=idle.
 #   3. anchored DONE:/BLOCKED: <task-id> in the final screen line (caller greps `read`).
+# The wait-* commands BLOCK (they poll internally). The orchestrator should launch them as
+# BACKGROUND tasks (Claude Code: run_in_background) — a backgrounded wait is harness-tracked,
+# so it pings the orchestrator the moment it returns. The worker pane itself is NOT tracked;
+# backgrounding the wait is what turns "did the worker finish?" into an automatic notification.
 set -euo pipefail
 # Char-based (not byte-based) string lengths — the dashboard's border math measures
 # strings containing multibyte glyphs, and the dashboard pane may run with locale C.
@@ -758,7 +762,10 @@ cmd_dashboard() {
 autofit_pane() {  # <content> <ws> <surf>
   local content="$1" ws="$2" surf="$3" want rows delta pane
   [[ -n "$ws" && -n "$surf" ]] || return 0
-  want=$(( $(wc -l <<<"$content") + 1 ))
+  # Exact content height (no +1 margin): the deadband below leaves a row of slack, so
+  # asking for a margin here too would mean the pane never reaches its target and grows
+  # forever — the old +1 was a prime cause of the every-cycle flap.
+  want=$(( $(wc -l <<<"$content") ))
   (( want >= 3 )) || want=3
   pane="$(pane_of_surface "$ws" "$surf" || true)"; [[ -n "$pane" ]] || return 0
   # Per-pane geometry "ref|x|y|cell_h|rows" from the pretty-printed rpc JSON
@@ -785,10 +792,16 @@ autofit_pane() {  # <content> <ws> <surf>
   [[ -n "$self_y" ]] || return 0
   (( rows > 0 )) || return 0
   delta=$(( want - rows ))
-  # Back-off bookkeeping (see header comment).
+  # Deadband: grow the moment content is clipped (delta>=1), but only shrink once there
+  # are ≥2 wasted rows (delta<=-2). A single row of slack is deliberately left alone:
+  # cmux resizes in pixels and the grid reflows asynchronously, so the rows reported next
+  # cycle can jitter by ±1 even when the content is unchanged. Acting on that ±1 was the
+  # flap that resized the pane on a ~5s beat — shifting the layout below it and firing the
+  # full-clear flash. Adding/removing a single worker still changes height by a full row,
+  # so legitimate one-row growth (delta>=1) is honoured immediately.
   local fitf="/tmp/cmux-swarm-${ws//:/-}.dashfit" lw=-1 lr=-1
   [[ -f "$fitf" ]] && read -r lw lr <"$fitf" 2>/dev/null
-  if (( delta == 0 )); then printf '%s %s' "$want" "$rows" >"$fitf" 2>/dev/null || true; return 0; fi
+  if (( delta >= -1 && delta <= 0 )); then printf '%s %s' "$want" "$rows" >"$fitf" 2>/dev/null || true; return 0; fi
   # Pinned: same target as last time and the pane didn't budge → stop hammering it.
   if (( want == lw && rows == lr )); then return 0; fi
   printf '%s %s' "$want" "$rows" >"$fitf" 2>/dev/null || true
@@ -818,7 +831,7 @@ autofit_pane() {  # <content> <ws> <surf>
 # array (not a sliced string) so a C-locale pane can't split the multibyte glyphs.
 cmd_dashboard_loop() {
   local interval="${1:-5}" autofit="${2:-1}" ws="${3:-}" surf="${4:-}"
-  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) idx=0 steps raw out k lead did
+  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) idx=0 steps raw out k lead did last=""
   set +e   # the loop is a daemon — render errors must not kill it
   tput civis 2>/dev/null || true
   trap 'tput cnorm 2>/dev/null || true' EXIT
@@ -841,8 +854,9 @@ cmd_dashboard_loop() {
     # pane grows. After a resize: settle briefly, then draw with a full screen+scrollback
     # clear so nothing stale survives. Steady state keeps the cheap no-flicker path.
     lead=$'\033[H'
-    if (( did )); then lead=$'\033[H\033[2J\033[3J'; sleep 0.15; fi
+    if (( did )); then lead=$'\033[H\033[2J\033[3J'; sleep 0.15; last=""; fi
     if [[ "$raw" == *$'\x01'* ]]; then
+      last=""                                          # animating → force a clean redraw once we settle
       for (( k = 0; k < steps; k++ )); do
         out="${raw//$'\x01'/${frames[idx % 10]}}"; idx=$((idx+1))
         out="${out//$'\n'/$'\e[K\n'}"                 # clear-to-EOL per line: no flicker,
@@ -852,7 +866,13 @@ cmd_dashboard_loop() {
       done
     else
       out="${raw//$'\n'/$'\e[K\n'}"
-      printf '%s%s\033[K\033[J' "$lead" "$out"
+      # Skip the repaint entirely when the idle frame is byte-identical to the last one
+      # we drew: a steady dashboard then never touches the pane, so there is zero flicker
+      # while you read. Any real change (status, port, git lifecycle) still redraws.
+      if [[ "$out" != "$last" ]]; then
+        printf '%s%s\033[K\033[J' "$lead" "$out"
+        last="$out"
+      fi
       sleep "$interval"
     fi
   done

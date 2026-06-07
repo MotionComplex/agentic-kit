@@ -1,0 +1,26 @@
+{
+  "name": "motion-trace",
+  "version": "0.1.0",
+  "description": "Make web motion legible to AI — capture animation as deterministic, per-frame structured data (not video).",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "motion-trace": "bin/motion-trace.js",
+    "motion-trace-mcp": "bin/mcp-server.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node test/determinism.test.mjs && node test/metrics-diff.test.mjs && node test/analyze.test.mjs && node test/filmstrip-viewer.test.mjs && node test/integration.test.mjs && node test/discover.test.mjs && node test/realtime.test.mjs && node test/mcp-smoke.mjs",
+    "golden:update": "MOTION_TRACE_UPDATE_GOLDEN=1 node test/determinism.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "playwright": "^1.40.0",
+    "zod": "^4.4.3"
+  }
+}

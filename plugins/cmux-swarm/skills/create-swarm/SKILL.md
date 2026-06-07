@@ -290,20 +290,37 @@ tree at a time** — never let two workers write the same checkout concurrently.
 
 ## Step 6 — Monitor (most robust → least)
 
-Use the strongest signal the task affords:
+**Run every `wait-*` as a _background_ Bash task (`run_in_background: true`). This is what makes
+monitoring automatic.** A cmux worker is a separate process — it never reports back, and the
+worker pane is *not* harness-tracked, so nothing pings you when it finishes on its own. But a
+**backgrounded `swarm.sh wait-*` command _is_ harness-tracked**: when it exits (the worker
+committed / went idle) the harness re-invokes you with the result. So you get pinged the moment
+a worker lands, without parking your turn — and one background wait **per worker** lets you
+watch the whole team in parallel and react as each one finishes.
+
+- **Do not** run a wait in the foreground: it blocks your turn, and the Bash tool caps at 10
+  min, so a `1800` (30-min) wait is silently truncated and dies early.
+- **Do not** fall back to manual `read`/`status` polling as your primary loop. That is the
+  degraded path (it's what you're stuck doing if you *didn't* background a wait). Use `read`
+  only for detail *after* a wait has pinged you, or for an on-demand spot check.
+- If you catch yourself thinking *"workers aren't harness-tracked, so I can't be auto-pinged"* —
+  that's the trap. Background your own `wait-*`; **that** is the tracked thing that pings you.
+
+Use the strongest signal the task affords (each run in the background, per above):
 
 1. **Commit-aware (best for code tasks).** Arm before dispatch, then wait:
    ```bash
    SHA=$(bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" head <repo>)
    # ... dispatch ...
+   # run this one as a background task → it pings you with the new sha when the worker commits
    bash "${CLAUDE_PLUGIN_ROOT}/skills/create-swarm/swarm.sh" wait-commit <repo> "$SHA" 1800   # prints new sha
    ```
    A new commit = the worker finished a unit of work.
 
 2. **Footer markers.** `swarm.sh status <ws> <surf>` → `WORKING` (`esc to interrupt` present)
-   / `IDLE` (`← for agents` present) / `UNKNOWN`. Use `wait-idle <ws> <surf> [timeout]` — it
-   **re-checks after 6s** before declaring idle, because a single idle frame is flaky while
-   output is still streaming.
+   / `IDLE` (`← for agents` present) / `UNKNOWN`. Use `wait-idle <ws> <surf> [timeout]` (again,
+   backgrounded) — it **re-checks after 6s** before declaring idle, because a single idle frame
+   is flaky while output is still streaming.
 
 3. **Anchored markers.** Have the brief end the worker with `DONE: <task-id>` or
    `BLOCKED: <task-id>`, then `swarm.sh read <ws> <surf>` and grep. **Anchor to a unique

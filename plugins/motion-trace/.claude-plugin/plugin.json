@@ -1,0 +1,8 @@
+{
+  "name": "motion-trace",
+  "displayName": "Motion Trace",
+  "version": "0.1.0",
+  "description": "Capture and review web animation as structured, per-frame data (not video). Extracts resolved motion state from the live page so an agent can review easing, timing, overshoot, prefers-reduced-motion accessibility, and real-runtime jank during browsing or E2E. Deterministic capture for CSS/WAAPI plus a realtime mode for JS-library/scroll motion; also a regression diff between two captures.",
+  "author": { "name": "MotionComplex" },
+  "keywords": ["animation", "motion", "playwright", "accessibility", "reduced-motion", "e2e", "jank", "mcp"]
+}

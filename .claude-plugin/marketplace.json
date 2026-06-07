@@ -9,6 +9,11 @@
       "name": "cmux-swarm",
       "source": "./plugins/cmux-swarm",
       "description": "Orchestrate a team of Claude Code agents in cmux (create-swarm) plus filtered code-check and visual-check skills and a cmux bootstrap command."
+    },
+    {
+      "name": "motion-trace",
+      "source": "./plugins/motion-trace",
+      "description": "Review web animation as structured per-frame data (not video): easing, overshoot, prefers-reduced-motion accessibility, and real-runtime jank. MCP tools (discover/review/capture/diff) plus a motion-review skill."
     }
   ]
 }

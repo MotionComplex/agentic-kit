@@ -1,2 +1,6 @@
 # macOS Finder metadata
 .DS_Store
+
+# motion-trace plugin installs its server deps on first run (see server/bin/start.js)
+plugins/motion-trace/server/node_modules/
+plugins/motion-trace/server/node_modules
