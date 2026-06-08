@@ -16,7 +16,9 @@ description: >-
 
 # UI Reverse-Engineer
 
-Turn a UI screenshot into a faithful, disassembled reconstruction. The hard part — and the point — is the **disassembled view**: each component rebuilt in isolation so it independently matches the source.
+Turn a UI source — a screenshot **or a live URL** — into a faithful, disassembled reconstruction. The hard part — and the point — is the **disassembled view**: each component rebuilt in isolation so it independently matches the source.
+
+When the source is a URL, you have **ground truth instead of inference**: read the page's real computed CSS rather than guessing values from pixels. This makes Phase 1 a measurement, not an estimate. See `references/url-extraction.md` and the Phase 1 input modes below.
 
 ## The fidelity contract (read first)
 
@@ -46,7 +48,11 @@ Run these phases in order. Every phase has a job; skipping one is where fidelity
 
 ### Phase 1 — Measure (observe, do not interpret)
 
-Extract ground-truth from the pixels. Do not build from a memory of "the look" — only from measured values. Capture, per the source image:
+This phase has **two input modes**. Pick by what the source is; everything downstream (Phase 2 onward) is identical because it only ever speaks in tokens.
+
+**Mode A — URL (preferred when you have one).** A live page carries its own answers, so *read* values, don't estimate them. Use Claude in Chrome (load the tools via ToolSearch if deferred): `navigate` to the URL, then run `getComputedStyle` through `javascript_tool` to pull real hex colors, font stacks, `border-radius`, `box-shadow`, padding/margin/gap, and — when the site exposes them — its actual `--token` CSS custom properties and stylesheet `@media` breakpoints. This often hands you Phase 2 for free: a component-based site frequently *ships* its design tokens. Capture the real DOM hierarchy for Phase 3 too. Take a `computer` screenshot as well — you still need the visual for classification (photo vs material vs illustration) and for Phase 6 verification. Scope to **one screen/state**: pick the page or route, dismiss overlays, and record the viewport width you read at. Fall back to Mode B for anything the DOM can't answer — canvas/WebGL surfaces, cross-origin or auth-walled content, or pages too tangled to read cleanly. See `references/url-extraction.md` for the extraction snippets and what to trust vs re-derive.
+
+**Mode B — Screenshot (image source, or URL fallback).** No metadata exists, so extract ground-truth from the pixels. Do not build from a memory of "the look" — only from measured values. Capture, per the source image:
 
 - Device/frame size, the content safe-margins, and the column structure.
 - Sampled color values (read actual hex from the pixels, not a guess).
@@ -154,6 +160,7 @@ A single combined board (components → composition → skeleton in three labell
 
 ## References
 
+- `references/url-extraction.md` — Phase 1 Mode A: reading a live URL with Claude in Chrome — the `getComputedStyle` snippets, harvesting exposed `--token` vars and `@media` breakpoints, scoping to one screen, what to trust vs re-derive, and when to fall back to a screenshot.
 - `references/token-extraction.md` — Phase 2 in depth: base-unit inference, scale derivation, snapping tolerance, outlier handling, `tokens.json` schema.
 - `references/construction-methods.md` — Phase 4 decision table: element type → primitive, with rationale and gotchas.
 - `references/material-recipes.md` — Phase 5 effect stacks: glassmorphism (with the backdrop precondition), neumorphism, scrims, gradient-under-glass, and the "effects need preconditions" principle.
