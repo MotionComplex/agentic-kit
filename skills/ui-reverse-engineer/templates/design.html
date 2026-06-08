@@ -1,0 +1,122 @@
+<!doctype html>
+<!--
+  TEMPLATE: design.html - the index / front door (generated last, opened first).
+  This is WRAPPER chrome: copy it verbatim, then fill the {{PLACEHOLDERS}} and
+  the <!-- REGION ... --> blocks. Keep the section order and class names intact so
+  every reconstruction has the same navigable structure. See templates/README.md.
+
+  Placeholders ({{...}}) are scalar substitutions, mostly from tokens.json.
+  REGION blocks are where you inject generated, source-specific markup (lists, samples).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{APP_NAME}} - design index</title>
+<style>
+  /* Load the identified webfont. Replace Inter/the URLs with tokens.type.loaded. */
+  @font-face{font-family:'{{FONT_FAMILY}}';font-weight:400;font-display:swap;src:url('{{FONT_URL_400}}') format('woff2')}
+  @font-face{font-family:'{{FONT_FAMILY}}';font-weight:500;font-display:swap;src:url('{{FONT_URL_500}}') format('woff2')}
+  @font-face{font-family:'{{FONT_FAMILY}}';font-weight:600;font-display:swap;src:url('{{FONT_URL_600}}') format('woff2')}
+  /* Token block - fill every value from tokens.json (color, type families). */
+  :root{--bg:{{COLOR_BG}};--panel:{{COLOR_PANEL}};--card:{{COLOR_CARD}};--ink:{{COLOR_INK}};--muted:{{COLOR_MUTED}};--dim:{{COLOR_DIM}};
+    --line:{{COLOR_LINE}};--accent:{{COLOR_ACCENT}};--accent-ink:{{COLOR_ACCENT_INK}};
+    --sans:'{{FONT_FAMILY}}',-apple-system,system-ui,sans-serif;--mono:ui-monospace,'Geist Mono',monospace}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:var(--sans);background:var(--bg);color:var(--ink);padding:48px 40px 100px}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:38px;font-weight:600;letter-spacing:-.025em}
+  h1 .s{font-weight:400;color:var(--muted);font-size:18px}
+  .read{color:#c8c8c8;max-width:74ch;line-height:1.6;margin-top:10px;font-size:15px}
+  .src{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:10px}
+  .rule{height:1px;background:var(--line);margin:26px 0 34px}
+  .zt{font-family:var(--mono);font-size:10px;letter-spacing:.34em;text-transform:uppercase;color:var(--dim);margin-bottom:16px}
+  section{margin-bottom:42px}
+  ul{list-style:none}
+  li{padding:7px 0;border-bottom:1px solid var(--line);font-size:14px;color:#c8c8c8;line-height:1.5}
+  li b{color:var(--ink);font-weight:600}
+  .tag{font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:5px;margin-right:8px;vertical-align:middle}
+  .tag.ex{background:rgba(201,242,74,.14);color:var(--accent)}
+  .tag.inv{background:rgba(255,180,80,.14);color:#FFB450}
+  .samples{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-end}
+  .sw{text-align:center}
+  .sw .chip{width:64px;height:64px;border-radius:12px;border:1px solid var(--line)}
+  .sw .cap{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:7px}
+  .typesample{font-size:30px;font-weight:600;letter-spacing:-.01em}
+  .files{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+  a.file{display:block;text-decoration:none;color:inherit;border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel);transition:border-color .15s,transform .15s}
+  a.file:hover{border-color:var(--accent);transform:translateY(-2px)}
+  a.file b{font-size:14px;font-weight:600;display:block}
+  a.file code{font-family:var(--mono);font-size:11px;color:var(--accent)}
+  a.file p{color:var(--muted);font-size:12px;line-height:1.45;margin-top:6px}
+  pre{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;overflow:auto;
+    font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#d6d6d6;white-space:pre-wrap;user-select:all}
+  .hint{color:var(--dim);font-size:12px;margin-top:8px}
+  footer{margin-top:48px;color:var(--dim);font-size:12px;line-height:1.6;max-width:80ch}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>{{APP_NAME}} <span class="s">· design index</span></h1>
+  <!-- REGION: design-read - one paragraph: how you read the source (family/taste, surfaces, accent rule, data-viz, material). Lead with "Reading this as:". -->
+  <p class="read"><b>Reading this as:</b> {{DESIGN_READ}}</p>
+  <div class="src">SOURCE / {{SOURCE}}  ·  native breakpoint / {{NATIVE_BREAKPOINT}}  ·  base unit / {{BASE_UNIT}}px  ·  accent / {{COLOR_ACCENT}}</div>
+  <div class="rule"></div>
+
+  <section>
+    <div class="zt">Decisions &amp; inferences</div>
+    <!-- REGION: decisions - one <li> per decision. Use <span class="tag ex">extracted</span> for measured facts,
+         <span class="tag inv">inferred</span> for invented choices (e.g. desktop layout the source never showed).
+         Always flag the inferred items so the reader knows what to verify hardest. -->
+    <ul>
+      <li><span class="tag ex">extracted</span><b>{{DECISION_TITLE}}</b> {{DECISION_BODY}}</li>
+      <li><span class="tag inv">inferred</span><b>{{INFERENCE_TITLE}}</b> {{INFERENCE_BODY}}</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="zt">Source mapping</div>
+    <!-- REGION: source-mapping - one <li> per source frame → what it produced (e.g. "in-hand shot → composition"). -->
+    <ul>
+      <li><b>{{SOURCE_FRAME}}</b> → {{WHAT_IT_PRODUCED}}.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="zt">At a glance</div>
+    <!-- REGION: at-a-glance - 3-4 live swatches (real bg/card/accent hex) + one type specimen at display size. -->
+    <div class="samples">
+      <div class="sw"><div class="chip" style="background:{{COLOR_BG}}"></div><div class="cap">bg {{COLOR_BG}}</div></div>
+      <div class="sw"><div class="chip" style="background:{{COLOR_CARD}}"></div><div class="cap">card {{COLOR_CARD}}</div></div>
+      <div class="sw"><div class="chip" style="background:{{COLOR_ACCENT}}"></div><div class="cap">accent {{COLOR_ACCENT}}</div></div>
+      <div class="sw" style="text-align:left"><div class="typesample">{{DISPLAY_SAMPLE_TEXT}}</div><div class="cap">{{FONT_FAMILY}} 600 · display</div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="zt">The deliverable</div>
+    <div class="files">
+      <a class="file" href="design-system.html"><b>Design system</b><code>design-system.html</code><p>Breakpoints, column grid, spacing, type, color, control sizes, material.</p></a>
+      <a class="file" href="components.html"><b>Components &amp; states</b><code>components.html</code><p>Every component in isolation, its states, and composites.</p></a>
+      <a class="file" href="composition.html"><b>Composition (responsive)</b><code>composition.html</code><p>The assembled screen; drag the width to watch it reflow.</p></a>
+      <a class="file" href="board.html"><b>Multi-frame board</b><code>board.html</code><p>Mobile / tablet / desktop side by side.</p></a>
+      <a class="file" href="tokens.json"><b>Tokens (data)</b><code>tokens.json</code><p>The machine-readable source of truth everything is built from.</p></a>
+    </div>
+  </section>
+
+  <section>
+    <div class="zt">Reuse prompt</div>
+    <!-- REGION: reuse-prompt - a self-contained paragraph another AI can paste to generate new screens in this taste.
+         Name the grounds, the accent rule, the material, the type, spacing base, and the nav adaptation. -->
+    <pre>{{REUSE_PROMPT}}</pre>
+    <div class="hint">Select-all and paste into another AI to generate new screens in this taste.</div>
+  </section>
+
+  <footer>
+    Generated by ui-reverse-engineer. This index is the rationale hub - structure and material are extracted from the source; content is category-correct placeholder; non-native breakpoints are inferred and worth a human check.
+  </footer>
+
+</div>
+</body>
+</html>

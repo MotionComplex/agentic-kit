@@ -94,6 +94,8 @@ Build in three stages, each visibly inheriting from the last. Responsiveness is 
 
 **Stage A — Foundations.** Turn tokens into code variables, **load the fonts**, **generate/collect category-correct assets**, and render the **design-system sheet** (the visual of the grid, spacing scale, type scale, color, radii, material). Confirm the system reads right before building on it.
 
+For the **wrapper deliverables** — `design.html` (index), `design-system.html` (this sheet), and `board.html` (multi-frame) — start from the shells in `templates/` rather than re-deriving the scaffold each run. Copy the template, fill its `{{PLACEHOLDERS}}` from `tokens.json`, and fill its `<!-- REGION -->` blocks with one specimen per token the source actually uses. This keeps section order, naming, and structure identical across runs. The **reconstruction deliverables** — `components.html`, `composition.html`, `skeleton.svg` — have **no template** and are generated fresh, because they must match the source, not a fixed mold. See `templates/README.md` for the fill contract.
+
 **Stage B — Responsive components (Layer 1, intrinsic).** Build each component in isolation as a *responsive component* that owns its own behavior across sizes:
 - **Fluid to its slot** — it fills the space it's given. Do NOT put a fixed width or a per-component `max-width` on it (that's what strands a component in a wide column). Internals fill too: a waveform's bars grow/`flex` to the width rather than being a fixed count at a fixed width.
 - **Progressive disclosure** — reveal/hide parts by available space (icon-only when narrow → icon+label when wide), including *state-driven* disclosure (e.g. the selected item shows its label even in the compact form).
@@ -137,13 +139,16 @@ These are the specific failure modes that wreck fidelity. Internalize the *why*:
 
 ```
 <taste-or-app-name>/
-├── design.html          # INDEX / front door: design read, decisions, inferences, links, reuse prompt (open first)
+├── design.html          # [template] INDEX / front door: design read, decisions, inferences, links, reuse prompt (open first)
 ├── tokens.json          # extracted design system, as data (source of truth)
-├── design-system.html   # VISUAL of the tokens: breakpoints, grid, spacing, type, color, radii, control sizes, material
-├── components.html      # disassembled, isolated, responsive component instances + states + composites (the priority)
-├── composition.html     # one source screen, assembled + adapted across breakpoints
-└── skeleton.svg          # layout skeleton derived from the same grid
+├── design-system.html   # [template] VISUAL of the tokens: breakpoints, grid, spacing, type, color, radii, control sizes, material
+├── components.html      # [generated] disassembled, isolated, responsive component instances + states + composites (the priority)
+├── composition.html     # [generated] one source screen, assembled + adapted across breakpoints
+├── board.html           # [template] multi-frame board: composition.html iframed at mobile / tablet / desktop
+└── skeleton.svg          # [generated] layout skeleton derived from the same grid
 ```
+
+`[template]` files start from the shells in `templates/` (wrapper chrome — fill placeholders + regions). `[generated]` files are built fresh from the tokens so they match the source. See `templates/README.md`.
 
 A single combined board (components → composition → skeleton in three labelled zones) is also fine if the user prefers one file per screen. Default to framework-agnostic single-file HTML/CSS unless the user asks for a specific stack.
 
@@ -154,3 +159,4 @@ A single combined board (components → composition → skeleton in three labell
 - `references/material-recipes.md` — Phase 5 effect stacks: glassmorphism (with the backdrop precondition), neumorphism, scrims, gradient-under-glass, and the "effects need preconditions" principle.
 - `references/acceptance-criteria.md` — Phase 6: the match checklist, the render-compare loop, tolerances, and a catalog of common failures with their fixes.
 - `references/responsive-system.md` — the breakpoint ladder (grounded in Webflow/Relume + Material window size classes), the cross-viewport component-equivalence map (Material adaptive navigation + Apple HIG + classic responsive patterns), and the "recompose, don't stretch" / "up-scaling is inferential" principles.
+- `templates/` — wrapper-layer shells (`design.html`, `design-system.html`, `board.html`) with a fill contract in `templates/README.md`. Fill these for the index, the design-system sheet, and the multi-frame board; generate the reconstruction files fresh.

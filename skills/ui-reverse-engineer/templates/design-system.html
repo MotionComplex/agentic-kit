@@ -1,0 +1,202 @@
+<!doctype html>
+<!--
+  TEMPLATE: design-system.html - the visual styleguide of the extracted tokens.
+  WRAPPER chrome. The SECTION ORDER is fixed and must not change:
+    Breakpoints → Column grid → Layout regions → Spacing → Typeface → Type scale
+    → Color roles → Radii → Control sizes → Material.
+  Copy verbatim, fill {{PLACEHOLDERS}} from tokens.json, and inside each section
+  emit one row/specimen per token the source actually uses (add/remove rows; keep
+  the section). Delete a whole section only if the source genuinely has no such
+  tokens (e.g. no material) - and say so. See templates/README.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{APP_NAME}} - design system</title>
+<style>
+  @font-face{font-family:'{{FONT_FAMILY}}';font-weight:400;font-display:swap;src:url('{{FONT_URL_400}}') format('woff2')}
+  @font-face{font-family:'{{FONT_FAMILY}}';font-weight:500;font-display:swap;src:url('{{FONT_URL_500}}') format('woff2')}
+  @font-face{font-family:'{{FONT_FAMILY}}';font-weight:600;font-display:swap;src:url('{{FONT_URL_600}}') format('woff2')}
+  :root{
+    --bg:{{COLOR_BG}}; --panel:{{COLOR_PANEL}}; --card:{{COLOR_CARD}}; --ink:{{COLOR_INK}}; --muted:{{COLOR_MUTED}}; --dim:{{COLOR_DIM}};
+    --line:{{COLOR_LINE}}; --accent:{{COLOR_ACCENT}}; --accent-ink:{{COLOR_ACCENT_INK}};
+    --sans:'{{FONT_FAMILY}}',-apple-system,system-ui,sans-serif; --mono:ui-monospace,'Geist Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:var(--sans);background:var(--bg);color:var(--ink);padding:48px 40px 100px}
+  .wrap{max-width:1080px;margin:0 auto}
+  .head h1{font-size:36px;font-weight:600;letter-spacing:-.025em}
+  .head h1 .s{font-weight:400;color:var(--muted);font-size:18px}
+  .head p{color:var(--muted);max-width:72ch;line-height:1.55;margin-top:8px;font-size:14px}
+  .head .src{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:8px}
+  .rule{height:1px;background:var(--line);margin:22px 0 36px}
+  section{margin-bottom:44px}
+  .zt{font-family:var(--mono);font-size:10px;letter-spacing:.34em;text-transform:uppercase;color:var(--dim);margin-bottom:16px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:500}
+  td .tok{font-family:var(--mono);color:var(--accent)}
+  td .px{font-family:var(--mono);color:var(--muted)}
+  .grids{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  @media(max-width:780px){.grids{grid-template-columns:1fr}}
+  .gv{border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--panel)}
+  .gv .lab{font-size:12px;font-weight:600;margin-bottom:2px}
+  .gv .meta{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:12px}
+  .gv .cols{display:flex;gap:6px;height:90px}
+  .gv .cols .c{flex:1;background:rgba(201,242,74,.14);border:1px solid rgba(201,242,74,.3);border-radius:4px}
+  .gv .cols .fixed{flex:none;background:rgba(255,255,255,.06);border:1px solid var(--line)}
+  .spaces{display:flex;flex-direction:column;gap:8px}
+  .sp{display:flex;align-items:center;gap:14px}
+  .sp .bar{height:14px;background:var(--accent);border-radius:3px}
+  .sp .nm{font-family:var(--mono);font-size:12px;width:150px;color:var(--ink)}
+  .sp .nm small{color:var(--muted)}
+  .type .row{display:flex;align-items:baseline;gap:18px;padding:10px 0;border-bottom:1px solid var(--line)}
+  .type .row .meta{font-family:var(--mono);font-size:11px;color:var(--muted);width:170px;flex:none}
+  .type .row .meta b{color:var(--accent)}
+  .type .row .sample{line-height:1.1;letter-spacing:-.01em}
+  .sw{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
+  .swatch{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+  .swatch .chip{height:64px}
+  .swatch .info{padding:8px 10px}
+  .swatch .info b{font-size:12px;font-weight:600}
+  .swatch .info code{display:block;font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px}
+  .radii{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end}
+  .rad{text-align:center}
+  .rad .box{width:84px;height:84px;background:var(--card);border:1px solid var(--line)}
+  .rad .cap{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:8px}
+  .rad .cap b{color:var(--accent);display:block}
+  .matrow{display:flex;gap:18px;flex-wrap:wrap}
+  .matcell{flex:1;min-width:220px;border-radius:14px;overflow:hidden;border:1px solid var(--line)}
+  .matcell .photo{height:120px;display:grid;place-items:center;position:relative;background:{{MATERIAL_BACKDROP}} center/cover}
+  .matcell .cap{padding:10px 12px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  footer{color:var(--dim);font-size:12px;line-height:1.6;max-width:80ch;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="head">
+    <h1>{{APP_NAME}} <span class="s">· design system</span></h1>
+    <p>The system extracted from the source, made visible. Everything below comes from tokens.json; the components and the final responsive composition are built from exactly these values.</p>
+    <div class="src">SOURCE / {{SOURCE}}  ·  native breakpoint / {{NATIVE_BREAKPOINT}}  ·  base unit / {{BASE_UNIT}}px</div>
+  </div>
+  <div class="rule"></div>
+
+  <!-- 1. BREAKPOINTS -->
+  <section>
+    <div class="zt">Breakpoints (Webflow / Relume ladder)</div>
+    <!-- REGION: breakpoints - one <tr> per breakpoint in tokens.responsive.breakpoints. Mark the native one. -->
+    <table>
+      <tr><th>Token</th><th>Width</th><th>Window class</th><th>Role</th></tr>
+      <tr><td><span class="tok">{{BP_TOKEN}}</span></td><td class="px">{{BP_WIDTH}}</td><td>{{BP_CLASS}}</td><td>{{BP_ROLE}}</td></tr>
+    </table>
+  </section>
+
+  <!-- 2. COLUMN GRID -->
+  <section>
+    <div class="zt">Column grid (the Figma layout grid)</div>
+    <p style="color:var(--muted);font-size:13px;max-width:74ch;margin-bottom:16px;line-height:1.5">Overlay elements snap to: margins at the frame edges, N equal columns, gutters between. Standard responsive ladder 4 / 8 / 12 columns. An element spans columns (e.g. "8 of 12"); this is distinct from the layout regions below, which show how the panels occupy that grid. Fixed rails sit outside the fluid grid, which governs the content area.</p>
+    <!-- REGION: column-grid - one .gv per breakpoint from tokens.column_grid; draw N .c columns. -->
+    <div class="grids">
+      <div class="gv">
+        <div class="lab">{{CG_LABEL}}</div><div class="meta">{{CG_META}}</div>
+        <div class="cols">{{CG_COLUMNS}}</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. LAYOUT REGIONS -->
+  <section>
+    <div class="zt">Layout regions (how panels occupy the grid)</div>
+    <!-- REGION: layout-regions - one .gv per breakpoint showing the real panel split (fixed rails as .c.fixed). -->
+    <div class="grids">
+      <div class="gv">
+        <div class="lab">{{LR_LABEL}}</div><div class="meta">{{LR_META}}</div>
+        <div class="cols">{{LR_REGIONS}}</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. SPACING -->
+  <section>
+    <div class="zt">Spacing scale (base {{BASE_UNIT}})</div>
+    <!-- REGION: spacing - one .sp per token in tokens.space; bar width = the px value. -->
+    <div class="spaces">
+      <div class="sp"><span class="nm">{{SPACE_NAME}} <small>{{SPACE_PX}}px</small></span><span class="bar" style="width:{{SPACE_PX}}px"></span></div>
+    </div>
+  </section>
+
+  <!-- 5. TYPEFACE (identified) -->
+  <section>
+    <div class="zt">Typeface (identified)</div>
+    <!-- REGION: typeface - fill from tokens.type.identified: class, best_guess, confidence, candidates, loaded. -->
+    <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:flex-end">
+      <div style="font-size:40px;font-weight:600;letter-spacing:-.01em">Ag</div>
+      <div style="font-size:13px;line-height:1.7;color:var(--muted)">
+        <div><b style="color:var(--ink)">Best guess:</b> {{FONT_BEST_GUESS}} &nbsp; <span style="font-family:var(--mono);color:#FFB450;font-size:11px">confidence: {{FONT_CONFIDENCE}}</span></div>
+        <div><b style="color:var(--ink)">Class:</b> {{FONT_CLASS}}</div>
+        <div><b style="color:var(--ink)">Candidates:</b> {{FONT_CANDIDATES}}</div>
+        <div><b style="color:var(--ink)">Loaded:</b> {{FONT_LOADED}}</div>
+      </div>
+    </div>
+    <p style="color:var(--dim);font-size:12px;margin-top:14px;max-width:74ch">{{FONT_NOTE}}</p>
+  </section>
+
+  <!-- 6. TYPE SCALE -->
+  <section>
+    <div class="zt">Type scale ({{FONT_FAMILY}} · ratio {{TYPE_RATIO}})</div>
+    <!-- REGION: type-scale - one .row per size in tokens.type.sizes, rendered AT that size with token+px+weight. -->
+    <div class="type">
+      <div class="row"><span class="meta"><b>{{TYPE_TOKEN}}</b> {{TYPE_PX}} / {{TYPE_WEIGHT}}</span><span class="sample" style="font-size:{{TYPE_PX}}px;font-weight:{{TYPE_WEIGHT}}">{{TYPE_SAMPLE}}</span></div>
+    </div>
+  </section>
+
+  <!-- 7. COLOR ROLES -->
+  <section>
+    <div class="zt">Color roles</div>
+    <!-- REGION: color - one .swatch per role in tokens.color. -->
+    <div class="sw">
+      <div class="swatch"><div class="chip" style="background:{{COLOR_VALUE}}"></div><div class="info"><b>{{COLOR_ROLE}}</b><code>{{COLOR_VALUE}}</code></div></div>
+    </div>
+  </section>
+
+  <!-- 8. RADII -->
+  <section>
+    <div class="zt">Corner radii</div>
+    <!-- REGION: radii - one .rad per step in tokens.radius. -->
+    <div class="radii">
+      <div class="rad"><div class="box" style="border-radius:{{RADIUS_PX}}px"></div><div class="cap"><b>{{RADIUS_NAME}}</b>{{RADIUS_LABEL}}</div></div>
+    </div>
+  </section>
+
+  <!-- 9. CONTROL SIZES -->
+  <section>
+    <div class="zt">Control sizes</div>
+    <!-- REGION: control-sizes - one .rad per entry in tokens.control. -->
+    <div class="radii">
+      <div class="rad"><div class="box" style="{{CONTROL_BOX_STYLE}}"></div><div class="cap"><b>{{CONTROL_NAME}}</b>{{CONTROL_PX}}px</div></div>
+    </div>
+    <p style="color:var(--dim);font-size:12px;margin-top:14px;max-width:70ch">{{CONTROL_NOTE}}</p>
+  </section>
+
+  <!-- 10. MATERIAL -->
+  <section>
+    <div class="zt">Material</div>
+    <!-- REGION: material - one .matcell per effect in tokens.material, each shown OVER a real backdrop
+         (glass must sit over a photo/gradient, never a flat fill). Caption the recipe. -->
+    <div class="matrow">
+      <div class="matcell">
+        <div class="photo">{{MATERIAL_SAMPLE}}</div>
+        <div class="cap">{{MATERIAL_CAPTION}}</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    This sheet is the contract: the components are built to these tokens, and the responsive composition assembles those components. Generated from the source; photo samples are category-correct placeholders.
+  </footer>
+
+</div>
+</body>
+</html>
