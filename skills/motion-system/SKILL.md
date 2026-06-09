@@ -44,7 +44,7 @@ Both modes converge on the same output: a normalized motion-token layer plus the
 
 ## What you produce
 
-1. **Motion tokens in `tokens.json`** — a `motion` block added to the existing design tokens: a **duration scale**, an **easing/spring set**, a **distance ladder** (how far things travel), stagger steps, and named **semantic roles** (see Phase 2). The reusable source of truth; everything else references it.
+1. **Motion tokens in `tokens.json`** — a `motion` block added to the existing design tokens: a **duration scale**, an **easing/spring set**, a **distance ladder** (how far things travel), stagger steps, and named **semantic roles** (see Phase 3). The reusable source of truth; everything else references it.
 2. **`motion.html` — the animated specimen sheet.** The motion counterpart to `design-system.html`: each duration, each easing curve (plotted *and* demonstrated on a moving element), each named pattern (enter / exit / hover / press / expand / stagger) shown live and replayable. This makes the system confirmable *before* it's wired into the real UI. Include a **prefers-reduced-motion** toggle that shows the reduced variant of every pattern.
 3. **Per-state transitions on the components** — the transitions *between* the component states (default ↔ hover ↔ focus ↔ active ↔ disabled, collapsed ↔ expanded, entering ↔ leaving), whether those states were enumerated by a prior reverse-engineer run or read off the components you were given. Motion is the verb connecting the states.
 4. **Choreography patterns** — reusable recipes for multi-element motion: list/grid **stagger**, **shared-element** transitions, page/route enter-exit, modal/sheet present-dismiss, scroll-reveal. Delivered as copy-pasteable CSS (custom properties + keyframes) and, where CSS can't express it (springs, FLIP, sequenced timelines), a small framework-agnostic JS helper.
@@ -52,16 +52,27 @@ Both modes converge on the same output: a normalized motion-token layer plus the
 
 ## The pipeline
 
-The mental model mirrors how a static design system is extracted: **Source → Systematize → Map to states → Choreograph → Build → Verify.**
+The mental model mirrors how a static design system is extracted: **Triage → Source → Systematize → Map to states → Choreograph → Build → Verify.**
 
-### Phase 1 — Source the timing (infer or measure)
+### Phase 1 — Triage (decide what animates, before how)
+
+Allocating motion is a design decision that precedes timing. Animating everything is as wrong as animating nothing — so first decide *which moments earn motion*, then tune *how* they feel. Work through `references/when-to-animate.md`:
+
+- Split candidates into **functional** (guides/informs/gives feedback — allowed by default) and **decorative** (brand/delight — must justify a non-disruptive, low-frequency moment).
+- For each kept animation, name the **job** it does — one of expectation, continuity, narrative, relationship (Willenskomer's four usability purposes). If you can't name the job, cut it.
+- Note whether it's **real-time** (instant feedback to manipulation — almost always worth it, must be fast) or **non-real-time** (plays after an action, is latency the user can't skip — budget carefully).
+- Set the budget by **frequency and density**: high-frequency / dense interactions get terse, near-instant motion or none; rare, high-ceremony moments can be expressive.
+
+Output a **motion map**: the moments that get motion, each tagged with its job, kind, and rough budget. Phases 4-5 build *only* what this approves — not every state pair.
+
+### Phase 2 — Source the timing (infer or measure)
 
 - **INFER:** read the design's taste from its tokens and any design rationale you have (family, density, accent, brand — e.g. a `ui-reverse-engineer` `design.html`, if one exists). Derive a **motion personality** (e.g. "crisp/functional", "smooth/premium", "bouncy/playful") and the timing implications. Do not pull numbers from thin air — anchor them to the conventions in `references/motion-inference.md` (platform defaults, the 200-300ms "feels instant but visible" band, easing-by-intent).
 - **MEASURE:** `motion_discover` the URL, `motion_capture`/`motion_review` the relevant elements, and record real durations, easing, distances, and overshoot. Note `prefers-reduced-motion` handling if present.
 
 Output a written **motion spec** (the durations/easings/distances you're working from, with each marked *inferred* or *measured*) before systematizing.
 
-### Phase 2 — Systematize (raw timing → motion tokens)
+### Phase 3 — Systematize (raw timing → motion tokens)
 
 Same move as static token extraction, applied to time. A pile of durations is not a system.
 
@@ -73,15 +84,15 @@ Same move as static token extraction, applied to time. A pile of durations is no
 
 See `references/motion-tokens.md` for the schema and the `tokens.json` `motion` block.
 
-### Phase 3 — Map motion to states
+### Phase 4 — Map motion to states
 
-For every component state pair — from the reconstruction's enumeration if you have one, or read off the components you were given — define the transition: which properties animate, which role/duration/easing applies, and the reduced-motion fallback. Principles:
+For each state pair **the Phase 1 triage approved** (not every possible pair — only the moments with a named job), define the transition: which properties animate, which role/duration/easing applies, and the reduced-motion fallback. State pairs triage left out stay instant. Principles:
 
 - **Animate cheap properties.** `transform` and `opacity` only, wherever possible — they're GPU-composited and don't trigger layout. Avoid animating `width`/`height`/`top`/`left`/`box-shadow` directly; use `transform: scale/translate`, and FLIP for layout changes.
 - **The same logical transition re-expresses in every form the component takes.** Just as a "selected" state must read across breakpoints, its *transition* must too — a nav item's selection animation shouldn't vanish when it becomes a rail item.
 - **Asymmetric enter/exit.** Things enter with decelerate easing (arriving, settling) and leave with accelerate easing (departing), usually faster on exit. Don't use one symmetric curve for both.
 
-### Phase 4 — Choreograph (multi-element motion)
+### Phase 5 — Choreograph (multi-element motion)
 
 Move from single transitions to coordinated sequences:
 
@@ -90,14 +101,14 @@ Move from single transitions to coordinated sequences:
 - **Choreography hierarchy:** primary content leads, secondary/chrome follows. Define enter order, not just per-element timing.
 - **Orchestrate present/dismiss** for overlays (modal, sheet, popover) including the scrim, and respect any responsive size-class substitutions in the design (a bottom sheet and a centered dialog present differently).
 
-### Phase 5 — Build
+### Phase 6 — Build
 
 - Emit tokens as CSS custom properties (`--motion-fast`, `--ease-standard`, `--motion-enter` …) and/or a JS token object for spring/FLIP helpers.
 - Build the `motion.html` specimen sheet: every token and pattern shown **live and replayable**, with the reduced-motion toggle.
 - Wire per-state transitions and choreography onto the reconstruction's components.
 - Keep it framework-agnostic single-file CSS/JS unless the user asks for a stack (Framer Motion, GSAP, Web Animations API, CSS-only).
 
-### Phase 6 — Verify (watch it, don't imagine it)
+### Phase 7 — Verify (watch it, don't imagine it)
 
 Motion cannot be verified from a static render — you must see it move.
 
@@ -107,6 +118,8 @@ Motion cannot be verified from a static render — you must see it move.
 
 ## Non-negotiables (the anti-slop list)
 
+- **Every animation has a nameable job.** If it doesn't serve expectation, continuity, narrative, or relationship, it's decoration — cut it or confine it to a rare, non-disruptive moment. Motion is behavior, not garnish.
+- **Don't animate high-frequency actions into latency.** Motion on a thing the user does dozens of times a day is a tax paid repeatedly; keep those near-instant. Allocate expressive motion to rare, high-ceremony moments.
 - **Tokens, not magic numbers.** No `transition: all 0.3s ease` sprinkled per element. Everything references a named role.
 - **No `transition: all`.** Name the properties; `all` animates unexpected things and forces layout/paint.
 - **Animate transform + opacity.** Layout-triggering properties cause jank; use compositor-friendly properties and FLIP.
@@ -131,7 +144,8 @@ If a `ui-reverse-engineer` output already exists, extend it in place (add the `m
 
 ## References
 
-- `references/motion-inference.md` — Mode INFER: reading motion personality from a static design's taste, platform-default timings, the duration bands, and easing-by-intent. The convention library that keeps inferred motion grounded.
+- `references/when-to-animate.md` — Phase 1 triage: functional vs decorative, the four usability purposes, real-time vs non-real-time, the animate / don't-animate checklist, and the accessibility gate. The "what should move" decision framework, with sources.
+- `references/motion-inference.md` — Mode INFER: reading motion personality from a static design's taste, platform-default timings, the duration bands, easing-by-intent, and a sourced further-reading list. The convention library that keeps inferred motion grounded.
 - `references/measuring-motion.md` — Mode MEASURE: using the motion-trace MCP to extract real timing/easing from a video or live URL, and reducing measured curves to the named easing set.
 - `references/motion-tokens.md` — the duration/easing/distance/stagger scales, semantic roles, and the `tokens.json` `motion` block schema.
 - `references/choreography.md` — stagger, shared-element/FLIP, present/dismiss, and scroll-reveal recipes, with the reduced-motion variant of each.
