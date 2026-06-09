@@ -3,7 +3,7 @@
   "owner": {
     "name": "MotionComplex"
   },
-  "description": "Personal Claude Code marketplace. Hosts the cmux-swarm plugin; the rest of the kit ships as symlinked skills via install.sh.",
+  "description": "Personal Claude Code marketplace. Hosts the cmux-swarm, motion-trace, and design-eng plugins; the remaining loose skills ship as symlinks via install.sh.",
   "plugins": [
     {
       "name": "cmux-swarm",
@@ -14,6 +14,11 @@
       "name": "motion-trace",
       "source": "./plugins/motion-trace",
       "description": "Review web animation as structured per-frame data (not video): easing, overshoot, prefers-reduced-motion accessibility, and real-runtime jank. MCP tools (discover/review/capture/diff) plus a motion-review skill."
+    },
+    {
+      "name": "design-eng",
+      "source": "./plugins/design-eng",
+      "description": "Design-engineering skills: ui-reverse-engineer (screenshot/URL → faithful reconstruction + design tokens), motion-system (design the motion layer — tokens, choreography, per-state transitions — inferred from taste or measured from video/URL), and figma-export (push tokens + components into Figma)."
     }
   ]
 }

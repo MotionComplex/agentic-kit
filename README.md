@@ -73,6 +73,30 @@ the plugin is the single source, so the skills are never double-registered. Bund
 referenced via `${CLAUDE_PLUGIN_ROOT}`, so they resolve wherever the plugin is installed. The
 namespaced names don't collide with `code-review`, `visual-e2e`, or `design-vision-ui-review`.
 
+### `design-eng` — design-engineering skills (UI reverse-engineering, motion, Figma)
+
+Install (one-time, per machine):
+
+```text
+/plugin marketplace add ~/dev/agentic-kit
+/plugin install design-eng@agentic-kit
+```
+
+It bundles three **skills**, namespaced under `design-eng:`:
+
+| Component | Type | What it does |
+|---|---|---|
+| `design-eng:ui-reverse-engineer` | skill | Turn a screenshot **or live URL** into a faithful, disassembled reconstruction + an extracted design-token system (`tokens.json`), components, composition, and skeleton. |
+| `design-eng:motion-system` | skill | Design the **motion** layer for a design — motion tokens, choreography, per-state transitions, an animated specimen sheet — inferring it from the design's taste, or measuring real timing from a video/URL via the `motion-trace` plugin. |
+| `design-eng:figma-export` | skill | Push the extracted `tokens.json` → Figma Variables/styles and `components.html` → a Figma component library (states as variants), via the Figma MCP. |
+
+These three live **inside the plugin** rather than as loose `skills/` symlinks because the
+Claude desktop (Cowork) app reliably surfaces *plugin-delivered* skills but does **not** reliably
+auto-discover newly-symlinked `~/.claude/skills/` folders. Delivering them through the marketplace
+is what makes them appear in the Cowork UI. `ui-reverse-engineer` moved here from `skills/` for the
+same reason — if a stale `~/.claude/skills/ui-reverse-engineer` symlink remains from the old layout,
+remove it so the plugin copy is the single source.
+
 ## Maintenance
 
 `conventions/todo.md` tracks conventions I want to capture but haven't written up yet.

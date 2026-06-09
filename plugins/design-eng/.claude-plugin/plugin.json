@@ -1,0 +1,8 @@
+{
+  "name": "design-eng",
+  "displayName": "Design Engineering",
+  "version": "0.1.0",
+  "description": "Design-engineering skills for reverse-engineering UIs and giving them motion. ui-reverse-engineer turns a screenshot or live URL into a faithful, disassembled reconstruction with an extracted design-token system; motion-system designs the temporal layer (motion tokens, choreography, per-state transitions) for a design, inferring it from taste or measuring it from a video/URL; figma-export pushes the extracted tokens and components into Figma. Together they cover static design extraction, motion, and design-tool round-tripping.",
+  "author": { "name": "MotionComplex" },
+  "keywords": ["design", "ui", "design-system", "design-tokens", "reverse-engineer", "animation", "motion", "figma", "frontend", "css"]
+}
