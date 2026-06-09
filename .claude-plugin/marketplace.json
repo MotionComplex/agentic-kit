@@ -3,7 +3,7 @@
   "owner": {
     "name": "MotionComplex"
   },
-  "description": "Personal Claude Code marketplace. Hosts the cmux-swarm, motion-trace, and design-eng plugins; the remaining loose skills ship as symlinks via install.sh.",
+  "description": "Personal Claude Code marketplace. Hosts the cmux-swarm, motion-trace, design-eng, and dor-dod plugins; the remaining loose skills ship as symlinks via install.sh.",
   "plugins": [
     {
       "name": "cmux-swarm",
@@ -19,6 +19,11 @@
       "name": "design-eng",
       "source": "./plugins/design-eng",
       "description": "Design-engineering skills: ui-reverse-engineer (screenshot/URL → faithful reconstruction + design tokens), motion-system (design the motion layer — tokens, choreography, per-state transitions — inferred from taste or measured from video/URL), and figma-export (push tokens + components into Figma)."
+    },
+    {
+      "name": "dor-dod",
+      "source": "./plugins/dor-dod",
+      "description": "Specification & dev toolkit on the FZAG DXP Definition of Ready/Done: spec (author a story/bug/feature spec to the relevant DoR as markdown), check (audit any artifact against the matching DoR/DoD), and promote (publish a draft to an Azure DevOps work item or Confluence page). One shared source-of-truth checklist; works with or without MCP."
     }
   ]
 }
