@@ -39,6 +39,9 @@ The flow is: foundations → components → composition. Each stage visibly inhe
 4. **Components** — every distinctive element rebuilt as its own isolated, labelled instance, **built as a responsive component** (see Phase 5), and **shown in its states** (normal / hover / focus / active / disabled, wherever it has them) as labelled instances side by side. This is the deliverable that matters most; each must stand on its own and adapt on its own. Read the *active/selected* treatment off the source rather than imposing a rule — e.g. a tab whose active state is an expanded dark pill with a label is state-driven disclosure, not a separate accent.
 5. **Composition** — those same components assembled into the screen, faithful to one specific source screen (do not merge multiple screens into a hybrid).
 6. **Layout skeleton** — the composition with skin removed, derived from the *same grid* so it inherits alignment.
+7. **`interactions.json` — the interaction/state inventory** (see Phase 3). A static reconstruction reproduces the *resting state*; it says nothing about *behavior*. This file makes the behavior explicit: for each component, its **states** (default/hover/focus/active/selected/disabled, collapsed/expanded, open/closed), the **transitions** between them, and the **trigger** for each (click / hover / focus / scroll / media-query / route). It also flags which interactions the reconstruction does **not** wire up. This is the **handoff to `motion-system`**: it is exactly the list of moments that skill animates, so motion never has to re-derive "what changes" from frozen frames.
+
+> **Be honest that the reconstruction is resting-state.** The components shown "in their states" are *frozen instances side by side* — they don't actually change state on their own (a nav item won't select, a hamburger won't open a menu) unless you also wire the behavior. Either wire the key interactions, or state plainly that the output is visual-only and `interactions.json` is the spec for making it live. Don't present static frames as a working component.
 
 The reconstruction is **responsive**, not single-width. A design system that only exists at one viewport isn't fully extracted. Infer the source's native breakpoint, then adapt the screen across the breakpoint ladder (mobile up to desktop, or desktop down to mobile, whichever directions the user needs). Deliver a real responsive HTML file (media queries that reflow) plus a multi-frame board showing the screen at mobile / tablet / desktop side by side. See `references/responsive-system.md`.
 
@@ -81,6 +84,8 @@ This step alone prevents the alignment drift that comes from hand-placed values 
 List every component with its bounding box, its states/variants, and its parameters (a chip = label + optional dot + live/idle state). This inventory *is* the disassembled view — you are naming exactly what must be rebuilt in isolation.
 
 **Capture the hierarchy, not just a flat list.** Components nest (atomic-design: atoms → molecules → organisms). An icon-button + a label compose a *nav item*; nav items compose a *navigation bar*; the bar is a component too, not just a container. So decompose at every level: record the atoms, and record the **composites** (nav bar, list row, toolbar, card) as their own components, noting which parts they're built from. The components view should show both — the atoms *and* the composites that assemble them — so the build reuses the atoms inside the composites rather than re-inventing them.
+
+**Capture the *transitions*, not only the states — this is the `interactions.json` inventory.** Listing a component's states is half the job; the other half is *how it moves between them and what triggers it*. A static screenshot won't show this, so infer it from the affordances (a hamburger implies an open/close; a tab strip implies a selection change; a nav item's filled-pill active state implies a transition when you pick another). For each interactive component record: its **states**, each **transition** (from-state → to-state), the **trigger** (`click` / `hover` / `focus` / `scroll` / `media-query` / `route`), whether it's **real-time** (direct feedback) or **deferred** (plays after an action), and the responsive **form changes** that carry state across breakpoints (the bar→drawer substitution, and how "selected" re-expresses in each form). Emit this as `interactions.json`. Two reasons it matters: it's what makes the difference between *frozen frames* and a *wireable component*, and it is the exact input `motion-system` consumes — so name the transitions here even if you don't build the behavior, rather than leaving the next stage to reverse-engineer them from static instances.
 
 ### Phase 4 — Classify construction method
 
@@ -147,6 +152,7 @@ These are the specific failure modes that wreck fidelity. Internalize the *why*:
 <taste-or-app-name>/
 ├── design.html          # [template] INDEX / front door: design read, decisions, inferences, links, reuse prompt (open first)
 ├── tokens.json          # extracted design system, as data (source of truth)
+├── interactions.json    # state + transition + trigger inventory — the handoff to motion-system
 ├── design-system.html   # [template] VISUAL of the tokens: breakpoints, grid, spacing, type, color, radii, control sizes, material
 ├── components.html      # [generated] disassembled, isolated, responsive component instances + states + composites (the priority)
 ├── composition.html     # [generated] one source screen, assembled + adapted across breakpoints
@@ -167,3 +173,8 @@ A single combined board (components → composition → skeleton in three labell
 - `references/acceptance-criteria.md` — Phase 6: the match checklist, the render-compare loop, tolerances, and a catalog of common failures with their fixes.
 - `references/responsive-system.md` — the breakpoint ladder (grounded in Webflow/Relume + Material window size classes), the cross-viewport component-equivalence map (Material adaptive navigation + Apple HIG + classic responsive patterns), and the "recompose, don't stretch" / "up-scaling is inferential" principles.
 - `templates/` — wrapper-layer shells (`design.html`, `design-system.html`, `board.html`) with a fill contract in `templates/README.md`. Fill these for the index, the design-system sheet, and the multi-frame board; generate the reconstruction files fresh.
+
+## Related skills
+
+- **`motion-system`** — extracts the *temporal* layer this skill's reconstruction lacks: how the interface moves between the states you enumerated. Run it next to animate the reconstruction in place. The seam is `interactions.json`: this skill **writes** the state/transition/trigger inventory; `motion-system` **reads** it as its Phase-1 triage input, so it animates your actual transitions instead of guessing them from frozen frames. If you produced only static components, point the user there to make them live.
+- **`figma-export`** — pushes the extracted `tokens.json` + components into Figma (variables + a component library).

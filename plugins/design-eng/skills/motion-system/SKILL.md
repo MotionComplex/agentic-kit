@@ -58,6 +58,8 @@ The mental model mirrors how a static design system is extracted: **Triage → S
 
 Allocating motion is a design decision that precedes timing. Animating everything is as wrong as animating nothing — so first decide *which moments earn motion*, then tune *how* they feel. Work through `references/when-to-animate.md`:
 
+> **If a `ui-reverse-engineer` `interactions.json` exists, start from it — don't re-derive.** That file already enumerates the components' states, the transitions between them, and each trigger. It *is* your candidate list: walk its transitions through the triage below (keep/cut, name the job, tag real-time vs deferred, set the budget) instead of re-inferring "what changes" from static component frames. If there's no such file, build the candidate list by reading the design's affordances yourself.
+
 - Split candidates into **functional** (guides/informs/gives feedback — allowed by default) and **decorative** (brand/delight — must justify a non-disruptive, low-frequency moment).
 - For each kept animation, name the **job** it does — one of expectation, continuity, narrative, relationship (Willenskomer's four usability purposes). If you can't name the job, cut it.
 - Note whether it's **real-time** (instant feedback to manipulation — almost always worth it, must be fast) or **non-real-time** (plays after an action, is latency the user can't skip — budget carefully).
@@ -111,14 +113,15 @@ Move from single transitions to coordinated sequences:
 
 ### Phase 7 — Verify (watch it, don't imagine it)
 
-Motion cannot be verified from a static render — you must see it move.
+Motion cannot be verified from a static render — you must see it move. **A non-video model verifies motion by reading it as data, not by imagining it.** The primary instrument for that is the **motion-trace MCP run on your OWN output** — not just as a measure-mode input.
 
-1. Render the specimen and the wired components, and **watch the animation** — via the browser tooling (navigate + record), or by capturing it with the **motion-trace MCP** (`motion_capture`/`motion_review`) for a numeric read on what you actually produced.
-2. Check: nothing janky (dropped frames / layout thrash), durations inside the intended band, enter/exit asymmetry present, stagger reads as a sequence not a stutter, and — non-negotiable — **`prefers-reduced-motion: reduce` is honored** (transforms replaced by instant/opacity-only, no parallax or large travel).
-3. **Look closely:** slow playback 2-5× (or use the DevTools Animations panel) and watch for two states overlapping in a crossfade, abrupt easing, a wrong transform-origin, or properties falling out of sync; step frame-by-frame for coordinated timing; test gestures on real devices. Review again the next day with fresh eyes.
-4. In measure mode, optionally `motion_diff` your output against the source trace to quantify the match. Fix deltas, re-watch.
+1. **Capture what you built, as data.** Point `motion_capture` / `motion_review` at your rendered file (`file://` works) with the **trigger that starts the motion** — `triggerAction: hover|click|focus|addClass` on the relevant selector for interactive motion, or omit it for a load/entrance — at the target `viewport`. It returns per-frame resolved state plus derived metrics (travel, **overshoot**, **opacityFade** direction, **cross-track stagger order/offsets**, peak speed/jerk), so you can read easing, timing, and choreography numerically. For JS-library / scroll-driven motion set `realtime: true`. If motion-trace is genuinely unavailable, fall back to scripting a headless browser to **sample computed `transform`/`opacity`/`color` at stepped timestamps** (e.g. t = 16/120/210/300ms) — the same idea by hand.
+2. **Check the numbers against intent:** durations inside the intended band, **enter/exit asymmetry present** (exit faster), overshoot only where the personality allows it, stagger reads as a sequence (offsets ≈ your stagger step, not 0 and not a stutter), nothing janky.
+3. **Verify asymmetry and the reverse with `motion_diff`.** Capture the **enter** trace and the **exit** trace separately (trigger open, then trigger close) and diff them — assert the exit is shorter and uses the accelerate curve, and that every element that morphed in *also reverses* (a coordinated teardown, no element left behind / flashing). Diff before/after a change to catch motion regressions. This is the cheapest catch for the most common exit bug.
+4. **Accessibility is non-negotiable:** re-capture with `reducedMotion: 'reduce'` (`motion_review` does this automatically) and confirm transforms/travel/parallax are gone and only opacity/instant remains.
+5. **Then look closely (human pass):** slow playback 2-5× or use the DevTools Animations panel for two states overlapping in a crossfade, a wrong transform-origin, or properties falling out of sync; test gestures on real devices; review the next day with fresh eyes.
 
-When the task is *reviewing* existing motion rather than building it, present findings as a markdown **Before / After / Why** table (one row per issue) — see `references/craft-tips.md`.
+Fix deltas, re-capture. When the task is *reviewing* existing motion rather than building it, present findings as a markdown **Before / After / Why** table (one row per issue) — see `references/craft-tips.md`.
 
 ## Non-negotiables (the anti-slop list)
 
@@ -128,6 +131,8 @@ When the task is *reviewing* existing motion rather than building it, present fi
 - **Tokens, not magic numbers.** No `transition: all 0.3s ease` sprinkled per element. Everything references a named role.
 - **No `transition: all`.** Name the properties; `all` animates unexpected things and forces layout/paint.
 - **Animate transform + opacity.** Layout-triggering properties cause jank; use compositor-friendly properties and FLIP.
+- **Never animate a layout/box property to move or elevate an element.** `position` (e.g. `relative`→`fixed`), `display`, `top`/`left`/`width`/`height` are *not tweenable* — they change in a single frame, so the element **teleports** and reads as "disappearing and reappearing somewhere else." To raise an element above an overlay use **`z-index`** (it doesn't need `position` to change); to relocate one use **FLIP** (animate the positional delta on `transform`). Lifting a header/logo above a drawer by switching it to `position: fixed` is the classic version of this bug.
+- **An exit is a designed reverse, fired as one timeline — not a pile of independent reversions.** When several linked elements (panel + scrim + chrome + icon) leave together, drive them from a *single* trigger so they reverse in sync; the flash bug is mixing an immediate transition (one element) with a delayed `setTimeout`/unmount (another), so one snaps back after the rest are gone. Keep elevation/z-index alive until the exit finishes; start the morph-back at the instant close begins. Define exit timing on the *base* state and enter timing on the *opened* state so each direction gets its own (asymmetric) curve.
 - **Respect `prefers-reduced-motion`.** First-class, defined for every pattern — not an afterthought. Reduced means *reduced* (instant or opacity-only), not "slightly less".
 - **Asymmetric, intent-driven easing — and never `ease-in` on UI.** Pick easing by what the motion *means*, not one global curve; `ease-out` is the workhorse (`ease-in` starts slow and reads as sluggish). Use strong custom curves, not the weak built-ins.
 - **Never enter from `scale(0)`.** Start from `scale(0.95)`+opacity — things shouldn't pop out of nothing. Popovers scale from their trigger (`transform-origin`); modals stay centered.
@@ -161,6 +166,6 @@ If a `ui-reverse-engineer` output already exists, extend it in place (add the `m
 
 ## Related skills & sources
 
-- `ui-reverse-engineer` — extracts the static design system this skill animates. Run it first (or accept its output) for the tokens and component states.
-- `motion-review` (motion-trace plugin) — *audits/scores* existing motion. Use it to verify this skill's output, or to review motion you didn't build.
+- `ui-reverse-engineer` — extracts the static design system this skill animates. Run it first (or accept its output) for the tokens and component states. The seam is **`interactions.json`**: that skill writes the state/transition/trigger inventory, and this skill reads it as the Phase-1 triage input (so you animate the real transitions, not guesses from frozen frames).
+- `motion-trace` plugin — the verification instrument for a non-video model. Use `motion_capture`/`motion_review` (with a `trigger`) to read your OWN output's easing/timing/overshoot/stagger as data in Phase 7, `motion_diff` to confirm enter/exit asymmetry and the coordinated reverse, and the bundled `motion-review` skill to audit motion you didn't build.
 - **Emil Kowalski's design-engineering skill** ([github.com/emilkowalski/skill](https://github.com/emilkowalski/skill), `npx skills add emilkowalski/skill`) and [animations.dev](https://animations.dev/) — the primary craft source behind `craft-tips.md`; a strong complementary install for hands-on component/animation work.

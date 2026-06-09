@@ -104,12 +104,25 @@ function trackMetrics(track) {
     ch.cy[ch.cy.length - 1] - ch.cy[0],
   );
 
-  // motion window: frames where the centre is actually moving
-  const MOVE_EPS = 0.15; // px/ms ~ 150px/s
+  // motion window: frames where the element is actually animating.
+  // Centre speed catches positional motion; but an element can morph IN PLACE
+  // (a hamburger rotating to an ✕, a panel fading, a box scaling) without its
+  // centre moving at all — so also count any tracked channel changing between
+  // frames. Without this, motionStart/activeDuration read null for in-place
+  // morphs even though there's clearly motion.
+  const MOVE_EPS = 0.15; // px/ms ~ 150px/s (centre)
+  const CHAN_EPS = { tx: 0.05, ty: 0.05, opacity: 0.005, scaleX: 0.002, scaleY: 0.002, rotate: 0.05 };
+  const morphingAt = (i) => {
+    if (i === 0) return false;
+    for (const k of ['tx', 'ty', 'opacity', 'scaleX', 'scaleY', 'rotate']) {
+      if (Math.abs(ch[k][i] - ch[k][i - 1]) > CHAN_EPS[k]) return true;
+    }
+    return false;
+  };
   let motionStartT = null;
   let motionEndT = null;
   for (let i = 0; i < ts.length; i++) {
-    if (speed[i] > MOVE_EPS) {
+    if (speed[i] > MOVE_EPS || morphingAt(i)) {
       if (motionStartT == null) motionStartT = ts[i];
       motionEndT = ts[i];
     }
