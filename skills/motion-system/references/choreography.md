@@ -73,7 +73,19 @@ The surface and its scrim are choreographed together; enter and exit are asymmet
 }
 ```
 
-Bottom sheet: swap the `transform` for `translateY(100%)` → `none`. Reduced motion: opacity only, no slide/scale.
+Bottom sheet: swap the `transform` for `translateY(100%)` → `none` (a percentage translate moves the sheet by *its own height*, so it works at any size — the Sonner/Vaul technique). Reduced motion: opacity only, no slide/scale.
+
+Two craft refinements (see `craft-tips.md`): a **popover** must scale from its **trigger**, not center — set `transform-origin` to the trigger (e.g. `var(--radix-popover-content-transform-origin)`); a **modal stays centered**. And never enter from `scale(0)` — start from `scale(0.95)`+opacity so it doesn't pop out of nowhere.
+
+The modern no-JS way to animate entry is **`@starting-style`** (define the entered state, then the starting state inside it), which replaces the `useEffect(setMounted)` / `data-mounted` pattern where browser support allows:
+
+```css
+.toast {
+  opacity: 1; transform: translateY(0);
+  transition: opacity var(--motion-base) var(--ease-out), transform var(--motion-base) var(--ease-out);
+  @starting-style { opacity: 0; transform: translateY(100%); }
+}
+```
 
 ## Scroll-reveal (editorial / marketing)
 

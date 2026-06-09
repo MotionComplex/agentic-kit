@@ -11,12 +11,14 @@ A short ladder of named steps, not arbitrary milliseconds. Bigger or further-tra
 | Token | ms | Use |
 |---|---|---|
 | `instant` | 0 | reduced-motion fallback, immediate state |
-| `fast` | 120 | small state flips: hover tint, checkbox, icon swap |
-| `base` | 200 | the default for most transitions |
-| `slow` | 320 | larger surfaces: expand/collapse, sheet, card |
-| `slower` | 480 | page/route transitions, hero, emphasized |
+| `fast` | 120 | micro-interactions: hover tint, press, checkbox, icon swap (100-150ms band) |
+| `base` | 200 | standard UI: tooltips, dropdowns, menus (150-250ms band) |
+| `slow` | 280 | larger surfaces: modals, drawers, expand/collapse (200-300ms band) |
+| `slower` | 440 | page/route transitions only — the one category that may exceed 300ms |
 
 Keep only the steps the system uses. Snap measured durations to the nearest step; preserve a clearly intentional outlier as an exception (flag it).
+
+**Hard cap: UI animations stay under ~300ms** (Kowalski; corroborated by NN/g — past that, motion stops feeling responsive). The `slower` step exists only for full page/route transitions, a different category. The bands above (micro 100-150, standard 150-250, modals/drawers 200-300) are Emil Kowalski's duration guidelines and make a reliable default. Two scaling rules ride on top: **larger / further-travelling elements animate slower**, and **exits run ~20% faster than their matching entrance**.
 
 ### 2. Easing set (named by intent, not one global curve)
 
@@ -29,6 +31,25 @@ Keep only the steps the system uses. Snap measured durations to the nearest step
 | `spring` (optional) | stiffness/damping pair | playful systems only; needs JS |
 
 Enter and exit are **asymmetric**: arriving content decelerates, departing content accelerates and is usually quicker. Reduce any measured curves to the nearest named easing — don't keep a dozen bespoke beziers.
+
+**Picking the easing — the strict flowchart (Kowalski).** When you'd otherwise guess, follow this decision tree rather than inventing a curve. `ease-out` is the workhorse; the others are for specific cases:
+
+```
+Is the element entering or exiting the viewport?
+├── Yes → ease-out          (decelerate; this is the default for most UI motion)
+└── No
+    ├── Is it moving / morphing on screen?
+    │   └── Yes → ease-in-out  (your ease-standard)
+    └── Is it a hover change?
+        ├── Yes → ease
+        └── Is it constant motion (spinner, marquee)?
+            ├── Yes → linear
+            └── Default → ease-out
+```
+
+Note the two coherent philosophies here, and pick one per system rather than mixing them mid-interface: Kowalski uses **`ease-out` for both enter and exit** (simple, hard to get wrong — `ease-decelerate` is an ease-out curve); Material's model keeps the **asymmetric** refinement where exits *accelerate* (`ease-accelerate`, an ease-in) and run faster. Asymmetric reads as slightly more polished; the flat ease-out default is safer when unsure. Either way, **avoid ease-in on entrances** (things arriving should never start slow) and avoid `linear` for anything but constant motion.
+
+**Use strong curves, not the weak built-ins.** The example beziers above are gentle; for UI that feels intentional, prefer punchier custom curves (Kowalski) — e.g. `--ease-out: cubic-bezier(0.23, 1, 0.32, 1)`, `--ease-in-out: cubic-bezier(0.77, 0, 0.175, 1)`, `--ease-drawer: cubic-bezier(0.32, 0.72, 0, 1)` (iOS-like). Find variants on easing.dev / easings.co rather than inventing them. See `craft-tips.md`.
 
 ### 3. Distance ladder
 
@@ -66,7 +87,7 @@ Add alongside the existing `ui-reverse-engineer` keys (`color`, `space`, `type`,
       "source": "static mockup, no timing data",
       "reduced_motion": "opacity-only, transforms removed"
     },
-    "duration": { "instant": 0, "fast": 120, "base": 200, "slow": 320, "slower": 480 },
+    "duration": { "instant": 0, "fast": 120, "base": 200, "slow": 280, "slower": 440 },
     "easing": {
       "standard":   "cubic-bezier(0.2, 0, 0, 1)",
       "decelerate": "cubic-bezier(0, 0, 0, 1)",
@@ -94,7 +115,7 @@ Add alongside the existing `ui-reverse-engineer` keys (`color`, `space`, `type`,
 
 ```css
 :root {
-  --motion-fast: 120ms;  --motion-base: 200ms;  --motion-slow: 320ms;  --motion-slower: 480ms;
+  --motion-fast: 120ms;  --motion-base: 200ms;  --motion-slow: 280ms;  --motion-slower: 440ms;
   --ease-standard: cubic-bezier(.2,0,0,1);
   --ease-decelerate: cubic-bezier(0,0,0,1);
   --ease-accelerate: cubic-bezier(.3,0,1,1);

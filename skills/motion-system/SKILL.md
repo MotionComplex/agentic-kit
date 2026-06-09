@@ -107,6 +107,7 @@ Move from single transitions to coordinated sequences:
 - Build the `motion.html` specimen sheet: every token and pattern shown **live and replayable**, with the reduced-motion toggle.
 - Wire per-state transitions and choreography onto the reconstruction's components.
 - Keep it framework-agnostic single-file CSS/JS unless the user asks for a stack (Framer Motion, GSAP, Web Animations API, CSS-only).
+- **Then do a craft pass** (`references/craft-tips.md`): apply the "feel" details that separate good from great — strong custom easing curves (never `ease-in`), `scale(0.95)`-not-`scale(0)` entries, `scale(0.97)` on press, trigger-anchored `transform-origin`, transitions-over-keyframes for interruptible states, `transform`/`opacity`-only for 60fps, and touch-`hover` gating. These are where "technically correct" becomes "feels right."
 
 ### Phase 7 — Verify (watch it, don't imagine it)
 
@@ -114,17 +115,24 @@ Motion cannot be verified from a static render — you must see it move.
 
 1. Render the specimen and the wired components, and **watch the animation** — via the browser tooling (navigate + record), or by capturing it with the **motion-trace MCP** (`motion_capture`/`motion_review`) for a numeric read on what you actually produced.
 2. Check: nothing janky (dropped frames / layout thrash), durations inside the intended band, enter/exit asymmetry present, stagger reads as a sequence not a stutter, and — non-negotiable — **`prefers-reduced-motion: reduce` is honored** (transforms replaced by instant/opacity-only, no parallax or large travel).
-3. In measure mode, optionally `motion_diff` your output against the source trace to quantify the match. Fix deltas, re-watch.
+3. **Look closely:** slow playback 2-5× (or use the DevTools Animations panel) and watch for two states overlapping in a crossfade, abrupt easing, a wrong transform-origin, or properties falling out of sync; step frame-by-frame for coordinated timing; test gestures on real devices. Review again the next day with fresh eyes.
+4. In measure mode, optionally `motion_diff` your output against the source trace to quantify the match. Fix deltas, re-watch.
+
+When the task is *reviewing* existing motion rather than building it, present findings as a markdown **Before / After / Why** table (one row per issue) — see `references/craft-tips.md`.
 
 ## Non-negotiables (the anti-slop list)
 
 - **Every animation has a nameable job.** If it doesn't serve expectation, continuity, narrative, or relationship, it's decoration — cut it or confine it to a rare, non-disruptive moment. Motion is behavior, not garnish.
 - **Don't animate high-frequency actions into latency.** Motion on a thing the user does dozens of times a day is a tax paid repeatedly; keep those near-instant. Allocate expressive motion to rare, high-ceremony moments.
+- **Never animate keyboard-initiated actions.** Arrow-key navigation, shortcut toggles, command-palette open — fired hundreds of times a day; animation makes them feel laggy and disconnected. Hard rule.
 - **Tokens, not magic numbers.** No `transition: all 0.3s ease` sprinkled per element. Everything references a named role.
 - **No `transition: all`.** Name the properties; `all` animates unexpected things and forces layout/paint.
 - **Animate transform + opacity.** Layout-triggering properties cause jank; use compositor-friendly properties and FLIP.
 - **Respect `prefers-reduced-motion`.** First-class, defined for every pattern — not an afterthought. Reduced means *reduced* (instant or opacity-only), not "slightly less".
-- **Asymmetric, intent-driven easing.** Enter decelerates, exit accelerates; pick easing by what the motion *means*, not one global curve.
+- **Asymmetric, intent-driven easing — and never `ease-in` on UI.** Pick easing by what the motion *means*, not one global curve; `ease-out` is the workhorse (`ease-in` starts slow and reads as sluggish). Use strong custom curves, not the weak built-ins.
+- **Never enter from `scale(0)`.** Start from `scale(0.95)`+opacity — things shouldn't pop out of nothing. Popovers scale from their trigger (`transform-origin`); modals stay centered.
+- **Interruptible by default.** Use CSS transitions (or springs) for reversible/rapid states so motion retargets smoothly mid-flight; reserve `@keyframes` for fire-and-forget.
+- **Gate hover behind `@media (hover: hover) and (pointer: fine)`** so touch taps don't fire hover motion.
 - **Don't overshoot a serious UI.** Springiness/bounce is a taste signal — appropriate for playful consumer apps, wrong for dense/enterprise tools. Match the design's personality.
 - **Keep it fast.** Most UI transitions live in 150-300ms. Long, showy motion that slows the user down is slop, not polish.
 - **Be honest about provenance.** Inferred motion is labelled inferred; only measure mode may claim to reproduce the source's real motion.
@@ -149,8 +157,10 @@ If a `ui-reverse-engineer` output already exists, extend it in place (add the `m
 - `references/measuring-motion.md` — Mode MEASURE: using the motion-trace MCP to extract real timing/easing from a video or live URL, and reducing measured curves to the named easing set.
 - `references/motion-tokens.md` — the duration/easing/distance/stagger scales, semantic roles, and the `tokens.json` `motion` block schema.
 - `references/choreography.md` — stagger, shared-element/FLIP, present/dismiss, and scroll-reveal recipes, with the reduced-motion variant of each.
+- `references/craft-tips.md` — the Build-phase craft pass: strong custom easing curves, the "feel" tips (scale-from-0.95, press-scale, transform-origin, blur-to-mask, touch-hover gating), springs, interruptibility, modern CSS (`@starting-style`, `clip-path`, `translateY%`), performance gotchas, gestures, and the Before/After/Why review format. Distilled from Emil Kowalski's design-engineering skill.
 
-## Related skills
+## Related skills & sources
 
 - `ui-reverse-engineer` — extracts the static design system this skill animates. Run it first (or accept its output) for the tokens and component states.
 - `motion-review` (motion-trace plugin) — *audits/scores* existing motion. Use it to verify this skill's output, or to review motion you didn't build.
+- **Emil Kowalski's design-engineering skill** ([github.com/emilkowalski/skill](https://github.com/emilkowalski/skill), `npx skills add emilkowalski/skill`) and [animations.dev](https://animations.dev/) — the primary craft source behind `craft-tips.md`; a strong complementary install for hands-on component/animation work.

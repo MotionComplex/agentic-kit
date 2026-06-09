@@ -44,7 +44,8 @@ A second axis that changes the budget:
 **Don't animate (or make it instant) when the motion:**
 
 - is **purely decorative** and serves none of the four jobs;
-- sits on a **high-frequency, repeated action** where the added duration becomes cumulative latency (you'll pay it hundreds of times a day) — keep these near-instant;
+- sits on a **high-frequency, repeated action** where the added duration becomes cumulative latency (you'll pay it hundreds of times a day) — keep these near-instant. Kowalski's example: Raycast has *no* open animation and it feels right, because you launch it dozens of times a day with a clear goal — a 500ms entrance would be torture;
+- is on a **keyboard-initiated action** — **never animate these.** Arrow-key list navigation, keyboard-driven menus, shortcut-triggered toggles are fired rapidly and repeatedly; an animation makes them feel delayed and disconnected from the keypress. This is a hard rule, not a budget call;
 - **blocks input** or forces the user to wait before they can act (motion should never gate the next task);
 - **competes for attention** with content the user is trying to read or with another animation firing at the same time;
 - is **long or large-travel** for no functional reason (showy hero motion in a utility tool);
@@ -52,7 +53,7 @@ A second axis that changes the budget:
 
 ## Frequency and density govern the budget
 
-The more often an action happens and the denser the UI, the *less* motion it should carry. A data-heavy enterprise tool used all day wants terse, near-instant feedback and almost no non-real-time motion; a marketing page seen once can afford expressive, staged motion. Allocate motion inversely to frequency: rare, high-ceremony moments get the expressive treatment; the daily-driver interactions get speed.
+The more often an action happens and the denser the UI, the *less* motion it should carry. A data-heavy enterprise tool used all day wants terse, near-instant feedback and almost no non-real-time motion; a marketing page seen once can afford expressive, staged motion. Allocate motion inversely to frequency: rare, high-ceremony moments get the expressive treatment; the daily-driver interactions get speed. As Kowalski puts it, frequency of use is *the* key factor — a delightful morph on a feedback button is a pleasant surprise if it's hit rarely, and a daily irritation that slows the user down if it isn't. Before animating anything, ask how many times a day the user will see it.
 
 ## Accessibility is a gate, not a preference
 
@@ -69,3 +70,4 @@ The output of this triage is a **list of the moments that get motion, each tagge
 - Nielsen Norman Group — *Executing UX Animations: Duration and Motion Characteristics* (perception thresholds, when motion helps vs hurts). https://www.nngroup.com/articles/animation-duration/
 - Material Design 3 — *Easing and duration* (enter/persist vs exit/dismiss budgets, easing-by-intent). https://m3.material.io/styles/motion/easing-and-duration
 - Apple Human Interface Guidelines — *Motion* (responsiveness, reduced-motion accessibility). https://developer.apple.com/design/human-interface-guidelines/motion
+- Emil Kowalski — *You Don't Need Animations* (purpose + frequency of use; never animate keyboard-initiated actions; the Raycast example). https://emilkowal.ski/ui/you-dont-need-animations
