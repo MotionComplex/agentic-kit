@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>corner-cutouts — usage example</title>
+<style>
+  :root { --bg:#08080A; --surface:#141418; --line:#3A3A42; --ink:#fff; --muted:#9A9AA4; --red:#E84142; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--ink); font-family:system-ui,sans-serif; padding:40px; display:flex; flex-direction:column; gap:28px; }
+  .label { font:600 11px/1 ui-monospace,monospace; letter-spacing:.14em; text-transform:uppercase; color:#5C5C66; margin-bottom:10px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+
+  /* a filled panel: wm-shape paints the surface, content sits above */
+  .panel { position:relative; width:280px; height:160px; }
+  .panel .content { position:relative; z-index:1; padding:18px; }
+
+  /* solid button: clip mode (background follows the cut) */
+  .btn { position:relative; display:inline-flex; align-items:center; height:46px; padding:0 22px;
+         border:none; cursor:pointer; border-radius:14px; font:500 14px/1 system-ui; color:#fff; }
+  .btn .t { position:relative; z-index:1; }
+  .btn-dark { background:#0A0A0A; } .btn-red { background:var(--red); }
+
+  /* outline button: NO css border — the wm-shape stroke draws it, coloured via CSS */
+  .btn-outline { position:relative; display:inline-flex; align-items:center; height:46px; padding:0 22px;
+                 cursor:pointer; border-radius:14px; background:transparent; color:var(--ink); font:500 14px/1 system-ui; }
+  .btn-outline .t { position:relative; z-index:1; }
+  .btn-outline wm-shape path       { stroke:var(--line); }
+  .btn-outline:hover wm-shape path { stroke:var(--ink); }
+
+  /* footer: per-corner radii (top rounded, bottom-left square) + bottom-right chamfer */
+  .footer { position:relative; height:140px; background:#0A0A0A; border-radius:16px 16px 0 0; overflow:hidden;
+            display:flex; align-items:flex-end; padding:18px; }
+  .footer .t { position:relative; z-index:1; color:var(--muted); font-size:13px; }
+
+  /* clipped media: image/gradient follows the cut */
+  .media { position:relative; width:280px; height:160px; overflow:hidden; }
+  .media .bg { position:absolute; inset:0; background:linear-gradient(135deg,#3A5BFF,#2440E0 60%,#1E36C2); z-index:1; }
+</style>
+</head>
+<body>
+
+  <div>
+    <div class="label">filled panel — fill + stroke</div>
+    <div class="panel">
+      <wm-shape corner="br" rounded="28" corner-size="96" corner-rounded="20"
+                fill="var(--red)" stroke="rgba(255,255,255,.22)" stroke-width="1"></wm-shape>
+      <div class="content"><strong>Powered by</strong><br>rounded chamfer, br</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="label">buttons — solid (clip) vs outline (stroke follows the cut)</div>
+    <div class="row">
+      <button class="btn btn-dark"  data-wm-cut="br" data-wm-size="24"><span class="t">Start Building&nbsp;<span style="color:var(--red)">&rarr;</span></span></button>
+      <button class="btn btn-red"   data-wm-cut="br" data-wm-size="24"><span class="t">Learn more&nbsp;&rarr;</span></button>
+      <button class="btn-outline" id="outline"><span class="t">View All Events&nbsp;&rarr;</span></button>
+    </div>
+  </div>
+
+  <div>
+    <div class="label">clipped media + per-corner footer</div>
+    <div class="row" style="align-items:stretch">
+      <div class="media">
+        <wm-shape clip corner="br" rounded="20" corner-size="80" corner-rounded="16"></wm-shape>
+        <div class="bg"></div>
+      </div>
+      <div class="footer" style="flex:1;min-width:280px">
+        <wm-shape clip corner="br" rounded="16 16 0 0" corner-size="100" corner-rounded="18"></wm-shape>
+        <span class="t">top corners 16 · bottom-left square · bottom-right chamfer</span>
+      </div>
+    </div>
+  </div>
+
+<script src="../scripts/wm-shape.js"></script>
+<script>
+  // outline button: paint a stroke (no CSS border) so the hairline traces the chamfer
+  WMShape.upgrade('#outline', { corner:'br', cornerSize:24, paint:true, strokeWidth:1 });
+</script>
+</body>
+</html>
