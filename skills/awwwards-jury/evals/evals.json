@@ -16,6 +16,22 @@
         "A priority fix list with at least 8 items is present",
         "Criteria that could not be observed are marked Not assessed rather than given invented scores"
       ]
+    },
+    {
+      "id": 1,
+      "prompt": "Pipeline gate: run the awwwards jury on https://www.lucide.zone/ and return a machine-readable verdict.json — no HTML needed. We gate on official weighted >= 6.5.",
+      "expected_output": "A verdict.json saved to the outputs directory that validates against references/verdict-schema.md: schemaVersion 1, subject, evidenceMode, official scores with a correctly computed weighted total, developer and extended sections (null or scored), perJuror entries with evidence-based criticisms each carrying what/where/why/fix, a priorityFixes list, a verdict from the defined enum, a computed confidence in [0,1], and notAssessed entries for anything unobserved — with no HTML scorecard produced.",
+      "files": [],
+      "assertions": [
+        "A verdict JSON file is saved to the outputs directory and no HTML scorecard is produced",
+        "The JSON validates against the schema in references/verdict-schema.md (validated programmatically, e.g. ajv)",
+        "official.weighted equals 0.40*design + 0.30*usability + 0.20*creativity + 0.10*content within 0.01",
+        "developer.weighted is the correct weighted sum of the six dev categories (or developer is null with the gap in notAssessed)",
+        "verdict matches the documented mapping from official.weighted and developer.weighted",
+        "confidence is in [0,1] and consistent with the schema doc's formula given evidenceMode and panel variance",
+        "Every criticism object contains non-empty what, where, why, and fix fields",
+        "Unobservable criteria appear as null scores with corresponding notAssessed entries, not invented numbers"
+      ]
     }
   ]
 }
