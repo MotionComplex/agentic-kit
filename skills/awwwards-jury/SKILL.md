@@ -13,7 +13,10 @@ description: >-
   would this score", "roast my UI", "jury feedback", expert feedback on a URL,
   screenshots, a Figma export, or a local project — or mentions awwwards, design
   awards, or wanting constructive criticism to improve an application, even if they
-  never say "jury" or "skill".
+  never say "jury" or "skill". Also triggers in JSON verdict mode when the caller
+  asks for JSON or machine-readable output, a verdict.json, a structured verdict,
+  or invokes the jury as an automated pipeline/CI quality gate — same jury, but
+  the deliverable is a schema-validated verdict.json instead of the HTML scorecard.
 ---
 
 # Awwwards Jury
@@ -121,6 +124,16 @@ Save as `<app-name>-jury-scorecard.html` in the outputs folder and present it.
 - Render the HTML (browser screenshot if available, otherwise inspect structure) — no overflow, no empty placeholder tokens left, all nine jurors present.
 - Spot-check three random criticisms against the evidence log: is each one located, true, and fixable as written?
 
+## JSON verdict mode
+
+Some callers are not people. When the invocation asks for JSON or machine-readable output, requests a verdict.json, or the jury is running as a pipeline gate (CI step, agent harness, automated quality gate), switch the deliverable — and only the deliverable:
+
+- **Everything upstream is identical.** The evidence rules, the nine-juror deliberation, the calibration anchors, and every non-negotiable apply exactly as in HTML mode. A gate consuming inflated or evidence-free scores is worse than no gate.
+- **Emit `<app-name>-jury-verdict.json` instead of the scorecard** (step 4), conforming to `references/verdict-schema.md` — read it before emitting; it defines every field, the verdict mapping, and the confidence formula.
+- **Compute, don't transcribe.** Weighted scores and `confidence` come from the sandbox using the schema doc's formulas, and the finished file is validated against the JSON Schema programmatically (`npx ajv-cli` or a few lines of node) before presenting. An invalid or arithmetically wrong verdict.json fails silently on the machine that consumes it — the one failure mode worse than a wrong scorecard.
+- **Unobservable stays unobservable.** Unassessed criteria become `null` scores plus `notAssessed[]` entries, `evidenceMode: "partial"`, and a lower computed `confidence` — never invented numbers.
+- **HTML stays the default for humans.** Both may be requested together: one deliberation, two renderings, scores matching to the decimal.
+
 ## Non-negotiables
 
 - **No critique without evidence.** Every point traces to something observed, with its location.
@@ -134,4 +147,5 @@ Save as `<app-name>-jury-scorecard.html` in the outputs folder and present it.
 
 - `references/jurors.md` — all nine juror personas: identity, checklist, scoring anchors, voice. Read before deliberation.
 - `references/dev-award.md` — the official awwwards Developer Award categories, weights, and condensed checklists. Read before the Creative Developer deliberates.
+- `references/verdict-schema.md` — the canonical JSON verdict: full JSON Schema, computed-field formulas, worked example. Read before emitting a verdict.json.
 - `assets/scorecard-template.html` — the scorecard skeleton: copy, fill, never restyle from scratch.
