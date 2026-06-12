@@ -1,0 +1,21 @@
+{
+  "skill_name": "awwwards-jury",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "I built this site: https://www.lucide.zone/ — give me a full design-jury style review of it. How would it score on awwwards, and what exactly should I improve? I want an HTML scorecard I can work from.",
+      "expected_output": "A self-contained HTML scorecard with all nine jurors (Art Director, UX Lead, Creative Director, Content Strategist, Creative Developer, Software Architect, Accessibility Specialist, Performance Engineer, Product Strategist), official awwwards weighting (Design 40 / Usability 30 / Creativity 20 / Content 10), a developer-jury section with the six official categories, an extended advisory panel, evidence-based criticisms each paired with a concrete fix, a prioritized fix list, correct weighted arithmetic, and unobservable criteria marked Not assessed rather than invented.",
+      "files": [],
+      "assertions": [
+        "An HTML scorecard file is saved to the outputs directory",
+        "All nine jury roles are present in the scorecard (Art Director, UX Lead, Creative Director, Content Strategist, Creative Developer, Software Architect, Accessibility Specialist, Performance Engineer, Product Strategist)",
+        "The official awwwards weights (Design 40%, Usability 30%, Creativity 20%, Content 10%) are used and shown",
+        "The weighted overall score is arithmetically consistent with the per-criterion scores (within 0.1)",
+        "A developer-jury section evaluates the six official categories (WPO, RWD/Mobile, Semantics/SEO, Markup/Metadata, Animations, Accessibility)",
+        "Every criticism is paired with a concrete, actionable fix",
+        "A priority fix list with at least 8 items is present",
+        "Criteria that could not be observed are marked Not assessed rather than given invented scores"
+      ]
+    }
+  ]
+}

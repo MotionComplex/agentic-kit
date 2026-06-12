@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!--
+  AWWWARDS JURY SCORECARD TEMPLATE
+  How to use:
+  1. Replace every {{TOKEN}} with real content. No token may survive into the final file.
+  2. Duplicate the <article class="juror"> block once per juror (9 total), in panel order.
+  3. Duplicate <li> items in lists to match real content; delete examples.
+  4. Score bars: set the inline style "--v: <score*10>%" AND the printed number.
+  5. Keep the CSS untouched — restyling wastes effort and breaks the layout.
+  6. Verdict classes on .verdict-badge: v-none | v-hm | v-sotd | v-sotm
+-->
+<title>{{APP_NAME}} — Jury Scorecard</title>
+<style>
+  :root{
+    --bg:#0e0e10; --surface:#161618; --surface2:#1d1d21; --line:#2a2a30;
+    --ink:#f2f2ef; --muted:#9b9ba3; --faint:#6b6b73;
+    --accent:#e8c15a; --good:#7ec98f; --mid:#e8c15a; --bad:#e07a6b;
+    --serif:Georgia,'Times New Roman',serif;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+
+  /* Header */
+  header{padding:24px 0 40px;border-bottom:1px solid var(--line)}
+  .kicker{font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--faint)}
+  h1{font-family:var(--serif);font-size:clamp(32px,5vw,52px);font-weight:400;margin:10px 0 6px}
+  .meta{color:var(--muted);font-size:14px}
+  .meta span+span::before{content:"·";margin:0 8px;color:var(--faint)}
+
+  /* Verdict */
+  .verdict{display:flex;flex-wrap:wrap;gap:24px;align-items:center;padding:36px 0;border-bottom:1px solid var(--line)}
+  .score-big{font-family:var(--serif);font-size:84px;line-height:1}
+  .score-big small{font-size:24px;color:var(--faint)}
+  .verdict-badge{display:inline-block;padding:8px 18px;border-radius:999px;font-size:13px;letter-spacing:.12em;text-transform:uppercase;border:1px solid}
+  .v-none{color:var(--muted);border-color:var(--line)}
+  .v-hm{color:var(--accent);border-color:var(--accent)}
+  .v-sotd{color:#0e0e10;background:var(--accent);border-color:var(--accent);font-weight:600}
+  .v-sotm{color:#0e0e10;background:linear-gradient(90deg,var(--accent),#f0e2b6);border-color:var(--accent);font-weight:600}
+  .verdict p{flex:1 1 320px;color:var(--muted);font-size:15px;max-width:54ch}
+
+  /* Sections */
+  section{padding:44px 0;border-bottom:1px solid var(--line)}
+  h2{font-family:var(--serif);font-weight:400;font-size:26px;margin-bottom:6px}
+  .sub{color:var(--faint);font-size:13px;margin-bottom:26px}
+
+  /* Score rows */
+  .row{display:grid;grid-template-columns:190px 1fr 64px 56px;gap:14px;align-items:center;padding:10px 0}
+  .row .lbl{font-size:14px}
+  .row .w{color:var(--faint);font-size:12px}
+  .bar{height:6px;background:var(--surface2);border-radius:3px;overflow:hidden}
+  .bar i{display:block;height:100%;width:var(--v,0%);border-radius:3px;background:var(--accent)}
+  .bar.good i{background:var(--good)} .bar.bad i{background:var(--bad)}
+  .row .num{font-family:var(--serif);font-size:20px;text-align:right}
+  .na{color:var(--faint);font-style:italic;font-size:13px}
+
+  /* Juror cards */
+  .juror{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:28px;margin-bottom:22px}
+  .jhead{display:flex;gap:16px;align-items:center;margin-bottom:18px}
+  .avatar{width:46px;height:46px;border-radius:50%;background:var(--surface2);border:1px solid var(--line);
+          display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:17px;color:var(--accent);flex:none}
+  .jhead .role{font-size:16px;font-weight:600}
+  .jhead .owns{color:var(--faint);font-size:12.5px;letter-spacing:.06em;text-transform:uppercase}
+  .chip{margin-left:auto;font-family:var(--serif);font-size:26px;padding:4px 16px;border-radius:10px;background:var(--surface2);border:1px solid var(--line)}
+  .reaction{font-family:var(--serif);font-size:17.5px;font-style:italic;color:var(--ink);border-left:2px solid var(--accent);padding-left:16px;margin-bottom:20px}
+  .juror h4{font-size:11.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin:18px 0 10px}
+  .juror ul{list-style:none}
+  .juror li{padding:9px 0 9px 24px;position:relative;font-size:14.5px;color:#cfcfd4;border-top:1px solid var(--surface2)}
+  .strengths li::before{content:"+";position:absolute;left:2px;color:var(--good);font-weight:600}
+  .crits li::before{content:counter(crit);counter-increment:crit;position:absolute;left:0;color:var(--bad);font-size:12.5px;font-family:var(--serif)}
+  .crits{counter-reset:crit}
+  .crits .fix{display:block;margin-top:5px;color:var(--muted);font-size:13.5px}
+  .crits .fix b{color:var(--good);font-weight:600;font-style:normal}
+
+  /* Priority fixes */
+  .fixes ol{list-style:none;counter-reset:fx}
+  .fixes li{display:grid;grid-template-columns:44px 1fr auto;gap:14px;align-items:baseline;
+            padding:15px 0;border-top:1px solid var(--surface2);font-size:14.5px}
+  .fixes li::before{content:counter(fx,decimal-leading-zero);counter-increment:fx;font-family:var(--serif);font-size:19px;color:var(--accent)}
+  .fixes .who{color:var(--faint);font-size:12px;white-space:nowrap}
+  .fixes .pri{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--accent);border:1px solid var(--line);border-radius:4px;padding:1px 7px;margin-right:8px;vertical-align:middle}
+  .fixes .why{display:block;color:var(--muted);font-size:13px;margin-top:3px}
+
+  footer{padding-top:36px;color:var(--faint);font-size:12.5px;max-width:70ch}
+  @media (max-width:640px){
+    .row{grid-template-columns:1fr 56px;grid-template-rows:auto auto}
+    .row .lbl{grid-column:1/-1}.row .w{display:none}
+    .score-big{font-size:60px}
+    .fixes li{grid-template-columns:36px 1fr}.fixes .who{grid-column:2}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">Awwwards-Style Jury Review</div>
+    <h1>{{APP_NAME}}</h1>
+    <div class="meta">
+      <span>{{DATE}}</span><span>Input: {{INPUT_TYPE}}</span><span>Genre frame: {{GENRE_FRAME}}</span>
+    </div>
+  </header>
+
+  <div class="verdict">
+    <div>
+      <div class="score-big">{{OFFICIAL_SCORE}}<small>/10</small></div>
+      <div class="kicker" style="margin-top:6px">Official weighted score</div>
+    </div>
+    <span class="verdict-badge {{VERDICT_CLASS}}">{{VERDICT_LABEL}}</span>
+    <p>{{VERDICT_SUMMARY — two or three sentences: the panel's overall read, the single biggest lever, and what separates this from the next award tier.}}</p>
+  </div>
+
+  <section>
+    <h2>Official panel</h2>
+    <div class="sub">Awwwards criteria — Design 40% · Usability 30% · Creativity 20% · Content 10%</div>
+    <div class="row"><span class="lbl">Design</span><div class="bar"><i style="--v:{{D*10}}%"></i></div><span class="w">×0.40</span><span class="num">{{D}}</span></div>
+    <div class="row"><span class="lbl">Usability</span><div class="bar"><i style="--v:{{U*10}}%"></i></div><span class="w">×0.30</span><span class="num">{{U}}</span></div>
+    <div class="row"><span class="lbl">Creativity</span><div class="bar"><i style="--v:{{C*10}}%"></i></div><span class="w">×0.20</span><span class="num">{{C}}</span></div>
+    <div class="row"><span class="lbl">Content</span><div class="bar"><i style="--v:{{T*10}}%"></i></div><span class="w">×0.10</span><span class="num">{{T}}</span></div>
+  </section>
+
+  <section>
+    <h2>Developer jury</h2>
+    <div class="sub">Official Developer Award categories — score &gt; 7.0 earns the award · Result: <strong style="color:var(--ink)">{{DEV_SCORE}}/10 — {{DEV_VERDICT}}</strong></div>
+    <div class="row"><span class="lbl">Web Performance</span><div class="bar"><i style="--v:..%"></i></div><span class="w">×0.20</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">RWD / Mobile</span><div class="bar"><i style="--v:..%"></i></div><span class="w">×0.20</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">Semantics / SEO</span><div class="bar"><i style="--v:..%"></i></div><span class="w">×0.20</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">Markup / Metadata</span><div class="bar"><i style="--v:..%"></i></div><span class="w">×0.15</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">Animations</span><div class="bar"><i style="--v:..%"></i></div><span class="w">×0.15</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">Accessibility</span><div class="bar"><i style="--v:..%"></i></div><span class="w">×0.10</span><span class="num">{{..}}</span></div>
+  </section>
+
+  <section>
+    <h2>Extended panel</h2>
+    <div class="sub">Advisory scores — reported separately, never blended into the official total · Panel index: {{EXT_INDEX}}/10</div>
+    <div class="row"><span class="lbl">Software Architecture</span><div class="bar"><i style="--v:..%"></i></div><span class="w">adv.</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">Accessibility (deep)</span><div class="bar"><i style="--v:..%"></i></div><span class="w">adv.</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">Performance</span><div class="bar"><i style="--v:..%"></i></div><span class="w">adv.</span><span class="num">{{..}}</span></div>
+    <div class="row"><span class="lbl">Product Strategy</span><div class="bar"><i style="--v:..%"></i></div><span class="w">adv.</span><span class="num">{{..}}</span></div>
+    <!-- For any "Not assessed" criterion, replace the bar row's last two cells with: <span class="na" style="grid-column:3/5">Not assessed — {{reason}}</span> -->
+  </section>
+
+  <section>
+    <h2>Deliberations</h2>
+    <div class="sub">Nine jurors, in their own words</div>
+
+    <!-- REPEAT this <article> once per juror (9×), in panel order -->
+    <article class="juror">
+      <div class="jhead">
+        <div class="avatar">{{INITIALS e.g. AD}}</div>
+        <div>
+          <div class="role">{{JUROR ROLE e.g. Art Director}}</div>
+          <div class="owns">{{OWNS e.g. Design · 40%}}</div>
+        </div>
+        <div class="chip">{{SCORE}}</div>
+      </div>
+      <p class="reaction">{{One-or-two-sentence overall reaction, in the juror's voice.}}</p>
+      <h4>Strengths</h4>
+      <ul class="strengths">
+        <li>{{Specific, located strength.}}</li>
+      </ul>
+      <h4>Criticisms &amp; fixes</h4>
+      <ul class="crits">
+        <li>{{What → where → why it costs points.}}
+          <span class="fix"><b>Fix:</b> {{The concrete, actionable change.}}</span></li>
+      </ul>
+    </article>
+    <!-- /REPEAT -->
+
+  </section>
+
+  <section class="fixes">
+    <h2>Priority fix list</h2>
+    <div class="sub">Highest impact ÷ effort first — work from the top</div>
+    <ol>
+      <!-- 8–12 items. REPEAT: -->
+      <li>
+        <div>{{The fix, as an imperative instruction.}}
+          <span class="why">{{Estimated gain + effect, e.g. "Usability +0.4 — removes the biggest mobile blocker."}}</span></div>
+        <span class="who"><b class="pri">{{P0|P1|P2}}</b>{{Raised by}}</span>
+      </li>
+      <!-- /REPEAT -->
+    </ol>
+  </section>
+
+  <footer>
+    Methodology: simulated jury based on the awwwards evaluation system (Design 40% / Usability 30% / Creativity 20% / Content 10%; Honorable Mention ≥ 6.5; Developer Award &gt; 7.0 across six official technical categories) extended with four advisory jurors. Scores are calibrated to real awwwards severity — 6.0 is good professional work. {{If partial: note which criteria were not assessed and what input would complete the review.}}
+  </footer>
+
+</div>
+</body>
+</html>
