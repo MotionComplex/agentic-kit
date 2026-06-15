@@ -76,7 +76,7 @@ const state = {
   // taken when the flow launches; `decisions` is the per-finding flow decision
   // (accept/edit/redirect/waive/skip) — the actual edits persist via the draft
   // review API, this just records which path the reviewer chose.
-  flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null },
+  flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null },
 };
 const current = { view: null, id: null, tab: null };
 let routeSeq = 0;
@@ -403,54 +403,136 @@ function renderGuide() {
 
 /* ============================== guided review flow ============================== */
 
-/* Reviewable = an open/reworking finding that carries a proposed change (draft).
- * These are the items the stepper walks and the CTA counts. */
+/* Reviewable = an open/reworking finding that carries something to decide on: a
+ * code-diff `draft` OR a non-empty `suggestion` (the proposed PR comment / reply).
+ * PR-review findings usually carry only a suggestion, so they MUST count here too —
+ * these are the items the stepper walks and the CTA counts. */
+function hasSuggestion(f) {
+  return typeof f.suggestion === 'string' && f.suggestion.trim() !== '';
+}
 function reviewableFindings(findings) {
-  return (findings || []).filter((f) => (f.status === 'open' || f.status === 'reworking') && f.draft);
+  return (findings || []).filter((f) =>
+    (f.status === 'open' || f.status === 'reworking') && (f.draft || hasSuggestion(f)));
 }
 
-const LOOP_STAGES = [['1', 'Audit'], ['2', 'Review'], ['3', 'Apply / Export'], ['4', 'Re-audit']];
+/* Canonical loop stages keyed independent of label, so a kind can rename them.
+ * fetch → review → apply → reaudit. `reaudit` is the trailing "next" step and is
+ * never lit as the *active* stage — it's what you do after posting/applying. */
+const STAGE_KEYS = ['fetch', 'review', 'apply', 'reaudit'];
+const LOOP_STAGES_BY_KIND = {
+  spec:         [['1', 'Audit'], ['2', 'Review'], ['3', 'Apply / Export'], ['4', 'Re-audit']],
+  'pr-review':  [['1', 'Fetch'], ['2', 'Review comments'], ['3', 'Post'], ['4', '(re-run)']],
+  'pr-respond': [['1', 'Fetch'], ['2', 'Review threads'], ['3', 'Post'], ['4', '(re-run)']],
+};
 
+/* Active stage from REAL state, not "rounds exist": no findings → fetch; any
+ * undecided reviewable finding → review; otherwise everything's been triaged →
+ * apply/post. `reaudit` is only ever the dangling next step (never returned here). */
 function loopActiveStage(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
-  if (!findings.length) return 'Audit';
-  if (reviewableFindings(findings).length) return 'Review';
-  return 'Re-audit';
+  if (!findings.length) return 'fetch';
+  if (reviewableFindings(findings).length) return 'review';
+  return 'apply';
 }
 
-/* The loop, always visible in the feature header: Audit → Review → Apply/Export
- * → Re-audit, with the current stage lit and the primary CTA on the right. */
-function loopStrip(activeStage, rightEl) {
-  const stages = [];
-  LOOP_STAGES.forEach(([ix, label], i) => {
-    if (i) stages.push(h('span', { class: 'loop-sep' }, '→'));
-    stages.push(h('div', { class: `loop-stage ${label === activeStage ? 'active' : ''}` },
+/* The loop, always visible in the feature header, with kind-aware stage labels,
+ * the current stage lit and the primary CTA on the right. */
+function loopStrip(data, rightEl) {
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  const stages = LOOP_STAGES_BY_KIND[kind] || LOOP_STAGES_BY_KIND.spec;
+  const activeIdx = STAGE_KEYS.indexOf(loopActiveStage(data));
+  const els = [];
+  stages.forEach(([ix, label], i) => {
+    if (i) els.push(h('span', { class: 'loop-sep' }, '→'));
+    // Never light the trailing re-audit/(re-run) stage — it's the next step, not "now".
+    const active = i === activeIdx && i < 3;
+    els.push(h('div', { class: `loop-stage ${active ? 'active' : ''}` },
       h('span', { class: 'loop-ix' }, ix), label));
   });
   return h('div', { class: 'loop-strip' },
-    h('div', { class: 'loop-stages' }, stages),
+    h('div', { class: 'loop-stages' }, els),
     rightEl);
 }
 
-/* The single prominent next-action. "Review N" when there's something to review;
- * otherwise it tells the user what's blocking the loop (drafts missing) or that
- * there's nothing to do. */
+/* Noun the CTA + stepper use for one reviewable item, per kind. */
+const REVIEW_NOUN = {
+  spec: ['flagged item', 'flagged items'],
+  'pr-review': ['comment', 'comments'],
+  'pr-respond': ['thread', 'threads'],
+};
+function reviewNoun(kind) { return REVIEW_NOUN[kind] || REVIEW_NOUN.spec; }
+
+/* The single prominent next-action. "Review N comments/items/threads" when there's
+ * something to review; otherwise it tells the user there's nothing left to triage. */
 function reviewCta(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  const [one, many] = reviewNoun(kind);
   const n = reviewableFindings(findings).length;
   if (n > 0) {
     return h('button', {
       class: 'review-cta', type: 'button',
       onclick: () => { location.hash = `#/feature/${encodeURIComponent(current.id)}/review`; },
-    }, 'Review ', h('span', { class: 'cta-n' }, String(n)), ` flagged ${n === 1 ? 'item' : 'items'}`);
+    }, 'Review ', h('span', { class: 'cta-n' }, String(n)), ` ${n === 1 ? one : many}`);
   }
-  const openNoDraft = findings.filter((f) => (f.status === 'open' || f.status === 'reworking') && !f.draft).length;
-  if (openNoDraft > 0) {
+  const openNone = findings.filter((f) =>
+    (f.status === 'open' || f.status === 'reworking') && !f.draft && !hasSuggestion(f)).length;
+  if (openNone > 0) {
+    const noun = kind === 'spec' ? 'a draft' : 'a comment';
     return h('div', { class: 'review-cta-done' },
-      `Nothing to review — ${plural(openNoDraft, 'open finding', 'open findings')} without a draft`);
+      `Nothing to review — ${plural(openNone, 'open finding', 'open findings')} without ${noun}`);
+  }
+  if (kind === 'pr-review' || kind === 'pr-respond') {
+    return h('div', { class: 'review-cta-done is-ready' }, '✓ All reviewed — ready to post');
   }
   const gate = (data.readiness && data.readiness.gate) || 'in-progress';
   return h('div', { class: 'review-cta-done is-ready' }, gate === 'ready' ? '✓ Ready to build' : '✓ Nothing to review');
+}
+
+/* Kind-aware decision actions for the stepper's decision row. Each returns the
+ * button set (each mapped to an internal flow-decision kind so the rail marks,
+ * finish tallies, export + apply all keep working), the per-finding triage tag
+ * labels, and behavior flags. `editsComment` → the Edit button opens the proposed
+ * comment in a textarea (not the per-hunk diff); `quickDismiss` → Dismiss records
+ * the decision immediately (reason optional). */
+function decisionActions(kind) {
+  if (kind === 'pr-review') {
+    return {
+      label: 'Decision',
+      editsComment: true,
+      quickDismiss: true,
+      helper: 'Approved comments are posted only when you click Post — nothing is sent until then.',
+      tagLabels: { accept: 'Will post', edit: 'Edited', waive: 'Dismissed', undecided: 'Undecided' },
+      buttons: [
+        { kind: 'accept', label: '✓ Approve comment', cls: 'dec-accept' },
+        { kind: 'edit', label: '✎ Edit comment', cls: 'dec-edit' },
+        { kind: 'waive', label: '✕ Dismiss', cls: 'dec-waive' },
+      ],
+    };
+  }
+  if (kind === 'pr-respond') {
+    return {
+      label: 'Decision',
+      helper: 'Replies and fixes are sent only when you click Post — nothing is sent until then.',
+      tagLabels: { accept: 'Will reply', edit: 'Fix + reply', redirect: 'Push back', skip: 'Skipped', undecided: 'Undecided' },
+      buttons: [
+        { kind: 'accept', label: '↩ Reply', cls: 'dec-accept' },
+        { kind: 'edit', label: '✎ Apply fix', cls: 'dec-edit' },
+        { kind: 'redirect', label: '⤺ Push back', cls: 'dec-redirect' },
+        { kind: 'skip', label: '⏭ Skip', cls: 'dec-skip' },
+      ],
+    };
+  }
+  return {
+    label: 'Decision',
+    buttons: [
+      { kind: 'accept', label: '✅ Accept', cls: 'dec-accept' },
+      { kind: 'edit', label: '✏️ Edit', cls: 'dec-edit' },
+      { kind: 'redirect', label: '⤳ Redirect', cls: 'dec-redirect' },
+      { kind: 'waive', label: '⊘ Waive', cls: 'dec-waive' },
+      { kind: 'skip', label: '⏭ Skip', cls: 'dec-skip' },
+    ],
+  };
 }
 
 const DEC_LABEL = { accept: 'Apply', edit: 'With edits', redirect: 'Redirect', waive: 'Waive', skip: 'Skip' };
@@ -487,7 +569,7 @@ function initFlow(data) {
   if (state.flow.featureId !== current.id || !Array.isArray(state.flow.items)) {
     state.flow = {
       active: true, finish: false, featureId: current.id,
-      items: reviewable.map((f) => f.fp), idx: 0, decisions: {}, waiving: null,
+      items: reviewable.map((f) => f.fp), idx: 0, decisions: {}, waiving: null, editingComment: null,
     };
   }
   const len = state.flow.items.length;
@@ -560,12 +642,13 @@ function stepperView(data) {
   return h('div', { class: 'stepper' },
     top,
     h('div', { class: 'step-layout' },
-      stepRail(findings),
+      stepRail(findings, (data.feature && data.feature.kind) || 'spec'),
       h('div', {}, card, stepNav())));
 }
 
-function stepRail(findings) {
+function stepRail(findings, kind) {
   const { items, idx } = state.flow;
+  const [one, many] = reviewNoun(kind || 'spec');
   const rows = items.map((fp, i) => {
     const f = findings.find((x) => x.fp === fp);
     const dec = state.flow.decisions[fp];
@@ -580,7 +663,7 @@ function stepRail(findings) {
       h('span', { class: 'rail-label' }, f ? (f.title || '(untitled)') : fp));
   });
   return h('div', { class: 'step-rail' },
-    h('div', { class: 'rail-head' }, plural(items.length, 'flagged item', 'flagged items')),
+    h('div', { class: 'rail-head' }, plural(items.length, one, many)),
     rows,
     h('button', {
       class: 'rail-item', type: 'button', style: 'margin-top:6px;border-top:1px solid var(--line-soft);border-radius:0 0 var(--radius-sm) var(--radius-sm)',
@@ -588,11 +671,20 @@ function stepRail(findings) {
     }, h('span', { class: 'rail-mark' }, '✓'), h('span', { class: 'rail-label' }, 'Finish & summary')));
 }
 
+/* The suggestion label per kind: a pr-review finding's suggestion IS the proposed
+ * comment, so it's surfaced prominently as "Proposed comment". */
+function suggestionLabel(kind) {
+  return kind === 'pr-review' ? 'Proposed comment'
+    : kind === 'pr-respond' ? 'Proposed reply'
+    : 'Suggestion';
+}
+
 function stepCard(data, f) {
+  const kind = (data.feature && data.feature.kind) || 'spec';
   const sev = SEV[f.severity] ? f.severity : 'info';
   const badge = findingBadge(f, currentRoundNum());
-  const { adds, dels, hunks } = draftStats(f);
-  const verdict = draftVerdict(f);
+  const hasDraft = !!f.draft;
+  const verdict = hasDraft ? draftVerdict(f) : 'proposed';
 
   const head = h('div', { class: 'step-finding-head' },
     h('div', { class: 'step-titlerow' },
@@ -605,6 +697,71 @@ function stepCard(data, f) {
       verdictChip(f),
       f.locus ? h('code', { class: 'f-locus' }, f.locus) : null));
 
+  const diffSection = hasDraft ? stepDiffSection(f, verdict) : null;
+
+  return h('div', { class: `step-card ${verdict !== 'proposed' ? `rm-frame-${verdict}` : ''}`.trim() },
+    head,
+    f.detail ? h('p', { class: 'step-detail' }, f.detail) : null,
+    suggestionSection(kind, f),
+    diffSection,
+    decisionRow(data, f));
+}
+
+/* The "Proposed comment" / "Suggestion" block — editable inline when the user
+ * picked "Edit comment" on this finding (pr-review/pr-respond). */
+function suggestionSection(kind, f) {
+  if (state.flow.editingComment === f.fp) return commentEditForm(kind, f);
+  const body = hasSuggestion(f) ? f.suggestion : '';
+  if (!body && kind === 'spec') return null;
+  const cls = kind === 'spec' ? 'f-suggestion' : 'f-suggestion proposed-comment';
+  return h('div', { class: cls },
+    h('span', { class: 'f-suglabel' }, suggestionLabel(kind)),
+    h('p', {}, body || h('span', { class: 'meta-dim' }, '(no comment text yet — use Edit comment)')));
+}
+
+function commentEditForm(kind, f) {
+  const ta = h('textarea', {
+    class: 'comment-edit-ta', rows: '5', spellcheck: 'true',
+    'aria-label': `${suggestionLabel(kind)} — editing`,
+    onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
+  });
+  ta.value = f.suggestion || '';
+  function cancel() { state.flow.editingComment = null; renderFlowInto(); }
+  const form = h('div', { class: 'comment-edit proposed-comment' },
+    h('span', { class: 'f-suglabel' }, `${suggestionLabel(kind)} — editing`),
+    ta,
+    h('div', { class: 'comment-edit-actions' },
+      h('button', { class: 'btn btn-accent', type: 'button', onclick: () => saveComment(f.fp, ta.value) }, 'Save & approve'),
+      h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel')));
+  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
+  return form;
+}
+
+/* Persist the edited proposed-comment body (via setFindingDetails on the server),
+ * mark the finding Approved (edited), and close the editor. */
+async function saveComment(fp, val) {
+  const f = findFinding(fp);
+  if (f) f.suggestion = val;            // optimistic
+  setFlowDecision(fp, 'edit');
+  state.flow.editingComment = null;
+  renderFlowInto();
+  try {
+    await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ suggestion: val }),
+    });
+    await loadDetail(current.id, true);
+  } catch (e) {
+    toast(`Comment save failed: ${e.message}`);
+    try { await loadDetail(current.id, true); } catch { /* keep optimistic state */ }
+  }
+  renderFlowInto();
+}
+
+/* The red/green diff section (present only when a finding carries a code-diff
+ * draft). Pulled out of stepCard so suggestion-only findings render without it. */
+function stepDiffSection(f, verdict) {
+  const { adds, dels, hunks } = draftStats(f);
   const mkTab = (mode, label) => h('button', {
     class: `diff-tab ${state.diffMode === mode ? 'active' : ''}`, type: 'button', 'aria-label': `${label} diff`,
     onclick: () => { state.diffMode = mode === 'split' ? 'split' : 'unified'; refreshModal(); },
@@ -626,35 +783,44 @@ function stepCard(data, f) {
           : 'Redirect — the proposed change below is superseded; the agent follows your note instead.')
     : null;
 
-  return h('div', { class: `step-card ${verdict !== 'proposed' ? `rm-frame-${verdict}` : ''}`.trim() },
-    head,
-    f.detail ? h('p', { class: 'step-detail' }, f.detail) : null,
-    f.suggestion ? h('div', { class: 'f-suggestion' },
-      h('span', { class: 'f-suglabel' }, 'suggestion'), h('p', {}, f.suggestion)) : null,
-    h('div', { class: 'step-diffwrap' }, diffHead, banner, ...reviewBodyKids(f)),
-    decisionRow(f));
+  return h('div', { class: 'step-diffwrap' }, diffHead, banner, ...reviewBodyKids(f));
 }
 
-function decisionRow(f) {
+function decisionRow(data, f) {
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  const cfg = decisionActions(kind);
   if (state.flow.waiving === f.fp) {
     return h('div', { class: 'decision-row' },
       h('span', { class: 'decision-label' }, 'Waive'),
       stepWaiveForm(f));
   }
   const dec = state.flow.decisions[f.fp];
-  const kind = dec && dec.kind;
-  const mk = (k, label) => h('button', {
-    class: `dec-btn dec-${k} ${kind === k ? 'on' : ''}`, type: 'button',
-    'aria-pressed': kind === k ? 'true' : 'false',
-    onclick: () => decide(f, k),
-  }, label);
-  return h('div', { class: 'decision-row' },
-    h('span', { class: 'decision-label' }, 'Decision'),
-    mk('accept', '✅ Accept'),
-    mk('edit', '✏️ Edit'),
-    mk('redirect', '⤳ Redirect'),
-    mk('waive', '⊘ Waive'),
-    mk('skip', '⏭ Skip'));
+  const decKind = dec && dec.kind;
+  const mk = (b) => h('button', {
+    class: `dec-btn ${b.cls} ${decKind === b.kind ? 'on' : ''}`, type: 'button',
+    'aria-pressed': decKind === b.kind ? 'true' : 'false',
+    onclick: () => decide(data, f, b.kind),
+  }, b.label);
+  const tag = cfg.tagLabels
+    ? h('span', { class: `triage-tag triage-${decKind || 'undecided'}` }, cfg.tagLabels[decKind || 'undecided'] || cfg.tagLabels.undecided)
+    : null;
+  const undo = decKind
+    ? h('button', { class: 'dec-undo', type: 'button', title: 'Clear this decision', onclick: () => undecide(f) }, '↺ Undo')
+    : null;
+  const row = h('div', { class: 'decision-row' },
+    h('span', { class: 'decision-label' }, cfg.label || 'Decision'),
+    ...cfg.buttons.map(mk),
+    tag, undo);
+  return cfg.helper
+    ? h('div', { class: 'decision-wrap' }, row, h('p', { class: 'decision-helper meta-dim' }, cfg.helper))
+    : row;
+}
+
+function undecide(f) {
+  delete state.flow.decisions[f.fp];
+  state.flow.waiving = null;
+  state.flow.editingComment = null;
+  renderFlowInto();
 }
 
 function stepWaiveForm(f) {
@@ -703,19 +869,38 @@ function advance() {
 }
 
 /* Decisions persist via the existing draft-review API (so the board + export
- * reflect them); nothing touches finding *status* until the finish screen. */
-async function decide(f, kind) {
+ * reflect them); nothing touches finding *status* until the finish/Post screen. */
+async function decide(data, f, kind) {
   const fp = f.fp;
+  const wsKind = (data.feature && data.feature.kind) || 'spec';
+  const cfg = decisionActions(wsKind);
+
+  // pr-review: Edit opens the proposed comment in a textarea (not the per-hunk diff).
+  if (kind === 'edit' && cfg.editsComment) {
+    state.flow.editingComment = fp;
+    renderFlowInto();
+    requestAnimationFrame(() => { const ta = $('.comment-edit-ta'); if (ta) ta.focus(); });
+    return;
+  }
+  // pr-review: Dismiss is a one-tap decision (reason optional), then advance.
+  if (kind === 'waive' && cfg.quickDismiss) {
+    setFlowDecision(fp, 'waive', { reason: '' });
+    advance();
+    return;
+  }
+
   if (kind === 'accept') {
     setFlowDecision(fp, 'accept');
     await acceptAll(f);
     advance();
   } else if (kind === 'edit') {
     setFlowDecision(fp, 'edit');
+    if (!f.draft) { renderFlowInto(); return; }
     if (draftVerdict(f) !== 'proposed') await setVerdict(fp, 'proposed');
     else renderFlowInto();   // reveal the per-hunk controls; reviewer edits then Next
   } else if (kind === 'redirect') {
     setFlowDecision(fp, 'redirect');
+    if (!f.draft) { renderFlowInto(); return; }
     if (draftVerdict(f) !== 'redirect') await setVerdict(fp, 'redirect');
     else renderFlowInto();
     requestAnimationFrame(() => { const ta = $('.review-note-ta'); if (ta) ta.focus(); });
@@ -731,6 +916,9 @@ async function decide(f, kind) {
 /* Accept the whole proposal: mark every hunk accepted + verdict proposed, in one
  * merged POST. Optimistic, then reconciled from the server. */
 async function acceptAll(f) {
+  // Suggestion-only finding (no code-diff draft): the approval is the decision —
+  // there's nothing to persist server-side until the Post step.
+  if (!f.draft) { renderFlowInto(); return; }
   const { hunks } = draftStats(f);
   const hunkObj = {};
   for (const hk of hunks) hunkObj[String(hk.id)] = { status: 'accepted', at: new Date().toISOString() };
@@ -759,42 +947,73 @@ function flowDecisionKind(fp) {
   return (dec && dec.kind) || 'skip';
 }
 
+/* Per-kind labels for the finish-screen decision tallies + summary pills. */
+const FINISH_TALLIES = {
+  spec: [
+    ['accept', 'Apply as proposed'], ['edit', 'Apply with edits'],
+    ['redirect', 'Redirect'], ['waive', 'Waive'], ['skip', 'Skipped'],
+  ],
+  'pr-review': [
+    ['accept', 'Approved'], ['edit', 'Edited'], ['waive', 'Dismissed'], ['skip', 'Undecided'],
+  ],
+  'pr-respond': [
+    ['accept', 'Reply'], ['edit', 'Fix + reply'], ['redirect', 'Push back'], ['skip', 'Skipped'],
+  ],
+};
+const DEC_PILL = {
+  spec: DEC_LABEL,
+  'pr-review': { accept: 'Approved', edit: 'Edited', redirect: 'Redirect', waive: 'Dismissed', skip: 'Undecided' },
+  'pr-respond': { accept: 'Reply', edit: 'Fix + reply', redirect: 'Push back', waive: 'Dismissed', skip: 'Skipped' },
+};
+
+/* The PR number for a pr-review/pr-respond workspace, read off the title (#482)
+ * or the id (pr-482-…), so the Post button can name the target PR. */
+function prNumber(feature) {
+  const t = (feature && feature.title) || '';
+  let m = t.match(/#(\d+)/);
+  if (m) return m[1];
+  const id = (feature && feature.id) || '';
+  m = id.match(/pr-?(\d+)/i) || id.match(/(\d+)/);
+  return m ? m[1] : null;
+}
+
 function finishView(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  const isPr = kind === 'pr-review' || kind === 'pr-respond';
   const counts = { accept: 0, edit: 0, redirect: 0, waive: 0, skip: 0 };
   const byTarget = new Map();
   for (const fp of state.flow.items) {
     const f = findings.find((x) => x.fp === fp);
     if (!f) continue;
     const dec = state.flow.decisions[fp];
-    const kind = (dec && dec.kind) || 'skip';
-    counts[kind] = (counts[kind] || 0) + 1;
+    const dk = (dec && dec.kind) || 'skip';
+    counts[dk] = (counts[dk] || 0) + 1;
     const target = (f.draft && f.draft.target && f.draft.target.trim()) || f.locus || '—';
     if (!byTarget.has(target)) byTarget.set(target, []);
-    byTarget.get(target).push({ f, kind, reason: dec && dec.reason });
+    byTarget.get(target).push({ f, kind: dk, reason: dec && dec.reason });
   }
 
+  const [, many] = reviewNoun(kind);
   const tally = (cls, label, n) => h('span', { class: `finish-tally t-${cls}` },
     h('span', { class: 'num' }, String(n)), label);
+  const tallySpecs = FINISH_TALLIES[kind] || FINISH_TALLIES.spec;
   const head = h('div', { class: 'finish-head' },
-    h('h1', {}, 'Decision summary'),
-    h('p', { class: 'view-sub' }, `${plural(state.flow.items.length, 'flagged item', 'flagged items')} reviewed · ${data.feature.title || current.id}`),
+    h('h1', {}, isPr ? 'Triage summary' : 'Decision summary'),
+    h('p', { class: 'view-sub' }, `${plural(state.flow.items.length, many.replace(/s$/, ''), many)} reviewed · ${data.feature.title || current.id}`),
     h('div', { class: 'finish-tallies' },
-      tally('accept', 'Apply as proposed', counts.accept),
-      tally('edit', 'Apply with edits', counts.edit),
-      tally('redirect', 'Redirect', counts.redirect),
-      tally('waive', 'Waive', counts.waive),
-      tally('skip', 'Skipped', counts.skip)));
+      tallySpecs.map(([k, label]) => tally(k, label, counts[k] || 0))));
 
+  const pillMap = DEC_PILL[kind] || DEC_LABEL;
   const groups = [...byTarget.entries()].map(([target, rows]) => h('div', { class: 'finish-group' },
     h('div', { class: 'finish-group-head' }, h('code', { class: 'finish-target' }, target)),
-    h('div', { class: 'finish-rows' }, rows.map(({ f, kind, reason }) => {
+    h('div', { class: 'finish-rows' }, rows.map(({ f, kind: dk, reason }) => {
       const sev = SEV[f.severity] ? f.severity : 'info';
       return h('div', { class: 'finish-row' },
         h('span', { class: `sev-glyph sev-${sev}` }, SEV[sev].glyph),
         h('span', { class: 'frow-title' }, f.title || '(untitled)',
           reason ? h('span', { class: 'meta-dim' }, ` — ${reason}`) : null),
-        h('span', { class: `dec-pill dec-${kind}` }, DEC_LABEL[kind]));
+        h('span', { class: `dec-pill dec-${dk}` }, pillMap[dk] || dk));
     }))));
 
   const applyKinds = (fp) => ['accept', 'edit', 'redirect'].includes(flowDecisionKind(fp));
@@ -808,9 +1027,10 @@ function finishView(data) {
     ? exportPanel(data.feature, toExport, 'feature')
     : h('p', { class: 'meta-dim export-empty' }, 'No applicable changes to export — every item was waived or skipped.');
 
+  // Spec: "mark as in-flight". PR: the Post gate is the whole action (postActionEl).
   const applyN = reworkFps.length + waiveItems.length;
   const actions = h('div', { class: 'finish-actions' },
-    h('button', {
+    isPr ? null : h('button', {
       class: 'btn btn-accent', type: 'button', disabled: applyN === 0,
       onclick: () => applyReviewed(reworkFps, waiveItems),
     }, applyN ? `Mark ${plural(applyN, 'finding', 'findings')} as in-flight` : 'Nothing to apply'),
@@ -822,10 +1042,10 @@ function finishView(data) {
     h('a', { class: 'backlink', href: `#/feature/${encodeURIComponent(current.id)}` }, '← Overview'),
     head,
     ...groups,
+    postActionEl(data),
     h('div', { class: 'finish-head' },
       h('div', { class: 'step-section-label' }, 'Export work order — hand to a coding agent'),
       exportEl),
-    postActionEl(data),
     actions,
     nextStepNote(data));
 }
@@ -846,7 +1066,15 @@ function nextStepNote(data) {
 function postActionEl(data) {
   const kind = data.feature && data.feature.kind;
   if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
-  const label = kind === 'pr-review' ? 'Post comments' : 'Post replies';
+  const noun = kind === 'pr-review' ? ['comment', 'comments'] : ['reply', 'replies'];
+  // Only approved/edited (and, for respond, pushed-back) items post; dismissed +
+  // undecided do not — the Post button counts exactly what will be sent.
+  const postable = kind === 'pr-review' ? ['accept', 'edit'] : ['accept', 'edit', 'redirect'];
+  const postN = state.flow.items.filter((fp) => postable.includes(flowDecisionKind(fp))).length;
+  const prNum = prNumber(data.feature);
+  const target = prNum ? `PR #${prNum}` : 'the PR';
+  const verb = kind === 'pr-review' ? 'Post comments' : 'Post replies';
+
   const reqs = (state.flow.applyReqs || []).slice()
     .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
   const latest = reqs[reqs.length - 1];
@@ -858,21 +1086,58 @@ function postActionEl(data) {
   const statusLine = latest
     ? h('span', { class: `post-status req-state-${cssSafe(latest.status)}` },
         h('span', { class: `req-glyph req-glyph-${cssSafe(latest.status)} ${meta.spin ? 'req-spin' : ''}`.trim() }, meta.glyph),
-        ' ', posted ? 'Posted to the PR' : meta.label,
+        ' ', posted ? `Posted to ${target}` : meta.label,
         errored && latest.note ? h('span', { class: 'meta-dim' }, ` — ${latest.note}`) : null)
     : null;
 
+  const postLabel = `${verb.split(' ')[0]} ${postN} ${postN === 1 ? noun[0] : noun[1]} to ${target}`;
   const btn = h('button', {
-    class: 'btn btn-accent', type: 'button', disabled: active,
-    onclick: () => enqueueApply(label),
-  }, active ? 'Queued…' : posted ? `${label} again` : errored ? 'Retry post' : label);
+    class: 'btn btn-accent btn-post', type: 'button', disabled: active || (postN === 0 && !posted && !errored),
+    onclick: () => postBack(data, kind, verb),
+  }, active ? 'Queued…' : posted ? `${verb} again` : errored ? 'Retry post' : postLabel);
 
   return h('div', { class: 'finish-post' },
-    h('div', { class: 'step-section-label' }, `${label} — send the kept items back to the PR`),
+    h('div', { class: 'step-section-label' }, `${verb} — nothing is sent until you click this`),
     h('div', { class: 'finish-post-row' },
       btn,
       statusLine,
       h('span', { class: 'meta-dim post-flow' }, 'queued → running → posted')));
+}
+
+/* Post gate for PR workspaces: first persist the triage to finding statuses
+ * (approved/edited → resolved "will post", dismissed → waived), then enqueue the
+ * `apply` request the runner posts back to the PR. */
+async function postBack(data, kind, verb) {
+  await persistTriage(data);
+  await enqueueApply(verb);
+}
+
+async function persistTriage(data) {
+  const resolveFps = [];
+  const waiveItems = [];
+  for (const fp of state.flow.items) {
+    const k = flowDecisionKind(fp);
+    if (k === 'skip') continue;                       // undecided → leave open
+    if (k === 'waive') waiveItems.push({ fp, reason: (state.flow.decisions[fp] && state.flow.decisions[fp].reason) || 'dismissed' });
+    else resolveFps.push(fp);                          // accept / edit / redirect → will post
+  }
+  try {
+    if (resolveFps.length) {
+      await api(`/api/features/${encodeURIComponent(current.id)}/review/apply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fps: resolveFps, status: 'resolved' }),
+      });
+    }
+    for (const { fp, reason } of waiveItems) {
+      await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'waived', reason: reason.trim() || 'dismissed' }),
+      });
+    }
+    await loadDetail(current.id, true);
+  } catch (e) {
+    toast(`Could not save triage: ${e.message}`);
+  }
 }
 
 async function enqueueApply(label) {
@@ -1636,7 +1901,7 @@ function detailView(data, tab) {
         ),
       ),
     ),
-    loopStrip(loopActiveStage(data), reviewCta(data)),
+    loopStrip(data, reviewCta(data)),
     reviewScopeNote(feature),
     sourcesStrip(feature),
     h('nav', { class: 'tabs', role: 'tablist' },
