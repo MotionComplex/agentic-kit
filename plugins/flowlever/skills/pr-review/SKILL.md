@@ -35,9 +35,25 @@ specs, and decisions are posted back as inline PR comments on **Apply**.
 Load the ADO MCP tools via ToolSearch, then exactly as `/pr-review`:
 `repo_get_pull_request_by_id` (PR + linked work items), `repo_get_pull_request_changes` /
 `repo_get_pull_request_threads` (diff + existing comments). **Once the first fetch succeeds, clear the
-prompt:** `requests set <reqId> --no-needs-input --phase "fetching linked ticket/spec"`. Auto-discover +
-fetch the ticket and Confluence spec. Then `requests set <reqId> --phase "reviewing changes"` and run the
-spec-aware review → findings anchored to specific changed files + line ranges.
+prompt:** `requests set <reqId> --no-needs-input --phase "fetching linked ticket/spec"`.
+
+**MANDATORY spec discovery — do NOT skip (this is the whole point of a *spec-aware* review):**
+1. Read the **linked work item** off the PR; fetch its Description + Acceptance Criteria.
+2. **Scan the ticket Description/AC for every Confluence link** (`*.atlassian.net/wiki/...` incl. tiny
+   `/wiki/x/<id>` links). Recurse one level into those pages for sub-spec links (contracts, matrices).
+   Fetch each via `getConfluencePage`.
+3. **Register every source you used as a workspace source** so the UI's Sources strip is complete and
+   honest — the PR (`--type ado`), the ticket (`--type ado --itemType "User Story"`), and **each
+   Confluence spec** (`--type confluence --id <pageId> --title "<page title>" --url "<url>"`). A
+   code-only review with zero confluence sources is a FAILURE of this skill — if the ticket has spec
+   links, they must be fetched AND registered.
+4. If the ticket genuinely has no spec links, say so explicitly in the run summary (so "no specs" is a
+   stated finding, never a silent omission).
+
+Then `requests set <reqId> --phase "reviewing changes"` and run the spec-aware review: check the PR's
+implementation against the fetched specs (contract/schema/column/AC compliance), not just code quality →
+findings anchored to specific changed files + line ranges, with spec-mismatch findings citing the spec
+locus (`confluence:<pageId>#<section>`).
 
 ## 3. Map findings → ingest shape
 For each review finding:
