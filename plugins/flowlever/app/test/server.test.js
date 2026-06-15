@@ -169,3 +169,30 @@ test('POST /api/requests/:id updates status/note/wsId; unknown id is 404', async
   });
   assert.equal(missing.status, 404);
 });
+
+test('POST /api/requests/:id passes phase + needsInput through', async () => {
+  const created = await (await fetch(`${base}/api/requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'pr-review', prId: '888' }),
+  })).json();
+  assert.equal(created.phase, null);
+  assert.equal(created.needsInput, false);
+
+  const upd = await fetch(`${base}/api/requests/${created.id}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'running', phase: 'fetching PR #888 diff', needsInput: true, note: 'Approve the auth prompt' }),
+  });
+  assert.equal(upd.status, 200);
+  const updated = await upd.json();
+  assert.equal(updated.phase, 'fetching PR #888 diff');
+  assert.equal(updated.needsInput, true);
+  assert.equal(updated.note, 'Approve the auth prompt');
+
+  // phase-only update is accepted (not "nothing to change") and clears needsInput on done
+  const done = await (await fetch(`${base}/api/requests/${created.id}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'done', phase: 'review ready' }),
+  })).json();
+  assert.equal(done.needsInput, false);
+  assert.equal(done.phase, 'review ready');
+});

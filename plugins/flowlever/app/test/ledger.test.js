@@ -574,3 +574,48 @@ test('setRequestStatus: transitions, merges note/wsId, bumps updatedAt, validate
   assert.equal(reread.status, 'error');
   assert.equal(reread.wsId, 'pr-2025-review');
 });
+
+test('addRequest: defaults phase=null and needsInput=false', () => {
+  const r = ledger.addRequest({ action: 'pr-review', prId: '3001' });
+  assert.equal(r.phase, null);
+  assert.equal(r.needsInput, false);
+});
+
+test('setRequestStatus: merges phase + needsInput without clobbering other fields', () => {
+  const r = ledger.addRequest({ action: 'pr-review', prId: '3002' });
+
+  // flag a 2FA wait: phase + needsInput + instruction note, status unchanged from queued
+  const waiting = ledger.setRequestStatus(r.id, {
+    status: 'running',
+    phase: 'fetching PR #3002 (may need your approval)',
+    needsInput: true,
+    note: 'Approve the auth prompt in your other window.',
+  });
+  assert.equal(waiting.status, 'running');
+  assert.equal(waiting.phase, 'fetching PR #3002 (may need your approval)');
+  assert.equal(waiting.needsInput, true);
+  assert.equal(waiting.note, 'Approve the auth prompt in your other window.');
+
+  // advancing the phase + clearing needsInput leaves the note untouched (merge, not clobber)
+  const advanced = ledger.setRequestStatus(r.id, { phase: 'reviewing changes', needsInput: false });
+  assert.equal(advanced.phase, 'reviewing changes');
+  assert.equal(advanced.needsInput, false);
+  assert.equal(advanced.note, 'Approve the auth prompt in your other window.');
+  assert.equal(advanced.status, 'running', 'status untouched when not specified');
+
+  // empty-string phase clears it back to null
+  const cleared = ledger.setRequestStatus(r.id, { phase: '' });
+  assert.equal(cleared.phase, null);
+});
+
+test('setRequestStatus: a terminal status clears needsInput', () => {
+  const r = ledger.addRequest({ action: 'pr-respond', prId: '3003' });
+  ledger.setRequestStatus(r.id, { status: 'running', needsInput: true, note: 'approve auth' });
+  const done = ledger.setRequestStatus(r.id, { status: 'done', wsId: 'pr-3003-respond' });
+  assert.equal(done.needsInput, false, 'done is never still waiting on the user');
+
+  const r2 = ledger.addRequest({ action: 'pr-review', prId: '3004' });
+  ledger.setRequestStatus(r2.id, { status: 'running', needsInput: true });
+  const errored = ledger.setRequestStatus(r2.id, { status: 'error', note: 'timed out' });
+  assert.equal(errored.needsInput, false);
+});

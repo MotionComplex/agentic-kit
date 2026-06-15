@@ -23,11 +23,21 @@ specs, and decisions are posted back as inline PR comments on **Apply**.
   `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature add <wsId> --title "PR #<id> — <pr title>" --kind pr-review`
 - Register sources: the PR, plus any auto-discovered ticket/spec, via `source add` (use `ado`/`confluence`).
 
+> **When run from the cockpit queue (`/flowlever:watch`), emit phases as you go** so the job row shows
+> live progress instead of an opaque spinner. With the request id as `<reqId>`:
+> `requests set <reqId> --phase "<step>"` at each step below, AND — critically — flag `needsInput`
+> *before* the first Azure DevOps fetch (it can pop a 2FA/auth prompt in another window), then clear it.
+> Skip these `requests set` calls when invoked directly (no `<reqId>`).
+
 ## 2. Fetch + review (reuse /pr-review)
+**Before the first ADO call** (may trigger 2FA/auth):
+`requests set <reqId> --phase "fetching PR #<id> (may need your approval)" --needs-input --note "If a 2FA/auth prompt appears in another window, approve it to continue."`
 Load the ADO MCP tools via ToolSearch, then exactly as `/pr-review`:
 `repo_get_pull_request_by_id` (PR + linked work items), `repo_get_pull_request_changes` /
-`repo_get_pull_request_threads` (diff + existing comments). Auto-discover + fetch the ticket and
-Confluence spec. Run the spec-aware review → findings anchored to specific changed files + line ranges.
+`repo_get_pull_request_threads` (diff + existing comments). **Once the first fetch succeeds, clear the
+prompt:** `requests set <reqId> --no-needs-input --phase "fetching linked ticket/spec"`. Auto-discover +
+fetch the ticket and Confluence spec. Then `requests set <reqId> --phase "reviewing changes"` and run the
+spec-aware review → findings anchored to specific changed files + line ranges.
 
 ## 3. Map findings → ingest shape
 For each review finding:
@@ -41,14 +51,18 @@ For each review finding:
 Where you have a concrete code change, attach a **draft** so it shows as a red/green diff in the stepper:
 `setFindingDraft(wsId, fp, { target: "<path>:L<line>", format: "text", before: "<current code>", after: "<suggested code>" })`
 (via a small node script using `require("${CLAUDE_PLUGIN_ROOT}/app/src/ledger.js")`, or a future CLI cmd).
-Dedup near-duplicates, then ingest:
+Dedup near-duplicates, then (`requests set <reqId> --phase "ingesting findings"`) ingest:
 `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" ingest <wsId> --file <findings.json> --note "PR #<id> review @ <commit/iteration>"`.
+The runner then marks the request `done --phase "review ready" --wsId <wsId>`.
 
 ## 4. Hand to the cockpit
 Tell the user to open **Home → PR Review → this workspace** (or `/flowlever:start`) and step through:
 each finding shows the diff + decision row (Accept · Edit · Redirect · Waive · Skip). Decisions persist.
 
 ## 5. Apply (post comments back) — explicit confirmation required
+When run as an `apply` request, emit phases too: `--phase "posting comments (may need your approval)"
+--needs-input --note "Approve the auth prompt in your other window if asked."` before the first post,
+clear it after, then `--status done --phase "posted to PR"`.
 When the user has reviewed and asks to post: read their decisions
 (`FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding list <wsId> --json` → use each finding's status + `draft.review` verdict/edited
 text, or the exported work order). For every **accepted/edited** finding (skip rejected/waived), post an

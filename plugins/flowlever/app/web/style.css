@@ -1159,6 +1159,43 @@ a.backlink:focus-visible {
 .req-open { color: var(--accent-text); text-decoration: none; font-weight: 560; }
 .req-open:hover { text-decoration: underline; }
 
+/* "Needs your input" — a job blocked waiting on the user (e.g. a 2FA/auth prompt).
+   Deliberately a hotter orange-amber than the brand yellow so it reads as an alert,
+   not as normal running. */
+.req-row.req-needs { border-color: oklch(0.74 0.17 55 / 0.6); box-shadow: inset 2px 0 0 oklch(0.78 0.17 55); }
+.req-needsinput {
+  display: flex; gap: 9px; align-items: flex-start; margin-top: 9px;
+  padding: 9px 11px; border-radius: var(--radius-sm);
+  background: oklch(0.78 0.17 55 / 0.14); border: 1px solid oklch(0.74 0.17 55 / 0.5);
+}
+.req-ni-icon { font-size: 14px; line-height: 1.4; flex: none; color: oklch(0.82 0.16 60); }
+.req-ni-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.req-ni-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
+  color: oklch(0.86 0.14 62);
+}
+.req-ni-note { font-size: 12.5px; color: var(--fg-dim); }
+
+/* Status legend — a collapsible "?" explainer above the requests strip. */
+.requests-legend { margin-top: 6px; font-size: 12px; }
+.requests-legend summary {
+  cursor: pointer; color: var(--fg-mute); display: inline-flex; align-items: center; gap: 6px;
+  list-style: none; user-select: none;
+}
+.requests-legend summary::-webkit-details-marker { display: none; }
+.requests-legend summary:hover { color: var(--fg-dim); }
+.reqleg-q {
+  display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px;
+  border-radius: 50%; border: 1px solid var(--line); font-size: 10px; font-weight: 700;
+}
+.reqleg-grid { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-left: 2px; }
+.reqleg-item { display: flex; align-items: baseline; gap: 8px; }
+.reqleg-glyph { flex: none; width: 16px; text-align: center; font-family: var(--mono); }
+.reqleg-ni { color: oklch(0.82 0.16 60); }
+.reqleg-label { font-weight: 600; color: var(--fg-dim); min-width: 118px; }
+.reqleg-desc { color: var(--fg-mute); }
+.guide-ni { color: oklch(0.84 0.15 62); }
+
 /* Finish-screen "Post comments / replies" enqueue */
 .finish-post {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
