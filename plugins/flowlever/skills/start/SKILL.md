@@ -29,8 +29,10 @@ Run it in the background so it keeps serving (it's a long-running process), then
 or running `/flowlever:audit <feature>` to populate a real one.
 
 ## Also start the watch loop (so the UI can trigger jobs)
-After the server is up, **kick off the runner loop in this session** so UI-enqueued jobs (e.g. "+ New PR
-review") actually execute: begin a recurring **`/flowlever:watch`** (via the `/loop` mechanism or a
+After the server is up, first clear any stale stop sentinel
+(`rm -f "${FLOWLEVER_DATA:-$HOME/.flowlever}/.watch-stop"`), then **kick off the runner loop in this
+session** so UI-enqueued jobs (e.g. "+ New PR review") actually execute: begin a recurring
+**`/flowlever:watch`** (via the `/loop` mechanism or a
 self-scheduled wake-up). This makes the cockpit fully UI-driven: the user clicks in the browser, the loop
 drains the request queue here and does the MCP fetch/post. Tell the user it's running and that they can
 work entirely in the UI from now on. (Unless the user says "server only" / "no loop" — then skip it.)

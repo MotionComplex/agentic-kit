@@ -17,6 +17,9 @@ loop: **`/loop /flowlever:watch`** (or a longer interval). One pass = drain the 
 ## Each pass
 Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowlever`):
 
+0. **Stop check.** If `${FLOWLEVER_DATA:-$HOME/.flowlever}/.watch-stop` exists, delete it, say "watch loop
+   stopped", and **end the loop — do NOT reschedule another pass.** (`/flowlever:stop` drops this sentinel.)
+   Otherwise continue:
 1. **Read the queue:** `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" requests list --status queued --json`. If empty, say "no queued
    requests" and stop (the loop will check again).
 2. **For each request** (oldest first), mark it running, then dispatch by `action` — and on completion
