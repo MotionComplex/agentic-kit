@@ -402,6 +402,20 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 }
 .review-cta-done.is-ready { color: var(--ready); border-color: var(--ready-line); background: var(--ready-soft); }
 
+/* ============================== review scope note ============================== */
+
+/* The per-run scope/focus a PR review was launched with (feature.reviewBrief). */
+.review-scope {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 9px 16px; margin-bottom: 14px;
+  background: var(--panel); border: 1px solid var(--accent-line); border-radius: var(--radius);
+}
+.review-scope-label {
+  flex: none; color: var(--accent-text); font-size: 11px; font-weight: 620;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.review-scope-text { color: var(--fg-dim); font-size: 13px; line-height: 1.45; }
+
 /* ============================== sources strip ============================== */
 
 .sources-strip {
@@ -1106,19 +1120,23 @@ a.backlink:focus-visible {
 .new-request-zone { margin: 0 0 16px; }
 .nr-add { display: inline-flex; align-items: center; gap: 6px; }
 .nr-form {
-  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  display: flex; flex-direction: column; gap: 8px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
   padding: 12px 14px;
 }
-.nr-form input {
+.nr-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nr-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.nr-form input, .nr-form textarea {
   font: inherit; font-size: 13px; color: var(--fg);
   background: var(--panel-3); border: 1px solid var(--line); border-radius: 8px;
   padding: 8px 10px;
 }
 .nr-form .nr-prid { width: 150px; }
 .nr-form .nr-title { flex: 1 1 200px; min-width: 160px; }
-.nr-form input::placeholder { color: var(--fg-mute); }
-.nr-form input:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.nr-form .nr-instructions { width: 100%; resize: vertical; min-height: 42px; line-height: 1.45; }
+.nr-instr-label { font-size: 12px; font-weight: 560; color: var(--fg-mute); }
+.nr-form input::placeholder, .nr-form textarea::placeholder { color: var(--fg-mute); }
+.nr-form input:focus-visible, .nr-form textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
 .nr-form input.invalid { border-color: var(--blocker); }
 
 /* Requests strip — the queued / running / done / error rows */
@@ -1158,6 +1176,8 @@ a.backlink:focus-visible {
 .req-note { color: var(--del-fg); }
 .req-open { color: var(--accent-text); text-decoration: none; font-weight: 560; }
 .req-open:hover { text-decoration: underline; }
+/* Per-run review scope/focus carried on the job row. */
+.req-instr { font-size: 12px; color: var(--fg-dim); margin-top: 4px; line-height: 1.4; }
 
 /* "Needs your input" — a job blocked waiting on the user (e.g. a 2FA/auth prompt).
    Deliberately a hotter orange-amber than the brand yellow so it reads as an alert,

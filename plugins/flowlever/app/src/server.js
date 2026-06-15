@@ -249,6 +249,7 @@ async function handleRequestCreate(req, res) {
     prId: body.prId,
     wsId: body.wsId,
     title: body.title,
+    instructions: body.instructions,
   });
   sendJson(res, 201, request);
 }

@@ -1369,6 +1369,8 @@ function requestRow(r) {
       h('span', { class: `req-statetext req-state-${cssSafe(r.status)}` }, meta.label + phaseText),
       showSubNote ? h('span', { class: 'req-note' }, ` — ${r.note}`) : null,
       linkable ? h('a', { class: 'req-open', href: `#/feature/${encodeURIComponent(r.wsId)}` }, 'open workspace →') : null),
+    // The per-run scope/focus the runner will honor, shown as a small muted line.
+    r.instructions ? h('div', { class: 'req-instr', title: 'Review scope for this run' }, '↳ ', r.instructions) : null,
     needsInput
       ? h('div', { class: 'req-needsinput', role: 'alert' },
           h('span', { class: 'req-ni-icon', 'aria-hidden': 'true' }, '⚠'),
@@ -1462,13 +1464,24 @@ function newRequestForm(kind, onClose) {
     class: 'nr-title', type: 'text', placeholder: 'Title (optional)', 'aria-label': 'Title',
     onkeydown: (e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onClose(); },
   });
+  // Optional per-run scope/focus passed straight to the runner (e.g. "front-end only").
+  // Enter inserts a newline here (it's a textarea); only Escape closes the form.
+  const instrInput = h('textarea', {
+    class: 'nr-instructions', rows: '2', 'aria-label': 'Review instructions (optional)',
+    placeholder: "Scope or focus for this review — e.g. 'front-end only', 'back-end only', 'focus on the import validation'",
+    onkeydown: (e) => { if (e.key === 'Escape') onClose(); },
+  });
   async function submit() {
     const prId = prInput.value.trim();
     if (!prId) { prInput.classList.add('invalid'); prInput.focus(); return; }
     try {
       await api('/api/requests', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: kind, prId, title: titleInput.value.trim() || undefined }),
+        body: JSON.stringify({
+          action: kind, prId,
+          title: titleInput.value.trim() || undefined,
+          instructions: instrInput.value.trim() || undefined,
+        }),
       });
       toast(`Queued ${actionLabel} for PR ${prId}`, 'success');
       onClose();
@@ -1478,9 +1491,12 @@ function newRequestForm(kind, onClose) {
     }
   }
   return h('div', { class: 'nr-form' },
-    prInput, titleInput,
-    h('button', { class: 'btn btn-accent', type: 'button', onclick: submit }, `Queue ${actionLabel}`),
-    h('button', { class: 'btn', type: 'button', onclick: onClose }, 'Cancel'));
+    h('div', { class: 'nr-row' }, prInput, titleInput),
+    h('label', { class: 'nr-instr-label' }, 'Review instructions (optional)'),
+    instrInput,
+    h('div', { class: 'nr-actions' },
+      h('button', { class: 'btn btn-accent', type: 'button', onclick: submit }, `Queue ${actionLabel}`),
+      h('button', { class: 'btn', type: 'button', onclick: onClose }, 'Cancel')));
 }
 
 /* ============================== detail: load + shell ============================== */
@@ -1621,6 +1637,7 @@ function detailView(data, tab) {
       ),
     ),
     loopStrip(loopActiveStage(data), reviewCta(data)),
+    reviewScopeNote(feature),
     sourcesStrip(feature),
     h('nav', { class: 'tabs', role: 'tablist' },
       tabs.map((t) => h('a', {
@@ -1640,6 +1657,17 @@ function tabContent(data, tab) {
     case 'report':   return reportView();
     default:         return findingsView(data);
   }
+}
+
+/* The per-run scope/focus the review was launched with, carried onto the
+ * workspace as `reviewBrief` by the runner. Shown as a small note so the
+ * applied scope is visible while stepping through findings. */
+function reviewScopeNote(feature) {
+  const brief = feature && typeof feature.reviewBrief === 'string' ? feature.reviewBrief.trim() : '';
+  if (!brief) return null;
+  return h('div', { class: 'review-scope' },
+    h('span', { class: 'review-scope-label' }, 'Review scope'),
+    h('span', { class: 'review-scope-text' }, brief));
 }
 
 /* ============================== sources strip ============================== */

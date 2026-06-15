@@ -520,6 +520,23 @@ test('addRequest: validates action enum and action-specific required fields', ()
   assert.ok(r.createdAt && r.updatedAt);
 });
 
+test('addRequest: stores optional instructions (trimmed), defaults null, rejects non-string', () => {
+  // omitted → null
+  const none = ledger.addRequest({ action: 'pr-review', prId: '7000' });
+  assert.equal(none.instructions, null);
+  // blank/whitespace → null
+  const blank = ledger.addRequest({ action: 'pr-review', prId: '7001', instructions: '   ' });
+  assert.equal(blank.instructions, null);
+  // present → trimmed and stored, surviving a reload
+  const r = ledger.addRequest({ action: 'pr-review', prId: '7002', instructions: '  front-end only  ' });
+  assert.equal(r.instructions, 'front-end only');
+  const reloaded = ledger.listRequests().find((x) => x.id === r.id);
+  assert.equal(reloaded.instructions, 'front-end only');
+  // non-string → EUSER
+  assert.throws(() => ledger.addRequest({ action: 'pr-review', prId: '7003', instructions: 42 }),
+    /instructions must be a string/);
+});
+
 test('addRequest: ids increment monotonically from a stored counter (no clock)', () => {
   // continues from the request created in the previous test → req-2, req-3, …
   const a = ledger.addRequest({ action: 'pr-respond', prId: '99' });
