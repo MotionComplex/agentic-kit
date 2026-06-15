@@ -17,11 +17,22 @@ awaiting the author's response and reads the current code at each anchor). The d
 becomes a finding in a `pr-respond` **workspace**, reviewed in the same stepper, and your decisions are
 posted as replies / applied as code fixes on **Apply**.
 
+## Review scope (per-run instructions)
+If the request carries `instructions` (the user's free-text scope/focus for this run, e.g. "front-end
+only", "focus on the import validation"), treat them as the **review scope/focus**: restrict or
+prioritize the threads you work accordingly — handle only threads anchored to in-scope files and say which
+you skipped, or lead with the focus area. **Spec discovery (mandatory) still applies**, scoped to what's
+relevant. State the applied scope in the run summary, and record it on the workspace by setting
+`feature.reviewBrief` to the instruction (via a small node script using
+`require("${CLAUDE_PLUGIN_ROOT}/app/src/ledger.js")` → `getFeature`/`saveFeature`). With no instructions,
+work all threads awaiting your reply as usual.
+
 ## 1. Resolve / create the workspace
 - Input = a PR id/URL, or auto-detect from the current git branch (as `/pr-respond` does). Ask if unclear.
 - Workspace id `pr-<id>-<short-slug>`, `--kind pr-respond`:
   `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature add <wsId> --title "PR #<id> — <pr title> (your PR)" --kind pr-respond`
 - Register the PR as a source.
+- If the request carried `instructions`, persist them onto the workspace as `feature.reviewBrief` here.
 
 > **When run from the cockpit queue (`/flowlever:watch`), emit phases** with the request id `<reqId>`:
 > `requests set <reqId> --phase "<step>"` at each step, and flag `needsInput` *before* the first Azure

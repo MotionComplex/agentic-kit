@@ -50,7 +50,10 @@ reconciliation and review stepper; only the UI label/icon differs.
     { "sectionKey": "flow-payment", "adoIds": [42695], "figmaNodeIds": ["1:23"], "status": "covered" }
     // status: covered | partial | uncovered | orphan (ado/figma with no section)
   ],
-  "notes": ""
+  "notes": "",
+  "reviewBrief": ""                 // OPTIONAL — per-run review scope/focus this workspace was launched
+                                    // with (copied from the enqueuing request's `instructions`, e.g.
+                                    // "front-end only"); surfaced as a "Review scope" note in the UI
 }
 ```
 
@@ -137,6 +140,7 @@ flips the request through `running → done` (or `error`). The engine never runs
       "prId": "1481",                  // PR id — required for pr-review/pr-respond, else null
       "wsId": "pr-1481-review",        // target workspace id — required for apply, set by the runner once it creates the ws
       "title": "Checkout PR",          // optional human label, else null
+      "instructions": "front-end only",// optional per-run scope/focus the runner honors (string), else null
       "status": "queued",              // queued | running | done | error
       "phase": null,                   // short live label of the runner's current step (e.g. "fetching PR diff"); null when not running
       "needsInput": false,             // true when the job is BLOCKED waiting on the user (e.g. a 2FA/auth prompt); `note` carries the instruction
@@ -152,6 +156,11 @@ The three **actions**:
 - `pr-respond` — start a reviewer-thread response (requires `prId`). Same flow via `/lever:pr-respond`.
 - `apply` — post the reviewed output (kept comments / replies) of an existing workspace back to the PR
   (requires `wsId`). Enqueued from a workspace's review finish screen.
+
+The optional **`instructions`** is free-text scope/focus for THAT run (e.g. "front-end only", "focus on
+the import validation"). `addRequest` validates it's a string when present and stores it (trimmed, else
+null). The `/lever:watch` runner passes it to the adapter, which honors it as the review scope and copies
+it onto the created workspace as `reviewBrief` (see features schema) so the applied scope stays visible.
 
 Lifecycle: every request begins `queued` (`phase: null`, `needsInput: false`). The runner sets
 `running` while working and advances `phase` step-by-step ("fetching PR diff" → "reviewing changes" →
@@ -207,7 +216,7 @@ DELETE /api/features/:id/findings/:fp/draft → clear the rework draft
 POST /api/features/:id/findings/:fp/draft/review → body { hunk, status, editedText? } | { hunks } | { note? } | { verdict? } (merges)
 POST /api/features/:id/review/apply → body { fps: [...], status? } sets the listed findings to reworking (default; allowlist). Atomic: 400 if any fp is unknown. (review-flow finish screen)
 POST /api/ingest/:id                → body { findings: [...], note?, reopenResolved? } (used by skills)
-POST /api/requests                  → body { action, prId?, wsId?, title? } → 201 created request (400 on bad/missing fields)
+POST /api/requests                  → body { action, prId?, wsId?, title?, instructions? } → 201 created request (400 on bad/missing fields). instructions = optional per-run review scope/focus (string)
 GET  /api/requests[?status=queued]  → [request]  (UI-triggered job queue; optional status filter)
 POST /api/requests/:id              → body { status?, note?, wsId?, phase?, needsInput? } → updated request (runner skill drives this; phase=live step, needsInput=blocked on user)
 DELETE /api/requests/:id            → 200 { id, deleted: true }; 404 if missing. Removes the request from the queue.

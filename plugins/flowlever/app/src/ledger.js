@@ -102,6 +102,7 @@ function createFeature({ id, title, kind = 'spec' }) {
     specSections: [],
     coverage: [],
     notes: '',
+    reviewBrief: '',
   };
   writeJson(featurePath(id), feature);
   return feature;
@@ -548,8 +549,9 @@ function saveRequests(doc) { writeJson(requestsPath(), doc); }
 
 // Enqueue a job. `pr-review`/`pr-respond` target a PR (require prId); `apply`
 // posts the reviewed output of an existing workspace (require wsId). Optional
-// title is a human label shown on the queued card.
-function addRequest({ action, prId, wsId, title } = {}) {
+// title is a human label shown on the queued card; optional `instructions` is
+// free-text scope/focus for THAT run (e.g. "front-end only") the runner honors.
+function addRequest({ action, prId, wsId, title, instructions } = {}) {
   if (!REQUEST_ACTIONS.includes(action)) {
     throw euser(`invalid action "${action}": must be one of ${REQUEST_ACTIONS.join(', ')}`);
   }
@@ -558,6 +560,9 @@ function addRequest({ action, prId, wsId, title } = {}) {
   }
   if (action === 'apply' && (wsId === undefined || wsId === null || String(wsId).trim() === '')) {
     throw euser('apply requires "wsId"');
+  }
+  if (instructions !== undefined && instructions !== null && typeof instructions !== 'string') {
+    throw euser('instructions must be a string when provided');
   }
   const doc = loadRequests();
   doc.counter += 1;
@@ -568,6 +573,8 @@ function addRequest({ action, prId, wsId, title } = {}) {
     prId: prId === undefined || prId === null || String(prId).trim() === '' ? null : String(prId).trim(),
     wsId: wsId === undefined || wsId === null || String(wsId).trim() === '' ? null : String(wsId).trim(),
     title: typeof title === 'string' && title.trim() ? title.trim() : null,
+    // Per-run scope/focus the runner honors (e.g. "front-end only"); null when omitted.
+    instructions: typeof instructions === 'string' && instructions.trim() ? instructions.trim() : null,
     status: 'queued',
     // phase = short free-text label of the runner's current step (e.g. "fetching PR diff");
     // needsInput = the job is blocked waiting on the user (e.g. a 2FA/auth prompt), with the

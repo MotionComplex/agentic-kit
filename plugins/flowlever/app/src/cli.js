@@ -387,10 +387,10 @@ function cmdRequestsList({ flags }) {
     console.log('No requests queued.');
     return;
   }
-  const rows = [['ID', 'ACTION', 'STATUS', 'TARGET', 'TITLE', 'NOTE']];
+  const rows = [['ID', 'ACTION', 'STATUS', 'TARGET', 'TITLE', 'INSTRUCTIONS', 'NOTE']];
   for (const r of requests) {
     const target = r.prId ? `PR ${r.prId}` : (r.wsId ? r.wsId : '—');
-    rows.push([r.id, r.action, r.status, target, r.title || '', r.note || '']);
+    rows.push([r.id, r.action, r.status, target, r.title || '', r.instructions || '', r.note || '']);
   }
   console.log(table(rows));
   console.log(`\n${requests.length} request(s)`);

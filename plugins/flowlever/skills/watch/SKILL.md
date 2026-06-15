@@ -32,6 +32,13 @@ Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowleve
      `requests set <reqId> --status done --phase "review ready" --wsId <workspaceId>` (so the UI links the request to the workspace).
    - **`pr-respond`** (has `prId`): run **`/flowlever:pr-respond <prId>`** — create the `pr-respond` workspace,
      fetch threads, ingest. Then `requests set <reqId> --status done --phase "threads ready" --wsId <workspaceId>`.
+
+   **Pass the request's `instructions` to the adapter.** Each queued request may carry an `instructions`
+   string (visible in `requests list --json`) — the user's free-text scope/focus for THIS run (e.g.
+   "front-end only", "focus on the import validation"). When present, hand it to the `pr-review` /
+   `pr-respond` procedure as the **review scope**: the adapter restricts/prioritizes accordingly AND copies
+   it onto the created workspace as `feature.reviewBrief` (so the cockpit shows the applied scope). Apply
+   requests inherit the scope already recorded on the workspace — no extra handling needed.
    - **`apply`** (has `wsId`): run the **Apply** step of the matching adapter for that workspace's `kind`
      (post inline comments for `pr-review`, post replies / apply fixes for `pr-respond`), reading the user's
      decisions from the ledger. Then `requests set <reqId> --status done --phase "posted to PR"`.
