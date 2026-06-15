@@ -592,6 +592,31 @@ function renderFlowInto() {
   app.replaceChildren(state.flow.finish ? finishView(data) : stepperView(data));
 }
 
+/* Re-render whichever review surface is live: the full-page stepper when it's the
+ * active view, otherwise the finding modal (board + open dialog). This lets the
+ * shared decision widgets (decisionRow / suggestionSection / acceptAll …) drive
+ * BOTH the stepper and the modal review sub-view without each knowing the other. */
+function reviewRefresh() {
+  if (current.view === 'review-flow') renderFlowInto();
+  else refreshModal();
+}
+
+/* Make state.flow track the current feature's reviewable findings WITHOUT
+ * launching the stepper, so a decision taken in the modal lands in the same
+ * state.flow.decisions the stepper reads (they must agree). Re-entering the same
+ * feature keeps prior decisions; switching features starts fresh. */
+function ensureFlow() {
+  const data = state.detail;
+  if (!data || !current.id) return;
+  if (state.flow.featureId === current.id && Array.isArray(state.flow.items)) return;
+  const findings = (data.ledger && data.ledger.findings) || [];
+  state.flow = {
+    active: false, finish: false, featureId: current.id,
+    items: reviewableFindings(findings).map((f) => f.fp),
+    idx: 0, decisions: {}, waiving: null, editingComment: null,
+  };
+}
+
 /* While the PR finish screen is open, keep the apply-request status for this
  * workspace fresh so the Post button shows queued → running → posted. The scope
  * guard means re-rendering the finish view reuses the interval, not resets it. */
@@ -726,7 +751,7 @@ function commentEditForm(kind, f) {
     onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
   });
   ta.value = f.suggestion || '';
-  function cancel() { state.flow.editingComment = null; renderFlowInto(); }
+  function cancel() { state.flow.editingComment = null; reviewRefresh(); }
   const form = h('div', { class: 'comment-edit proposed-comment' },
     h('span', { class: 'f-suglabel' }, `${suggestionLabel(kind)} — editing`),
     ta,
@@ -744,7 +769,7 @@ async function saveComment(fp, val) {
   if (f) f.suggestion = val;            // optimistic
   setFlowDecision(fp, 'edit');
   state.flow.editingComment = null;
-  renderFlowInto();
+  reviewRefresh();
   try {
     await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -755,7 +780,7 @@ async function saveComment(fp, val) {
     toast(`Comment save failed: ${e.message}`);
     try { await loadDetail(current.id, true); } catch { /* keep optimistic state */ }
   }
-  renderFlowInto();
+  reviewRefresh();
 }
 
 /* The red/green diff section (present only when a finding carries a code-diff
@@ -820,7 +845,7 @@ function undecide(f) {
   delete state.flow.decisions[f.fp];
   state.flow.waiving = null;
   state.flow.editingComment = null;
-  renderFlowInto();
+  reviewRefresh();
 }
 
 function stepWaiveForm(f) {
@@ -874,42 +899,51 @@ async function decide(data, f, kind) {
   const fp = f.fp;
   const wsKind = (data.feature && data.feature.kind) || 'spec';
   const cfg = decisionActions(wsKind);
+  // The stepper advances to the next finding after a terminal decision; the modal
+  // has no "next", so it just re-renders in place.
+  const inStepper = current.view === 'review-flow';
+  const next = () => { if (inStepper) advance(); else reviewRefresh(); };
 
-  // pr-review: Edit opens the proposed comment in a textarea (not the per-hunk diff).
+  // pr-review: Edit opens the proposed comment in a textarea (not the per-hunk
+  // diff). In the modal's detail sub-view, route into the review sub-view so the
+  // editable comment is actually visible.
   if (kind === 'edit' && cfg.editsComment) {
     state.flow.editingComment = fp;
-    renderFlowInto();
+    if (!inStepper) state.modalMode = 'review';
+    reviewRefresh();
     requestAnimationFrame(() => { const ta = $('.comment-edit-ta'); if (ta) ta.focus(); });
     return;
   }
   // pr-review: Dismiss is a one-tap decision (reason optional), then advance.
   if (kind === 'waive' && cfg.quickDismiss) {
     setFlowDecision(fp, 'waive', { reason: '' });
-    advance();
+    next();
     return;
   }
 
   if (kind === 'accept') {
     setFlowDecision(fp, 'accept');
     await acceptAll(f);
-    advance();
+    next();
   } else if (kind === 'edit') {
     setFlowDecision(fp, 'edit');
-    if (!f.draft) { renderFlowInto(); return; }
+    if (!f.draft) { reviewRefresh(); return; }
+    if (!inStepper) state.modalMode = 'review';
     if (draftVerdict(f) !== 'proposed') await setVerdict(fp, 'proposed');
-    else renderFlowInto();   // reveal the per-hunk controls; reviewer edits then Next
+    else reviewRefresh();   // reveal the per-hunk controls; reviewer edits then Next
   } else if (kind === 'redirect') {
     setFlowDecision(fp, 'redirect');
-    if (!f.draft) { renderFlowInto(); return; }
+    if (!f.draft) { reviewRefresh(); return; }
+    if (!inStepper) state.modalMode = 'review';
     if (draftVerdict(f) !== 'redirect') await setVerdict(fp, 'redirect');
-    else renderFlowInto();
+    else reviewRefresh();
     requestAnimationFrame(() => { const ta = $('.review-note-ta'); if (ta) ta.focus(); });
   } else if (kind === 'waive') {
     state.flow.waiving = fp;
-    renderFlowInto();
+    reviewRefresh();
   } else if (kind === 'skip') {
     setFlowDecision(fp, 'skip');
-    advance();
+    next();
   }
 }
 
@@ -918,7 +952,7 @@ async function decide(data, f, kind) {
 async function acceptAll(f) {
   // Suggestion-only finding (no code-diff draft): the approval is the decision —
   // there's nothing to persist server-side until the Post step.
-  if (!f.draft) { renderFlowInto(); return; }
+  if (!f.draft) { reviewRefresh(); return; }
   const { hunks } = draftStats(f);
   const hunkObj = {};
   for (const hk of hunks) hunkObj[String(hk.id)] = { status: 'accepted', at: new Date().toISOString() };
@@ -926,7 +960,7 @@ async function acceptAll(f) {
   if (cur && cur.draft) {
     cur.draft.review = { ...(cur.draft.review || {}), hunks: hunkObj, verdict: 'proposed', updatedAt: new Date().toISOString() };
   }
-  renderFlowInto();
+  reviewRefresh();
   try {
     const body = hunks.length ? { hunks: hunkObj, verdict: 'proposed' } : { verdict: 'proposed' };
     await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(f.fp)}/draft/review`, {
@@ -937,7 +971,7 @@ async function acceptAll(f) {
     toast(`Accept failed: ${e.message}`);
     try { await loadDetail(current.id, true); } catch { /* keep optimistic state */ }
   }
-  renderFlowInto();
+  reviewRefresh();
 }
 
 /* ---- finish: the decision summary ---- */
@@ -2188,7 +2222,14 @@ function openModal(fp, trigger) {
   const f = findFinding(fp);
   if (!f) return;
   state.modalFp = fp;
-  state.modalMode = 'detail';
+  // PR-kind workspaces present the same kind-aware triage as the stepper: open a
+  // reviewable PR finding straight in the review sub-view (proposed comment +
+  // Approve/Edit/Dismiss), crash-safe even with no code-diff draft. Spec findings
+  // keep opening in the detail sub-view.
+  const kind = (state.detail && state.detail.feature && state.detail.feature.kind) || 'spec';
+  const isPr = kind === 'pr-review' || kind === 'pr-respond';
+  if (isPr) ensureFlow();   // so a modal decision lands in the same state.flow the stepper reads
+  state.modalMode = (isPr && (!!f.draft || hasSuggestion(f))) ? 'review' : 'detail';
   state.modalTrigger = trigger || null;
   state.waiving = null;
   state.editingHunk = null;
@@ -2239,7 +2280,12 @@ function syncModal() {
  * the finding still has a draft; otherwise we fall back to the detail view
  * (e.g. after the draft is discarded from inside the review view). */
 function renderModalContent(dlg, f) {
-  const reviewMode = state.modalMode === 'review' && !!f.draft;
+  const kind = (state.detail && state.detail.feature && state.detail.feature.kind) || 'spec';
+  const isPr = kind === 'pr-review' || kind === 'pr-respond';
+  // Spec review needs a code-diff draft; a PR finding is reviewable on a proposed
+  // comment alone (suggestion-only), so don't require a draft there.
+  const reviewable = isPr ? (!!f.draft || hasSuggestion(f)) : !!f.draft;
+  const reviewMode = state.modalMode === 'review' && reviewable;
   dlg.classList.toggle('modal-review', reviewMode);
   dlg.setAttribute('aria-label', reviewMode ? 'Review proposed change' : 'Finding detail');
   dlg.replaceChildren(reviewMode ? reviewFrame(f) : detailFrame(f));
@@ -2302,8 +2348,14 @@ function reviewBodyKids(f) {
 }
 
 function reviewFrame(f) {
+  const data = state.detail;
+  const kind = (data && data.feature && data.feature.kind) || 'spec';
+  const isPr = kind === 'pr-review' || kind === 'pr-respond';
+  const hasDraft = !!f.draft;
   const d = f.draft;
-  const { adds, dels, hunks, review, truncated } = draftStats(f);
+  // Only touch draft-derived stats when there actually is a draft — a
+  // suggestion-only PR finding has none and must not read draft.* (Bug A).
+  const stats = hasDraft ? draftStats(f) : null;
 
   const mkTab = (mode, label) => h('button', {
     class: `diff-tab ${state.diffMode === mode ? 'active' : ''}`,
@@ -2311,22 +2363,25 @@ function reviewFrame(f) {
     onclick: () => { state.diffMode = mode === 'split' ? 'split' : 'unified'; refreshModal(); },
   }, label);
 
+  const headMeta = hasDraft
+    ? h('div', { class: 'rm-headmeta' },
+        h('code', { class: 'diff-target' }, d.target || f.locus || '—'),
+        d.format ? h('span', { class: 'diff-fmt' }, d.format) : null,
+        h('span', { class: 'diff-counts' },
+          h('span', { class: 'diff-add-n' }, `+${stats.adds}`), ' ',
+          h('span', { class: 'diff-del-n' }, `−${stats.dels}`)))
+    : (f.locus ? h('div', { class: 'rm-headmeta' }, h('code', { class: 'diff-target' }, f.locus)) : null);
+
   const header = h('header', { class: 'rm-head' },
     h('div', { class: 'rm-head-main' },
       h('button', { class: 'btn rm-back', type: 'button',
         onclick: () => { state.modalMode = 'detail'; state.editingHunk = null; state.exportFp = null; syncModal(); } },
         '← Back'),
       h('h2', { class: 'rm-title' }, f.title || '(untitled finding)'),
-      h('div', { class: 'rm-headmeta' },
-        h('code', { class: 'diff-target' }, d.target || f.locus || '—'),
-        d.format ? h('span', { class: 'diff-fmt' }, d.format) : null,
-        h('span', { class: 'diff-counts' },
-          h('span', { class: 'diff-add-n' }, `+${adds}`), ' ',
-          h('span', { class: 'diff-del-n' }, `−${dels}`)),
-      ),
+      headMeta,
     ),
     h('div', { class: 'rm-head-right' },
-      hunks.length ? h('div', { class: 'diff-toggle', role: 'group', 'aria-label': 'Diff view mode' },
+      hasDraft && stats.hunks.length ? h('div', { class: 'diff-toggle', role: 'group', 'aria-label': 'Diff view mode' },
         mkTab('unified', 'Unified'), mkTab('split', 'Split')) : null,
       h('button', { class: 'rm-close', type: 'button', 'aria-label': 'Close review',
         onclick: () => closeModal() }, '×'),
@@ -2334,17 +2389,30 @@ function reviewFrame(f) {
   );
 
   const verdict = draftVerdict(f);
-  const bodyKids = reviewBodyKids(f);
+
+  // For a PR finding the review surface mirrors the stepper card: the finding
+  // rationale, the editable proposed comment, the (optional) diff, and the
+  // kind-aware decision row. Spec findings keep the pure diff-review body.
+  const bodyKids = [];
+  if (isPr) {
+    if (f.detail) bodyKids.push(h('p', { class: 'rm-detail' }, f.detail));
+    bodyKids.push(suggestionSection(kind, f));
+    if (hasDraft) bodyKids.push(...reviewBodyKids(f));
+    bodyKids.push(decisionRow(data, f));
+  } else {
+    bodyKids.push(...reviewBodyKids(f));
+  }
 
   const exportOpen = state.exportFp === f.fp;
-  const footer = h('footer', { class: 'rm-foot' },
-    hunks.length ? h('button', {
+  // Export / discard act on a code-diff draft, so only show them when there is one.
+  const footer = hasDraft ? h('footer', { class: 'rm-foot' },
+    stats.hunks.length ? h('button', {
       class: `btn ${exportOpen ? 'btn-accent' : ''}`, type: 'button',
       onclick: () => { state.exportFp = exportOpen ? null : f.fp; refreshModal(); },
     }, exportOpen ? 'Hide export' : 'Export decisions') : null,
     h('button', { class: 'btn btn-danger', type: 'button',
       onclick: () => discardDraft(f.fp) }, 'Discard draft'),
-  );
+  ) : null;
 
   const banner = verdict !== 'proposed'
     ? h('div', { class: `rm-verdict-banner verdict-${verdict}` },
@@ -2878,6 +2946,15 @@ function findingBody(f) {
 }
 
 function actionsRow(f) {
+  // PR-kind workspaces use the kind-aware triage (Approve/Edit/Dismiss · Reply/
+  // Apply fix/Push back/Skip), NOT the spec lifecycle verbs — same decision row
+  // and underlying state.flow the stepper uses, so the two agree. Spec/default
+  // keeps the Reworking / Resolved / Waive / Pin lifecycle below.
+  const kind = (state.detail && state.detail.feature && state.detail.feature.kind) || 'spec';
+  if (kind === 'pr-review' || kind === 'pr-respond') {
+    ensureFlow();
+    return decisionRow(state.detail, f);
+  }
   const btn = (label, body, cls = '') => h('button', {
     class: `btn ${cls}`.trim(),
     type: 'button',
