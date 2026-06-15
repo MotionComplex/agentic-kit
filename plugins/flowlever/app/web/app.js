@@ -1077,12 +1077,12 @@ async function renderSection(kind) {
   const gridZone = h('div', { id: 'features-grid-zone' },
     features.length ? h('div', { class: 'features-grid' }, features.map(featureCard)) : sectionEmpty(kind));
 
-  app.replaceChildren(
+  app.replaceChildren(...[
     sectionHead(kind, features.length || null),
     isPr ? newRequestZone(kind) : null,
     isPr ? requestsStripEl([]) : null,
     gridZone,
-  );
+  ].filter(Boolean));
 
   if (isPr) startSectionRequestsPoll(kind);
 }
@@ -1262,7 +1262,8 @@ function requestsStripEl(requests, emptyText) {
 function populateRequestsStrip(strip, requests, emptyText) {
   if (!strip) return;
   if (!requests.length) {
-    strip.replaceChildren(emptyText ? h('p', { class: 'meta-dim requests-empty' }, emptyText) : null);
+    if (emptyText) strip.replaceChildren(h('p', { class: 'meta-dim requests-empty' }, emptyText));
+    else strip.replaceChildren();
     return;
   }
   strip.replaceChildren(
