@@ -18,6 +18,7 @@ Usage: node src/cli.js <command> [args]
   feature add <id> --title "..." [--kind spec|pr-review|pr-respond]   Create a workspace
   feature list [--json]                  List features (with readiness)
   feature show <id> [--json]             Show one feature in detail
+  feature delete <id>                    Delete a workspace (features + ledger + rounds)
   source add <featureId> --type confluence|ado|figma --id <id> [--title "..."] [--url <url>]
   ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]
                                          Ingest an audit round + reconcile ledger
@@ -30,6 +31,7 @@ Usage: node src/cli.js <command> [args]
   report <featureId> [--out report.md]   Generate markdown report
   coverage set <featureId> --file coverage.json
   requests list [--status queued|running|done|error] [--json]   List UI-triggered job requests
+  requests delete <id>                   Remove a request from the queue
   requests set <id> --status running|done|error [--note "..."] [--wsId <id>]
                                [--phase "..."] [--needs-input|--no-needs-input]
                                          Update a request (the runner skill uses this);
@@ -237,6 +239,12 @@ function cmdFeatureShow({ pos, flags }) {
   }
 }
 
+function cmdFeatureDelete({ pos }) {
+  const id = need(pos[0], 'feature <id>');
+  ledger.deleteFeature(id);
+  console.log(`Deleted feature ${id}`);
+}
+
 function cmdSourceAdd({ pos, flags }) {
   const featureId = need(pos[0], '<featureId>');
   const type = need(flags.type, '--type');
@@ -388,6 +396,12 @@ function cmdRequestsList({ flags }) {
   console.log(`\n${requests.length} request(s)`);
 }
 
+function cmdRequestsDelete({ pos }) {
+  const id = need(pos[0], '<id>');
+  ledger.deleteRequest(id);
+  console.log(`Dismissed request ${id}`);
+}
+
 function cmdRequestsSet({ pos, flags }) {
   const id = need(pos[0], '<id>');
   const change = {};
@@ -468,6 +482,7 @@ async function run(argv) {
     case 'feature add': return cmdFeatureAdd(rest);
     case 'feature list': return cmdFeatureList(rest);
     case 'feature show': return cmdFeatureShow(rest);
+    case 'feature delete': return cmdFeatureDelete(rest);
     case 'source add': return cmdSourceAdd(rest);
     case 'ingest': return cmdIngest(rest);
     case 'finding list': return cmdFindingList(rest);
@@ -477,6 +492,7 @@ async function run(argv) {
     case 'report': return cmdReport(rest);
     case 'coverage set': return cmdCoverageSet(rest);
     case 'requests list': return cmdRequestsList(rest);
+    case 'requests delete': return cmdRequestsDelete(rest);
     case 'requests set': return cmdRequestsSet(rest);
     case 'start': return cmdStart(rest);
     case 'demo': return cmdDemo();

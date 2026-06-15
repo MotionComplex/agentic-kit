@@ -619,3 +619,44 @@ test('setRequestStatus: a terminal status clears needsInput', () => {
   const errored = ledger.setRequestStatus(r2.id, { status: 'error', note: 'timed out' });
   assert.equal(errored.needsInput, false);
 });
+
+// ---------- delete ----------
+
+test('deleteFeature removes all three files and returns { id, deleted: true }', () => {
+  const id = 'del-test-feature';
+  ledger.createFeature({ id, title: 'Delete me' });
+  ledger.ingestRound(id, [
+    mkFinding({ title: 'Finding to delete', locus: 'del:1' }),
+  ], { note: 'seed' });
+
+  const result = ledger.deleteFeature(id);
+  assert.deepEqual(result, { id, deleted: true });
+
+  assert.ok(!fs.existsSync(path.join(tmpDir, 'features', `${id}.json`)), 'feature file must be gone');
+  assert.ok(!fs.existsSync(path.join(tmpDir, 'ledger', `${id}.json`)), 'ledger file must be gone');
+  assert.ok(!fs.existsSync(path.join(tmpDir, 'rounds', `${id}.json`)), 'rounds file must be gone');
+
+  assert.throws(() => ledger.getFeature(id), (e) => e.code === 'EUSER');
+});
+
+test('deleteFeature throws EUSER for a missing feature', () => {
+  assert.throws(() => ledger.deleteFeature('does-not-exist-del'), (e) => e.code === 'EUSER');
+});
+
+test('deleteFeature ignores missing ledger/rounds files (feature with no rounds)', () => {
+  const id = 'del-bare-feature';
+  ledger.createFeature({ id, title: 'No rounds' });
+  const result = ledger.deleteFeature(id);
+  assert.deepEqual(result, { id, deleted: true });
+});
+
+test('deleteRequest removes the request and returns { id, deleted: true }', () => {
+  const r = ledger.addRequest({ action: 'pr-review', prId: '9999' });
+  const result = ledger.deleteRequest(r.id);
+  assert.deepEqual(result, { id: r.id, deleted: true });
+  assert.ok(!ledger.listRequests().some((x) => x.id === r.id), 'request must be gone from the list');
+});
+
+test('deleteRequest throws EUSER for an unknown id', () => {
+  assert.throws(() => ledger.deleteRequest('req-nope-xyz'), (e) => e.code === 'EUSER');
+});

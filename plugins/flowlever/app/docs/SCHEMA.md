@@ -180,6 +180,7 @@ clears `needsInput` whenever a terminal status (done/error) is set. All writes a
 ```
 feature add <id> --title "..."            create workspace
 feature list | feature show <id>
+feature delete <id>                       delete workspace (features + ledger + rounds files)
 source add <featureId> --type confluence|ado|figma --id ... --title ... --url ...
 ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]   # audit round ingest + reconcile
 finding list <featureId> [--status open] [--dimension x] [--severity y]
@@ -188,6 +189,7 @@ readiness <featureId>                     print score + gate + blockers
 report <featureId> [--out report.md]      markdown report
 coverage set <featureId> --file coverage.json
 requests list [--status queued|running|done|error] [--json]   list UI-triggered job requests
+requests delete <id>                      remove a request from the queue
 requests set <id> --status running|done|error [--note "..."] [--wsId <id>] [--phase "..."] [--needs-input|--no-needs-input]   update a request (runner skill); --phase = live step label, --needs-input = blocked on you (2FA/auth)
 demo                                      seed demo feature
 ```
@@ -198,6 +200,7 @@ Exit codes: 0 ok, 1 user error (bad args/not found), 2 internal. All output huma
 GET  /api/home                      → [{ id, title, kind, readiness:{score,gate}, counts:{toReview,open,reworking,resolved,waived} }] cross-kind inbox, most-actionable first
 GET  /api/features[?kind=spec|pr-review|pr-respond] → [featureSummary]  (incl. kind + readiness; optional kind filter)
 GET  /api/features/:id              → { feature, ledger, rounds, readiness }
+DELETE /api/features/:id            → 200 { id, deleted: true }; 404 if missing. Removes features/<id>.json, ledger/<id>.json, rounds/<id>.json.
 POST /api/features/:id/findings/:fp → body { status?, reason?, pinned? }  (lifecycle ops from UI)
 POST   /api/features/:id/findings/:fp/draft → body { target?, before, after, format? } (set rework draft; 400 w/o before+after)
 DELETE /api/features/:id/findings/:fp/draft → clear the rework draft
@@ -207,6 +210,7 @@ POST /api/ingest/:id                → body { findings: [...], note?, reopenRes
 POST /api/requests                  → body { action, prId?, wsId?, title? } → 201 created request (400 on bad/missing fields)
 GET  /api/requests[?status=queued]  → [request]  (UI-triggered job queue; optional status filter)
 POST /api/requests/:id              → body { status?, note?, wsId?, phase?, needsInput? } → updated request (runner skill drives this; phase=live step, needsInput=blocked on user)
+DELETE /api/requests/:id            → 200 { id, deleted: true }; 404 if missing. Removes the request from the queue.
 GET  /api/report/:id                → text/markdown report
 Static: / → web/index.html, /app.js, /style.css
 ```

@@ -617,6 +617,25 @@ function setRequestStatus(id, { status, note, wsId, phase, needsInput } = {}) {
   return request;
 }
 
+// ---------- delete ----------
+
+function deleteFeature(id) {
+  if (!fs.existsSync(featurePath(id))) throw euser(`feature "${id}" not found`);
+  for (const p of [featurePath(id), ledgerPath(id), roundsPath(id)]) {
+    try { fs.rmSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+  return { id, deleted: true };
+}
+
+function deleteRequest(id) {
+  const doc = loadRequests();
+  const idx = doc.requests.findIndex((r) => r.id === id);
+  if (idx === -1) throw euser(`request "${id}" not found`);
+  doc.requests.splice(idx, 1);
+  saveRequests(doc);
+  return { id, deleted: true };
+}
+
 // ---------- coverage ----------
 
 function setCoverage(featureId, coverage) {
@@ -659,5 +678,7 @@ module.exports = {
   addRequest,
   listRequests,
   setRequestStatus,
+  deleteFeature,
+  deleteRequest,
   validateIngestFinding,
 };
