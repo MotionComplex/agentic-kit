@@ -92,7 +92,38 @@ test('POST /review/apply rejects empty / bad fps and unknown findings (atomic)',
 test('POST /review/apply rejects a status outside the allowlist', async () => {
   const res = await fetch(`${base}/api/features/flow-feat/review/apply`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fps: [fps()[0]], status: 'resolved' }),
+    body: JSON.stringify({ fps: [fps()[0]], status: 'waived' }),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('POST /review/apply accepts resolved (pr-review approve → will-post)', async () => {
+  const target = [fps()[0]];
+  const res = await fetch(`${base}/api/features/flow-feat/review/apply`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: target, status: 'resolved' }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, 'resolved');
+  const byFp = new Map(ledger.loadLedger('flow-feat').findings.map((f) => [f.fp, f]));
+  assert.equal(byFp.get(target[0]).status, 'resolved');
+});
+
+test('POST /findings/:fp with suggestion edits the proposed comment body', async () => {
+  const target = fps()[1];
+  const res = await fetch(`${base}/api/features/flow-feat/findings/${target}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ suggestion: 'Edited comment body.' }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).suggestion, 'Edited comment body.');
+  const byFp = new Map(ledger.loadLedger('flow-feat').findings.map((f) => [f.fp, f]));
+  assert.equal(byFp.get(target).suggestion, 'Edited comment body.');
+});
+
+test('POST /findings/:fp with nothing actionable is a 400', async () => {
+  const res = await fetch(`${base}/api/features/flow-feat/findings/${fps()[2]}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
   });
   assert.equal(res.status, 400);
 });

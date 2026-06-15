@@ -28,6 +28,18 @@ reconciliation and review stepper; only the UI label/icon differs.
 `createFeature({ id, title, kind })` validates the enum and defaults to `spec`. The live PR adapters
 (`/pr-review`, `/pr-respond`) land in a later phase; the engine is kind-agnostic today.
 
+### Comment triage (pr-review / pr-respond)
+For PR kinds a finding's **`suggestion` IS the proposed PR comment / reply body** — the cockpit shows it
+as "Proposed comment" / "Proposed reply" and the decision row is comment triage rather than spec rework:
+- **pr-review** → **Approve** (will post) · **Edit comment** · **Dismiss** (won't post). "Edit comment"
+  opens the `suggestion` in a textarea; saving persists it via `setFindingDetails({ suggestion })`
+  (`POST /api/features/:id/findings/:fp` now accepts `suggestion`) and marks the comment Approved (edited).
+- **pr-respond** → **Reply** · **Apply fix** · **Push back** · **Skip**.
+A finding is **reviewable** (counted by the "Review N comments" CTA + walked by the stepper) when it is
+open/reworking AND carries a `draft` OR a non-empty `suggestion` — a code-diff `draft` is optional. At the
+finish/Post screen, approved/edited items are set `resolved` (will-post) and dismissed items `waived`
+(via `review/apply` + `findings/:fp`), then an `apply` request is enqueued for the runner to post back.
+
 ## features/<featureId>.json
 ```jsonc
 {
@@ -210,11 +222,11 @@ GET  /api/home                      → [{ id, title, kind, readiness:{score,gat
 GET  /api/features[?kind=spec|pr-review|pr-respond] → [featureSummary]  (incl. kind + readiness; optional kind filter)
 GET  /api/features/:id              → { feature, ledger, rounds, readiness }
 DELETE /api/features/:id            → 200 { id, deleted: true }; 404 if missing. Removes features/<id>.json, ledger/<id>.json, rounds/<id>.json.
-POST /api/features/:id/findings/:fp → body { status?, reason?, pinned? }  (lifecycle ops from UI)
+POST /api/features/:id/findings/:fp → body { status?, reason?, pinned?, suggestion? }  (lifecycle ops + comment-body edit from UI; suggestion → setFindingDetails)
 POST   /api/features/:id/findings/:fp/draft → body { target?, before, after, format? } (set rework draft; 400 w/o before+after)
 DELETE /api/features/:id/findings/:fp/draft → clear the rework draft
 POST /api/features/:id/findings/:fp/draft/review → body { hunk, status, editedText? } | { hunks } | { note? } | { verdict? } (merges)
-POST /api/features/:id/review/apply → body { fps: [...], status? } sets the listed findings to reworking (default; allowlist). Atomic: 400 if any fp is unknown. (review-flow finish screen)
+POST /api/features/:id/review/apply → body { fps: [...], status? } sets the listed findings to reworking (default) or resolved (PR approve→will-post); allowlist. Atomic: 400 if any fp is unknown. (review-flow finish screen)
 POST /api/ingest/:id                → body { findings: [...], note?, reopenResolved? } (used by skills)
 POST /api/requests                  → body { action, prId?, wsId?, title?, instructions? } → 201 created request (400 on bad/missing fields). instructions = optional per-run review scope/focus (string)
 GET  /api/requests[?status=queued]  → [request]  (UI-triggered job queue; optional status filter)

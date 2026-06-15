@@ -159,14 +159,21 @@ function handleFeatureDetail(res, id) {
 
 async function handleFindingUpdate(req, res, id, fp) {
   const body = await readJsonBody(req);
+  let finding;
+  // Optional comment-body edit (the pr-review "Edit comment" action): the finding's
+  // `suggestion` IS the proposed PR comment, so persist it via setFindingDetails.
+  if (body.suggestion !== undefined) {
+    finding = ledger.setFindingDetails(id, fp, { suggestion: body.suggestion, by: 'user' });
+  }
   const change = { by: 'user' };
   if (body.status !== undefined) change.status = body.status;
   if (body.reason !== undefined) change.reason = body.reason;
   if (body.pinned !== undefined) change.pinned = body.pinned;
-  if (change.status === undefined && change.pinned === undefined) {
-    return sendError(res, 400, 'Body must include status and/or pinned');
+  if (change.status !== undefined || change.pinned !== undefined) {
+    finding = ledger.setFindingStatus(id, fp, change);
+  } else if (body.suggestion === undefined) {
+    return sendError(res, 400, 'Body must include status, pinned and/or suggestion');
   }
-  const finding = ledger.setFindingStatus(id, fp, change);
   sendJson(res, 200, finding);
 }
 
@@ -203,7 +210,9 @@ async function handleDraftReview(req, res, id, fp) {
 // (additive — the finish screen reflects in-flight work without touching Confluence/ADO).
 // Validated up front so the operation is all-or-nothing: every fp must exist and the
 // target status must be in the small allowlist before any write happens.
-const REVIEW_APPLY_STATUSES = ['reworking'];
+// `reworking` = spec rework in-flight; `resolved` = a PR-review comment approved
+// to post / a thread answered (set when the finish screen posts back to the PR).
+const REVIEW_APPLY_STATUSES = ['reworking', 'resolved'];
 
 async function handleReviewApply(req, res, id) {
   const body = await readJsonBody(req);
