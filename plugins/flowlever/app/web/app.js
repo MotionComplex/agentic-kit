@@ -34,6 +34,7 @@ const ICONS = {
   ado: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 12l2.5 2.5L15.5 9.5"/></svg>',
   figma: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 14.5l9 5 9-5"/></svg>',
   link: '<svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>',
   // kind glyphs (lucide-style: file-text / git-pull-request / reply-in-bubble)
   kindSpec: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>',
   kindReview: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7"/><circle cx="18" cy="18" r="2.5"/><path d="M18 15.5V12a4 4 0 0 0-4-4h-3"/><path d="M13 5l-2 3 2 3"/></svg>',
@@ -970,7 +971,9 @@ function needsYouBits(c) {
 function inboxRow(r) {
   const bits = needsYouBits(r.counts);
   const rd = r.readiness || { score: 0, gate: 'in-progress' };
-  return h('a', { class: 'inbox-row', href: `#/feature/${encodeURIComponent(r.id)}` },
+  const wrap = h('div', { class: 'ir-wrap' });
+
+  const link = h('a', { class: 'inbox-row', href: `#/feature/${encodeURIComponent(r.id)}` },
     dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
     h('div', { class: 'ir-main' },
       h('div', { class: 'ir-top' }, kindBadge(r.kind), h('span', { class: 'ir-title' }, r.title || r.id)),
@@ -979,6 +982,40 @@ function inboxRow(r) {
           ? bits.map((b) => h('span', { class: 'ir-bit' }, b))
           : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you'))),
     h('span', { class: 'ir-arrow', 'aria-hidden': 'true' }, '→'));
+
+  const label = r.title || r.id;
+
+  function showDefault() {
+    const trashBtn = h('button', {
+      class: 'btn-icon ir-delete', type: 'button',
+      'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); showConfirm(); },
+    }, h('span', { class: 'icon', html: ICONS.trash }));
+    wrap.replaceChildren(link, trashBtn);
+  }
+
+  function showConfirm() {
+    wrap.replaceChildren(h('div', { class: 'delete-confirm' },
+      h('span', { class: 'delete-confirm-msg' },
+        `Delete "${label}"? This removes its findings and history. This can't be undone.`),
+      h('div', { class: 'delete-confirm-actions' },
+        h('button', { class: 'btn btn-danger', type: 'button', onclick: doDelete }, 'Delete'),
+        h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel'))));
+  }
+
+  async function doDelete() {
+    try {
+      await api(`/api/features/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+      wrap.remove();
+      toast(`Deleted "${label}"`, 'success');
+    } catch (e) {
+      toast(`Delete failed: ${e.message}`);
+      showDefault();
+    }
+  }
+
+  showDefault();
+  return wrap;
 }
 
 async function renderHome() {
@@ -1199,7 +1236,7 @@ function featureCard(f) {
   const lr = lastRoundDate(f);
   metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
 
-  return h('a', { class: 'card feature-card', href: `#/feature/${encodeURIComponent(f.id)}` },
+  const card = h('a', { class: 'card feature-card', href: `#/feature/${encodeURIComponent(f.id)}` },
     h('div', { class: 'fc-top' },
       h('div', { class: 'fc-titlewrap' },
         h('div', { class: 'fc-title' }, f.title || f.id),
@@ -1210,6 +1247,41 @@ function featureCard(f) {
     sevCountsRow(r.openBySeverity),
     h('div', { class: 'fc-meta' }, metaBits),
   );
+
+  const label = f.title || f.id;
+  const wrap = h('div', { class: 'fc-wrap' });
+
+  function showDefault() {
+    const trashBtn = h('button', {
+      class: 'btn-icon fc-delete', type: 'button',
+      'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); showConfirm(); },
+    }, h('span', { class: 'icon', html: ICONS.trash }));
+    wrap.replaceChildren(card, trashBtn);
+  }
+
+  function showConfirm() {
+    wrap.replaceChildren(h('div', { class: 'card feature-card delete-confirm' },
+      h('p', { class: 'delete-confirm-msg' },
+        `Delete "${label}"? This removes its findings and history. This can't be undone.`),
+      h('div', { class: 'delete-confirm-actions' },
+        h('button', { class: 'btn btn-danger', type: 'button', onclick: doDelete }, 'Delete'),
+        h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel'))));
+  }
+
+  async function doDelete() {
+    try {
+      await api(`/api/features/${encodeURIComponent(f.id)}`, { method: 'DELETE' });
+      wrap.remove();
+      toast(`Deleted "${label}"`, 'success');
+    } catch (e) {
+      toast(`Delete failed: ${e.message}`);
+      showDefault();
+    }
+  }
+
+  showDefault();
+  return wrap;
 }
 
 /* ============================== UI-triggered job requests ============================== */
@@ -1304,10 +1376,23 @@ function requestRow(r) {
             h('span', { class: 'req-ni-label' }, 'Needs your input'),
             h('span', { class: 'req-ni-note' }, r.note || 'Waiting on you to continue.')))
       : null);
-  return h('div', { class: `req-row req-${cssSafe(r.status)} ${needsInput ? 'req-needs' : ''}`.trim() },
+  const row = h('div', { class: `req-row req-${cssSafe(r.status)} ${needsInput ? 'req-needs' : ''}`.trim() },
     h('span', { class: `req-glyph req-glyph-${cssSafe(r.status)} ${meta.spin ? 'req-spin' : ''}`.trim(),
       'aria-label': meta.label }, meta.glyph),
-    main);
+    main,
+    h('button', {
+      class: 'btn-icon req-dismiss', type: 'button',
+      'aria-label': 'Dismiss job', title: 'Dismiss this job',
+      onclick: async () => {
+        try {
+          await api(`/api/requests/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+          row.remove();
+        } catch (e) {
+          toast(`Dismiss failed: ${e.message}`);
+        }
+      },
+    }, '×'));
+  return row;
 }
 
 /* Compact status legend shown above a requests strip so the meanings of
@@ -1464,6 +1549,41 @@ function errorView(title, msg) {
   );
 }
 
+function detailDeleteZone(feature) {
+  const zone = h('div', { class: 'dh-delete-zone' });
+  const label = feature.title || feature.id || 'this workspace';
+
+  function showButton() {
+    zone.replaceChildren(h('button', {
+      class: 'btn-icon dh-delete', type: 'button',
+      'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
+      onclick: showConfirm,
+    }, h('span', { class: 'icon', html: ICONS.trash })));
+  }
+
+  function showConfirm() {
+    zone.replaceChildren(h('div', { class: 'delete-confirm-inline' },
+      h('span', { class: 'delete-confirm-msg' },
+        `Delete "${label}"? This removes its findings and history. This can't be undone.`),
+      h('button', { class: 'btn btn-danger', type: 'button', onclick: doDelete }, 'Delete'),
+      h('button', { class: 'btn', type: 'button', onclick: showButton }, 'Cancel')));
+  }
+
+  async function doDelete() {
+    try {
+      await api(`/api/features/${encodeURIComponent(feature.id)}`, { method: 'DELETE' });
+      toast(`Deleted "${label}"`, 'success');
+      location.hash = kindMeta(feature.kind || 'spec').section;
+    } catch (e) {
+      toast(`Delete failed: ${e.message}`);
+      showButton();
+    }
+  }
+
+  showButton();
+  return zone;
+}
+
 function detailView(data, tab) {
   const feature = data.feature || {};
   const r = data.readiness || computeReadiness((data.ledger && data.ledger.findings) || []);
@@ -1484,6 +1604,7 @@ function detailView(data, tab) {
           h('h1', {}, feature.title || feature.id || current.id),
           kindBadge(kind),
           statusChip(feature.status),
+          detailDeleteZone(feature),
         ),
         h('div', { class: 'dh-sub meta-dim' },
           feature.id ? h('code', { class: 'feature-id' }, feature.id) : null,

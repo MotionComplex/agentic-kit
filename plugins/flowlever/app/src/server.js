@@ -274,6 +274,16 @@ async function handleRequestUpdate(req, res, id) {
   sendJson(res, 200, request);
 }
 
+function handleFeatureDelete(res, id) {
+  const result = ledger.deleteFeature(id);
+  sendJson(res, 200, result);
+}
+
+function handleRequestDelete(res, id) {
+  const result = ledger.deleteRequest(id);
+  sendJson(res, 200, result);
+}
+
 function handleReport(res, id) {
   const md = generateReport(id);
   res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
@@ -320,6 +330,7 @@ async function route(req, res) {
       return handleFeatureList(res, url.searchParams.get('kind') || null);
     }
     if (parts.length === 3 && req.method === 'GET') return handleFeatureDetail(res, parts[2]);
+    if (parts.length === 3 && req.method === 'DELETE') return handleFeatureDelete(res, parts[2]);
     if (parts.length === 5 && parts[3] === 'findings' && req.method === 'POST') {
       return handleFindingUpdate(req, res, parts[2], parts[4]);
     }
@@ -341,6 +352,7 @@ async function route(req, res) {
       return handleRequestList(res, url.searchParams.get('status') || null);
     }
     if (parts.length === 3 && req.method === 'POST') return handleRequestUpdate(req, res, parts[2]);
+    if (parts.length === 3 && req.method === 'DELETE') return handleRequestDelete(res, parts[2]);
   }
   if (parts[1] === 'ingest' && parts.length === 3 && req.method === 'POST') {
     return handleIngest(req, res, parts[2]);

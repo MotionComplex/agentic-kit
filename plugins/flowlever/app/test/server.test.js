@@ -196,3 +196,42 @@ test('POST /api/requests/:id passes phase + needsInput through', async () => {
   assert.equal(done.needsInput, false);
   assert.equal(done.phase, 'review ready');
 });
+
+// ---------- DELETE routes ----------
+
+test('DELETE /api/features/:id returns 200 { id, deleted:true } and removes the workspace', async () => {
+  ledger.createFeature({ id: 'del-via-api', title: 'Delete via API' });
+
+  const res = await fetch(`${base}/api/features/del-via-api`, { method: 'DELETE' });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body, { id: 'del-via-api', deleted: true });
+
+  const get = await fetch(`${base}/api/features/del-via-api`);
+  assert.equal(get.status, 404);
+});
+
+test('DELETE /api/features/:id returns 404 for an unknown feature', async () => {
+  const res = await fetch(`${base}/api/features/no-such-feature-xyz`, { method: 'DELETE' });
+  assert.equal(res.status, 404);
+});
+
+test('DELETE /api/requests/:id returns 200 and removes the request', async () => {
+  const created = await (await fetch(`${base}/api/requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'pr-review', prId: '4242' }),
+  })).json();
+
+  const res = await fetch(`${base}/api/requests/${created.id}`, { method: 'DELETE' });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body, { id: created.id, deleted: true });
+
+  const list = await (await fetch(`${base}/api/requests`)).json();
+  assert.ok(!list.some((r) => r.id === created.id), 'request must be gone from the list');
+});
+
+test('DELETE /api/requests/:id returns 404 for an unknown request', async () => {
+  const res = await fetch(`${base}/api/requests/req-nope-server`, { method: 'DELETE' });
+  assert.equal(res.status, 404);
+});
