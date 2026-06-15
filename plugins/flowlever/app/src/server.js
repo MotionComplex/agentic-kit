@@ -264,8 +264,11 @@ async function handleRequestUpdate(req, res, id) {
   if (body.status !== undefined) change.status = body.status;
   if (body.note !== undefined) change.note = body.note;
   if (body.wsId !== undefined) change.wsId = body.wsId;
-  if (change.status === undefined && change.note === undefined && change.wsId === undefined) {
-    return sendError(res, 400, 'Body must include status, note and/or wsId');
+  if (body.phase !== undefined) change.phase = body.phase;
+  if (body.needsInput !== undefined) change.needsInput = body.needsInput;
+  if (change.status === undefined && change.note === undefined && change.wsId === undefined
+      && change.phase === undefined && change.needsInput === undefined) {
+    return sendError(res, 400, 'Body must include status, note, wsId, phase and/or needsInput');
   }
   const request = ledger.setRequestStatus(id, change);
   sendJson(res, 200, request);

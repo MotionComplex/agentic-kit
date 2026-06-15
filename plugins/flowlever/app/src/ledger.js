@@ -569,6 +569,11 @@ function addRequest({ action, prId, wsId, title } = {}) {
     wsId: wsId === undefined || wsId === null || String(wsId).trim() === '' ? null : String(wsId).trim(),
     title: typeof title === 'string' && title.trim() ? title.trim() : null,
     status: 'queued',
+    // phase = short free-text label of the runner's current step (e.g. "fetching PR diff");
+    // needsInput = the job is blocked waiting on the user (e.g. a 2FA/auth prompt), with the
+    // human-facing instruction in `note`.
+    phase: null,
+    needsInput: false,
     note: null,
     createdAt: ts,
     updatedAt: ts,
@@ -589,7 +594,11 @@ function listRequests({ status } = {}) {
   return requests;
 }
 
-function setRequestStatus(id, { status, note, wsId } = {}) {
+// Merge a status update onto a request. Only specified fields are touched, so the
+// runner can advance `phase` without clobbering `note`, set `needsInput` on its own,
+// etc. Reaching a terminal status (done/error) implicitly clears needsInput — a
+// finished job is never still waiting on the user.
+function setRequestStatus(id, { status, note, wsId, phase, needsInput } = {}) {
   if (status !== undefined && !REQUEST_STATUSES.includes(status)) {
     throw euser(`invalid status "${status}": must be one of ${REQUEST_STATUSES.join(', ')}`);
   }
@@ -599,6 +608,10 @@ function setRequestStatus(id, { status, note, wsId } = {}) {
   if (status !== undefined) request.status = status;
   if (note !== undefined) request.note = note === null || note === '' ? null : String(note);
   if (wsId !== undefined && wsId !== null && String(wsId).trim() !== '') request.wsId = String(wsId).trim();
+  if (phase !== undefined) request.phase = phase === null || phase === '' ? null : String(phase);
+  if (needsInput !== undefined) request.needsInput = Boolean(needsInput);
+  // A terminal status is never "waiting on you".
+  if (status === 'done' || status === 'error') request.needsInput = false;
   request.updatedAt = now();
   saveRequests(doc);
   return request;

@@ -25,24 +25,42 @@ Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowleve
 2. **For each request** (oldest first), mark it running, then dispatch by `action` — and on completion
    mark it `done` (or `error` with a short note):
    ```
-   FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" requests set <reqId> --status running
+   FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" requests set <reqId> --status running --phase "starting"
    ```
    - **`pr-review`** (has `prId`): run the **`/flowlever:pr-review <prId>`** procedure — create/locate the
      `pr-review` workspace, fetch + review, ingest findings. On success:
-     `requests set <reqId> --status done --wsId <workspaceId>` (so the UI links the request to the workspace).
+     `requests set <reqId> --status done --phase "review ready" --wsId <workspaceId>` (so the UI links the request to the workspace).
    - **`pr-respond`** (has `prId`): run **`/flowlever:pr-respond <prId>`** — create the `pr-respond` workspace,
-     fetch threads, ingest. Then `requests set <reqId> --status done --wsId <workspaceId>`.
+     fetch threads, ingest. Then `requests set <reqId> --status done --phase "threads ready" --wsId <workspaceId>`.
    - **`apply`** (has `wsId`): run the **Apply** step of the matching adapter for that workspace's `kind`
      (post inline comments for `pr-review`, post replies / apply fixes for `pr-respond`), reading the user's
-     decisions from the ledger. Then `requests set <reqId> --status done`.
+     decisions from the ledger. Then `requests set <reqId> --status done --phase "posted to PR"`.
 3. If a request fails (fetch error, bad PR id, auth), set `--status error --note "<short reason>"` and move
    on — never let one bad request block the rest.
+
+## Keep the UI honest: emit phases + flag when you need the user
+As you run each adapter, call `requests set <reqId> --phase "<current step>"` at every step so the UI's job
+row shows what's happening live (`Running · reviewing changes`) instead of an opaque spinner. The adapter
+procedures below spell out the exact phases. **The one rule that matters most:** whenever the runner is
+about to do something that needs the user — an **auth/2FA approval** in another window, or a decision —
+set `needsInput` + a clear `note` *before* the call so the UI shows the amber "⚠ needs your input" banner,
+then clear it once unblocked:
+```
+# Before the FIRST Azure DevOps fetch (which may pop a 2FA/auth prompt in another window):
+requests set <reqId> --phase "fetching PR #<prId> (may need your approval)" --needs-input \
+  --note "If a 2FA/auth prompt appears in another window, approve it to continue."
+# …after it succeeds:
+requests set <reqId> --no-needs-input --phase "fetching linked ticket/spec"
+```
+A silent block waiting on 2FA is the exact pain this prevents — never make an MCP call that can prompt the
+user without first flagging `needsInput`.
 
 ## Important
 - **Writes still gate on intent:** `pr-review`/`pr-respond` ingest are read-only (safe to run
   automatically). The **`apply`** action posts to ADO — it only exists because the user clicked
   "Post comments/replies" in the UI, which IS their confirmation; still, surface what was posted.
 - Keep each pass quick and idempotent: a request already `running`/`done` is skipped. The UI polls request
-  status, so the user watches queued → running → done in the browser while this runs in the session.
+  status, so the user watches queued → running (with live phase + any needs-input prompt) → done in the
+  browser while this runs in the session.
 - This is the bridge that makes the cockpit **UI-driven, session-reactive**: user clicks in the browser →
   this runner does the MCP work → results show up back in the UI.

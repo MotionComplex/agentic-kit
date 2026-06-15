@@ -31,7 +31,10 @@ Usage: node src/cli.js <command> [args]
   coverage set <featureId> --file coverage.json
   requests list [--status queued|running|done|error] [--json]   List UI-triggered job requests
   requests set <id> --status running|done|error [--note "..."] [--wsId <id>]
-                                         Update a request (the runner skill uses this)
+                               [--phase "..."] [--needs-input|--no-needs-input]
+                                         Update a request (the runner skill uses this);
+                                         --phase sets the live step label, --needs-input flags
+                                         it as blocked on you (e.g. a 2FA/auth prompt)
   start [--port N] [--no-open]           Launch the cockpit server + open it in the browser
   demo                                   Seed demo feature
   help                                   Show this help
@@ -46,7 +49,7 @@ function userError(msg) {
 
 // ---------- arg parsing (hand-rolled) ----------
 
-const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open']);
+const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -396,12 +399,21 @@ function cmdRequestsSet({ pos, flags }) {
   }
   if (flags.note !== undefined) change.note = flags.note;
   if (flags.wsId !== undefined) change.wsId = flags.wsId;
-  if (change.status === undefined && change.note === undefined && change.wsId === undefined) {
-    throw userError('Nothing to change: pass --status, --note and/or --wsId');
+  if (flags.phase !== undefined) change.phase = flags.phase;
+  if (flags['needs-input'] && flags['no-needs-input']) {
+    throw userError('Use either --needs-input or --no-needs-input, not both');
+  }
+  if (flags['needs-input']) change.needsInput = true;
+  if (flags['no-needs-input']) change.needsInput = false;
+  if (change.status === undefined && change.note === undefined && change.wsId === undefined
+      && change.phase === undefined && change.needsInput === undefined) {
+    throw userError('Nothing to change: pass --status, --note, --wsId, --phase and/or --needs-input/--no-needs-input');
   }
   const request = ledger.setRequestStatus(id, change);
   const target = request.prId ? `PR ${request.prId}` : (request.wsId || '—');
-  console.log(`${request.id}  ${request.action}  ${request.status}  ${target}${request.note ? ` — ${request.note}` : ''}`);
+  const phaseStr = request.phase ? `  · ${request.phase}` : '';
+  const needsStr = request.needsInput ? '  ⚠ needs input' : '';
+  console.log(`${request.id}  ${request.action}  ${request.status}${phaseStr}${needsStr}  ${target}${request.note ? ` — ${request.note}` : ''}`);
 }
 
 function cmdCoverageSet({ pos, flags }) {

@@ -138,7 +138,9 @@ flips the request through `running → done` (or `error`). The engine never runs
       "wsId": "pr-1481-review",        // target workspace id — required for apply, set by the runner once it creates the ws
       "title": "Checkout PR",          // optional human label, else null
       "status": "queued",              // queued | running | done | error
-      "note": null,                    // optional free text — error reason, progress note
+      "phase": null,                   // short live label of the runner's current step (e.g. "fetching PR diff"); null when not running
+      "needsInput": false,             // true when the job is BLOCKED waiting on the user (e.g. a 2FA/auth prompt); `note` carries the instruction
+      "note": null,                    // optional free text — error reason, progress note, or the needs-input instruction
       "createdAt": "...", "updatedAt": "..."
     }
   ]
@@ -151,10 +153,15 @@ The three **actions**:
 - `apply` — post the reviewed output (kept comments / replies) of an existing workspace back to the PR
   (requires `wsId`). Enqueued from a workspace's review finish screen.
 
-Lifecycle: every request begins `queued`. The runner sets `running` while working, then `done` on
-success or `error` (with a `note`) on failure. `addRequest` validates the action enum + the
-action-specific required field; `setRequestStatus` validates the status enum, merges `status`/`note`/
-`wsId`, and bumps `updatedAt`. All writes are atomic.
+Lifecycle: every request begins `queued` (`phase: null`, `needsInput: false`). The runner sets
+`running` while working and advances `phase` step-by-step ("fetching PR diff" → "reviewing changes" →
+…) so the UI shows what it's doing live. When the runner is about to do something that needs the user —
+an auth/2FA approval, a decision — it sets `needsInput: true` + a human-facing `note`; the UI then
+shows a prominent "⚠ needs your input" banner. It clears `needsInput` once unblocked. On success it
+sets `done`, on failure `error` (with a `note`). `addRequest` validates the action enum + the
+action-specific required field; `setRequestStatus` validates the status enum and merges any of
+`status`/`note`/`wsId`/`phase`/`needsInput` (unspecified fields untouched), bumps `updatedAt`, and
+clears `needsInput` whenever a terminal status (done/error) is set. All writes are atomic.
 
 ## config.json
 ```jsonc
@@ -181,7 +188,7 @@ readiness <featureId>                     print score + gate + blockers
 report <featureId> [--out report.md]      markdown report
 coverage set <featureId> --file coverage.json
 requests list [--status queued|running|done|error] [--json]   list UI-triggered job requests
-requests set <id> --status running|done|error [--note "..."] [--wsId <id>]   update a request (runner skill)
+requests set <id> --status running|done|error [--note "..."] [--wsId <id>] [--phase "..."] [--needs-input|--no-needs-input]   update a request (runner skill); --phase = live step label, --needs-input = blocked on you (2FA/auth)
 demo                                      seed demo feature
 ```
 Exit codes: 0 ok, 1 user error (bad args/not found), 2 internal. All output human-readable; `--json` flag for machine output on list/show/readiness.
@@ -199,7 +206,7 @@ POST /api/features/:id/review/apply → body { fps: [...], status? } sets the li
 POST /api/ingest/:id                → body { findings: [...], note?, reopenResolved? } (used by skills)
 POST /api/requests                  → body { action, prId?, wsId?, title? } → 201 created request (400 on bad/missing fields)
 GET  /api/requests[?status=queued]  → [request]  (UI-triggered job queue; optional status filter)
-POST /api/requests/:id              → body { status?, note?, wsId? } → updated request (the runner skill drives this)
+POST /api/requests/:id              → body { status?, note?, wsId?, phase?, needsInput? } → updated request (runner skill drives this; phase=live step, needsInput=blocked on user)
 GET  /api/report/:id                → text/markdown report
 Static: / → web/index.html, /app.js, /style.css
 ```

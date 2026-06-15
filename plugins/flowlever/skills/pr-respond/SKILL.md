@@ -23,10 +23,18 @@ posted as replies / applied as code fixes on **Apply**.
   `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature add <wsId> --title "PR #<id> — <pr title> (your PR)" --kind pr-respond`
 - Register the PR as a source.
 
+> **When run from the cockpit queue (`/flowlever:watch`), emit phases** with the request id `<reqId>`:
+> `requests set <reqId> --phase "<step>"` at each step, and flag `needsInput` *before* the first Azure
+> DevOps fetch (it can pop a 2FA/auth prompt in another window), then clear it once unblocked. Skip these
+> calls when invoked directly (no `<reqId>`).
+
 ## 2. Fetch the threads needing a response (reuse /pr-respond)
+**Before the first ADO call** (may trigger 2FA/auth):
+`requests set <reqId> --phase "fetching reviewer threads (may need your approval)" --needs-input --note "If a 2FA/auth prompt appears in another window, approve it to continue."`
 Via the ADO MCP: `repo_list_pull_request_threads` → filter to **active** threads whose latest comment is
-**not** from you (i.e. awaiting your response). Read the current code at each thread's anchor so the
-proposed response reflects the latest state.
+**not** from you (i.e. awaiting your response). **Clear the prompt after the first fetch succeeds:**
+`requests set <reqId> --no-needs-input --phase "reading code at thread anchors"`. Read the current code at
+each thread's anchor so the proposed response reflects the latest state.
 
 ## 3. Map threads → ingest shape
 Each thread → one finding:
@@ -35,8 +43,10 @@ Each thread → one finding:
 - `dimension`: best-fit from the existing set; `severity`: how blocking the reviewer's ask is.
 - Attach a **draft** representing your proposed response: for a code change, `before`/`after` = the anchored
   code → its fix; for a reply-only, put the drafted reply text in `after` with `before` empty (renders as
-  an additive diff). Use `setFindingDraft(wsId, fp, {...})`.
-Ingest: `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" ingest <wsId> --file <findings.json> --note "PR #<id> open threads @ <iteration>"`.
+  an additive diff). Use `setFindingDraft(wsId, fp, {...})`. (`requests set <reqId> --phase "drafting replies"`)
+Then (`requests set <reqId> --phase "ingesting threads"`) ingest:
+`FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" ingest <wsId> --file <findings.json> --note "PR #<id> open threads @ <iteration>"`.
+The runner then marks the request `done --phase "threads ready" --wsId <wsId>`.
 
 ## 4. Hand to the cockpit
 Open **Home → PR Respond → this workspace**. Step through each thread; the decision row maps to the
@@ -46,6 +56,9 @@ Open **Home → PR Respond → this workspace**. Step through each thread; the d
   **Skip** = decide later. Decisions persist.
 
 ## 5. Apply (post replies / code fixes) — explicit confirmation required
+When run as an `apply` request, emit phases: `--phase "posting replies (may need your approval)"
+--needs-input --note "Approve the auth prompt in your other window if asked."` before the first post,
+clear it after, then `--status done --phase "posted to PR"`.
 When the user asks to post: read decisions (`finding list <wsId> --json` + each `draft.review`). Then,
 **only on an explicit yes**, per thread: post the reply via `repo_reply_to_comment` (using the edited text
 if present), and for accepted code fixes apply the edit to the working tree (Edit/Write) for the user to

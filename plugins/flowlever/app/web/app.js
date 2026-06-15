@@ -298,7 +298,7 @@ function renderGuide() {
     h('div', { class: 'guide' },
       h('div', { class: 'view-head' },
         h('h1', {}, 'How FlowLever works'),
-        h('p', { class: 'view-sub' }, 'Get a feature from messy spec to ready-to-build — and stay on top of every finding')),
+        h('p', { class: 'view-sub' }, 'A review cockpit for specs and PRs — from messy spec to ready-to-build, and from PR diff to posted comments, staying on top of every finding')),
 
       // What it is
       h('section', { class: 'guide-card' },
@@ -320,7 +320,7 @@ function renderGuide() {
             h('p', {}, 'Runs locally, no network, zero dependencies. It shows everything — readiness, the findings board, the coverage matrix, the round timeline, the report. Drive it from the dashboard or the ', gCmd('node src/cli.js'), ' commands.')),
           h('div', { class: 'guide-col' },
             h('h3', {}, '🤖  The skills (in Claude Code chat)'),
-            h('p', {}, 'Four ', h('code', {}, '/lever:*'), ' skills run inside your Claude Code session — where your Confluence / ADO / Figma access already lives. They do the fetching, analysis and (only on your OK) the fixes, then write findings into the ledger.')))),
+            h('p', {}, 'The ', h('code', {}, '/flowlever:*'), ' skills run inside your Claude Code session — where your Confluence / ADO / Figma access already lives. They do the fetching, analysis and (only on your OK) the fixes for both ', h('strong', {}, 'specs'), ' (audit / rework / brief) and ', h('strong', {}, 'PRs'), ' (pr-review / pr-respond), then write findings into the ledger.')))),
 
       // The loop
       h('section', { class: 'guide-card' },
@@ -336,6 +336,46 @@ function renderGuide() {
             h('p', {}, 'Run ', h('code', {}, '/lever:audit'), ' again. The ledger ', h('strong', {}, 'reconciles'), ': fixed findings auto-resolve, still-open ones refresh, and anything that ', h('strong', {}, 'silently came back'), ' is flagged as a regression (red on the timeline).')),
           gStep(5, 'Ship',
             h('p', {}, 'When the gate is green, ', h('code', {}, '/lever:brief checkout-redesign'), ' composes an implementation-ready handoff brief from the spec, designs and settled decisions.')))),
+
+      // PR flows
+      h('section', { class: 'guide-card' },
+        h('h2', {}, 'PRs ride the same cockpit'),
+        h('p', { class: 'guide-lead' },
+          'Pull requests use the exact same finding model and review stepper as specs — only the workflow differs. ',
+          'Kick a job off from ', h('strong', {}, '“+ New PR review / respond”'), ' in the UI (or the skill in chat); the ',
+          h('code', {}, '/flowlever:watch'), ' runner — a loop in your Claude Code session — picks it up, does the ADO work, and the results show back here.'),
+        h('div', { class: 'guide-cols' },
+          h('div', { class: 'guide-col' },
+            h('h3', {}, h('code', {}, '/flowlever:pr-review'), ' — review someone’s PR'),
+            h('p', {},
+              'Enqueue a PR id → the runner fetches the diff + linked ticket/spec and reviews it → findings land in a workspace → you ',
+              h('strong', {}, 'step through'), ' each one (Accept · Edit · Redirect · Waive · Skip) → ',
+              h('strong', {}, '“Post comments”'), ' posts only what you approved as inline PR comments. ',
+              h('strong', {}, 'Nothing is posted automatically.'))),
+          h('div', { class: 'guide-col' },
+            h('h3', {}, h('code', {}, '/flowlever:pr-respond'), ' — answer feedback on your PR'),
+            h('p', {},
+              'Pulls the reviewer threads awaiting your reply → each becomes a finding with a proposed reply/fix → you decide ',
+              h('strong', {}, 'per thread'), ' (apply fix · reply · push back · waive) → ',
+              h('strong', {}, '“Post replies”'), ' posts the replies and applies the code fixes — only on your action.')))),
+
+      // Job lifecycle & statuses
+      h('section', { class: 'guide-card' },
+        h('h2', {}, 'Job lifecycle & statuses'),
+        h('p', {},
+          'A UI-triggered job moves through four statuses, shown live on its row in the jobs strip:'),
+        h('ul', { class: 'guide-list' },
+          h('li', {}, h('strong', {}, '⏳ Queued'), ' — waiting for the runner to pick it up.'),
+          h('li', {}, h('strong', {}, '⠿ Running'), ' — being processed. The row shows the ', h('strong', {}, 'live phase'),
+            ' (e.g. “Running · reviewing changes”) so you can see exactly what it’s doing.'),
+          h('li', {}, h('strong', { class: 'guide-ni' }, '⚠ Needs your input'), ' — the job is ', h('strong', {}, 'blocked waiting on you'),
+            ', most often to approve a 2FA / auth prompt in another window. An amber banner spells out what to do; ',
+            'approve it and the job continues on its own.'),
+          h('li', {}, h('strong', {}, '✓ Done'), ' — finished; the workspace is ready and linked from the row.'),
+          h('li', {}, h('strong', {}, '✗ Error'), ' — failed; the row shows why.')),
+        h('p', { class: 'meta-dim' },
+          'The runner is the ', h('code', {}, '/flowlever:watch'), ' loop in your Claude Code session — that’s why a job can pause for your 2FA: ',
+          'the session, not the browser, holds your Confluence / ADO access.')),
 
       // Reading the dashboard
       h('section', { class: 'guide-card' },
@@ -1233,24 +1273,61 @@ function requestTarget(r) {
 }
 
 /* A single request row: status glyph (spinner while running), action + target,
- * optional title, and a note (errors) / workspace link (done). All text escaped. */
+ * optional title, the live phase while running, and a note (errors) / workspace
+ * link (done). When the job is blocked waiting on the user (needsInput) it grows a
+ * prominent amber "needs your input" banner carrying the instruction (note). All
+ * text escaped. */
 function requestRow(r) {
   const meta = REQ_STATUS[r.status] || REQ_STATUS.queued;
   const target = requestTarget(r);
   const linkable = r.status === 'done' && r.wsId;
+  const needsInput = !!r.needsInput && (r.status === 'queued' || r.status === 'running');
+  // While running, show the live phase next to the state, e.g. "Running · reviewing changes".
+  const phaseText = r.status === 'running' && r.phase ? ` · ${r.phase}` : '';
+  // The note doubles as the needs-input instruction; when the banner shows it, don't
+  // repeat it in the sub line. Otherwise it's an error/progress note.
+  const showSubNote = r.note && !needsInput;
+
   const main = h('div', { class: 'req-main' },
     h('div', { class: 'req-top' },
       h('span', { class: 'req-action' }, REQ_ACTION_LABEL[r.action] || r.action),
       target ? h('span', { class: 'req-target num-line' }, target) : null,
       r.title ? h('span', { class: 'req-title' }, r.title) : null),
     h('div', { class: 'req-sub meta-dim' },
-      h('span', { class: `req-statetext req-state-${cssSafe(r.status)}` }, meta.label),
-      r.note ? h('span', { class: 'req-note' }, ` — ${r.note}`) : null,
-      linkable ? h('a', { class: 'req-open', href: `#/feature/${encodeURIComponent(r.wsId)}` }, 'open workspace →') : null));
-  return h('div', { class: `req-row req-${cssSafe(r.status)}` },
+      h('span', { class: `req-statetext req-state-${cssSafe(r.status)}` }, meta.label + phaseText),
+      showSubNote ? h('span', { class: 'req-note' }, ` — ${r.note}`) : null,
+      linkable ? h('a', { class: 'req-open', href: `#/feature/${encodeURIComponent(r.wsId)}` }, 'open workspace →') : null),
+    needsInput
+      ? h('div', { class: 'req-needsinput', role: 'alert' },
+          h('span', { class: 'req-ni-icon', 'aria-hidden': 'true' }, '⚠'),
+          h('div', { class: 'req-ni-body' },
+            h('span', { class: 'req-ni-label' }, 'Needs your input'),
+            h('span', { class: 'req-ni-note' }, r.note || 'Waiting on you to continue.')))
+      : null);
+  return h('div', { class: `req-row req-${cssSafe(r.status)} ${needsInput ? 'req-needs' : ''}`.trim() },
     h('span', { class: `req-glyph req-glyph-${cssSafe(r.status)} ${meta.spin ? 'req-spin' : ''}`.trim(),
       'aria-label': meta.label }, meta.glyph),
     main);
+}
+
+/* Compact status legend shown above a requests strip so the meanings of
+ * Queued / Running / Done / Error (and the needs-input flag) are clear. */
+function requestsLegend() {
+  const item = (cls, glyph, label, desc) => h('span', { class: 'reqleg-item', title: `${label} — ${desc}` },
+    h('span', { class: `reqleg-glyph req-glyph-${cls}` }, glyph),
+    h('span', { class: 'reqleg-label' }, label),
+    h('span', { class: 'reqleg-desc' }, desc));
+  return h('details', { class: 'requests-legend' },
+    h('summary', {}, h('span', { class: 'reqleg-q', 'aria-hidden': 'true' }, '?'), 'What do these statuses mean?'),
+    h('div', { class: 'reqleg-grid' },
+      item('queued', REQ_STATUS.queued.glyph, 'Queued', 'waiting for the runner to pick it up'),
+      item('running', REQ_STATUS.running.glyph, 'Running', 'being processed (shows the live phase)'),
+      item('done', REQ_STATUS.done.glyph, 'Done', 'finished — workspace ready'),
+      item('error', REQ_STATUS.error.glyph, 'Error', 'failed (shows why)'),
+      h('span', { class: 'reqleg-item' },
+        h('span', { class: 'reqleg-glyph reqleg-ni' }, '⚠'),
+        h('span', { class: 'reqleg-label' }, 'Needs your input'),
+        h('span', { class: 'reqleg-desc' }, 'blocked on you — e.g. approve a 2FA/auth prompt'))));
 }
 
 function requestsStripEl(requests, emptyText) {
@@ -1267,7 +1344,9 @@ function populateRequestsStrip(strip, requests, emptyText) {
     return;
   }
   strip.replaceChildren(
-    h('div', { class: 'requests-head' }, h('span', { class: 'f-suglabel' }, plural(requests.length, 'job', 'jobs'))),
+    h('div', { class: 'requests-head' },
+      h('span', { class: 'f-suglabel' }, plural(requests.length, 'job', 'jobs')),
+      requestsLegend()),
     h('div', { class: 'requests-list' }, requests.map(requestRow)));
 }
 
