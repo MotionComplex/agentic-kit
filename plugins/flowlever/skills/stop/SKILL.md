@@ -12,11 +12,15 @@ Cleanly shuts FlowLever down: the dashboard server (a background process) and th
 in this session).
 
 ## Procedure
-1. **Stop the server** (it listens on a port; default 4173, or `$PORT`):
+1. **Stop the server** (it listens on a port; default 4173, or `$PORT`).
+   **CRITICAL: filter to the LISTENING socket with `-sTCP:LISTEN`.** Without it, `lsof -ti tcp:<port>`
+   also returns *client* PIDs connected to that port — including the user's **browser** — and `xargs kill`
+   would kill the browser too.
    ```
-   lsof -ti tcp:${PORT:-4173} | xargs kill 2>/dev/null && echo "stopped server on :${PORT:-4173}" || echo "no server on :${PORT:-4173}"
+   lsof -ti tcp:${PORT:-4173} -sTCP:LISTEN | xargs kill 2>/dev/null && echo "stopped server on :${PORT:-4173}" || echo "no server on :${PORT:-4173}"
    ```
-   This stops whatever FlowLever server is on that port — no state is lost (all data is on disk).
+   This stops only the FlowLever server process — no state is lost (all data is on disk), and your browser
+   tab stays open (it just can't reach the server until you `/flowlever:start` again).
 2. **End the watch loop** by dropping a stop sentinel the loop checks on its next wake:
    ```
    mkdir -p "${FLOWLEVER_DATA:-$HOME/.flowlever}" && : > "${FLOWLEVER_DATA:-$HOME/.flowlever}/.watch-stop"
