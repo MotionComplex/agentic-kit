@@ -78,7 +78,10 @@ For each review finding:
   spec-mismatch→`consistency`, unclear→`ambiguity`, test gap→`testability`, DoR/process→`dor`,
   design→`design-match`). Severity per `/pr-review` calibration (blocker = must-fix before merge).
 - `title`: stable one-line. `detail`: what's wrong + why, quoting the relevant diff hunk.
-- `locus`: **`pr:<id>:<path>:L<line>`** (or `L<start>-<end>`). Stable loci = stable fingerprints across
+- `locus`: **`pr:<id>:<path>:L<line>`** (or `L<start>-<end>`). The line is the **new-file (right-side)
+  line number of the exact code the comment is about**, read from the diff (`@@ … +<start>,<count> @@`
+  counting down the new side) — never eyeballed/estimated. Point at the line whose content matches the
+  snippet you quote in the body, not a nearby JSDoc/blank line. Stable loci = stable fingerprints across
   re-reviews (the diff moves — same reconcile model as spec re-audit).
 - `suggestion`: **the proposed PR comment body — it IS what gets posted, so write it as a
   [Conventional Comment](https://conventionalcomments.org/)**: start with a label, then the concrete fix.
@@ -110,8 +113,25 @@ clear it after, then `--status done --phase "posted to PR"`.
 When the user has reviewed and asks to post: read their decisions
 (`FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding list <wsId> --json` → use each finding's status + `draft.review` verdict/edited
 text, or the exported work order). For every **accepted/edited** finding (skip rejected/waived), post an
-inline PR comment anchored to the finding's file:line via `repo_create_pull_request_thread`
-(use the user's edited text if present, else the suggestion). **Never post without an explicit yes.**
+inline PR comment via `repo_create_pull_request_thread` (use the user's edited text if present, else the
+suggestion). **Never post without an explicit yes.**
+
+### Anchoring — get the line right (this is what makes a comment land on the code it's about)
+A finding's `locus` line is a *hint*; **verify it against the live diff before posting**, because an
+off-by-N or old-vs-new-file line lands the comment on unrelated code (e.g. a JSDoc block instead of the
+call it discusses). For each finding:
+1. Re-fetch the latest diff once: `repo_get_pull_request_changes` (includeLineContent:true). For the
+   finding's file, find the line whose **content actually matches the code the comment cites** (the
+   symbol/snippet quoted in the body) — don't trust the stored number blindly.
+2. Anchor to that line in the **RIGHT (new) file**, 1-based: pass `rightFileStartLine` (and
+   `rightFileEndLine` to span a multi-line snippet; add `rightFileStartOffset`/`rightFileEndOffset` only
+   if you need a sub-line span). ADO line numbers are the new-file lines, NOT the old-file or the diff's
+   visual row.
+3. The cited code is a **deleted** line (only in the old file)? ADO can't right-anchor a pure deletion —
+   anchor to the nearest surviving new-file line (usually the replacement) and name the removed code in the
+   body, or post it as a file-level thread (`filePath` only, no line) if there's no sensible line.
+4. After posting, sanity-check the returned thread's `rightFileStart.line` matches your intended line;
+   surface any that fell back to file-level so the user knows.
 After posting, mark exactly the findings you posted as **posted** (idempotent — the cockpit's Post
 button already stamps them, this confirms it for direct runs):
 `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding posted <wsId> --fps <fp>[,<fp>...]`.

@@ -321,8 +321,14 @@ Ask the user to confirm. On confirm, post everything via Step 8.
 Use **Azure DevOps MCP**. Each finding gets its own thread to keep conversations clean and
 independently resolvable:
 
-- **Code-anchored findings** → inline thread via `repo_create_pull_request_thread` on the
-  specific file/line range.
+- **Code-anchored findings** → inline thread via `repo_create_pull_request_thread`. Anchor to the
+  **RIGHT (new) file**, 1-based: pass `rightFileStartLine` (+ `rightFileEndLine` to span a snippet).
+  **Get the line from the live diff, not memory** — re-check `repo_get_pull_request_changes`
+  (includeLineContent:true) and anchor to the line whose content matches the code you cite; an
+  off-by-N or old-vs-new-file line lands the comment on unrelated code (e.g. a JSDoc block). The cited
+  code is a pure deletion (old file only)? ADO can't right-anchor it — use the nearest surviving new-file
+  line and name the removed code in the body, or post it file-level. Verify the returned thread anchored
+  where you intended.
 - **Cross-cutting findings without a single anchor** (e.g. spec ambiguity, scope question,
   test-coverage gap that spans files) → one **top-level PR thread per topic**. Don't bundle
   unrelated topics into a single overview thread — separate threads keep each conversation
