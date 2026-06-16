@@ -45,6 +45,24 @@ Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowleve
 3. If a request fails (fetch error, bad PR id, auth), set `--status error --note "<short reason>"` and move
    on — never let one bad request block the rest.
 
+4. **Author-activity check (waiting-on-author detection).** After draining the queue, for each `pr-review`/
+   `pr-respond` workspace that is **waiting on the author** — `feature list --json` rows where
+   `review.lastPostedAt` is set and `review.authorRespondedAt` is null — check the PR for new activity
+   **since `review.lastPostedAt`**, authored by someone **other than you** (the reviewer):
+   - new replies on the threads you posted, or any new comment threads (`repo_list_pull_request_threads` /
+     `repo_list_pull_request_thread_comments`), and/or
+   - new commits / a new iteration pushed (`repo_get_pull_request_by_id` / the PR's iterations).
+
+   If you find any, flip the workspace to "author responded" with a short human note so the cockpit lights
+   **Re-review**:
+   ```
+   FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature activity <wsId> --responded --note "2 new replies · 1 new commit"
+   ```
+   This check is **read-only** (safe to run every pass). It only flags; the user (or a queued re-review)
+   does the actual reconcile. Posting again (a re-review) re-anchors `lastPostedAt` and clears the flag
+   automatically. Skip workspaces already flagged. Like the fetches above, flag `needsInput` before the
+   first ADO call if it can pop a 2FA/auth prompt.
+
 ## Keep the UI honest: emit phases + flag when you need the user
 As you run each adapter, call `requests set <reqId> --phase "<current step>"` at every step so the UI's job
 row shows what's happening live (`Running · reviewing changes`) instead of an opaque spinner. The adapter

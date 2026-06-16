@@ -231,6 +231,107 @@ test('setFindingStatus: waive requires reason; transitions append history', () =
   assert.equal(reopened.history.length, before + 2);
 });
 
+test('markPosted: stamps postedAt, keeps finding reworking (open→reworking), idempotent', () => {
+  ledger.createFeature({ id: 'posted', title: 'Posted', kind: 'pr-review' });
+  ledger.ingestRound('posted', [
+    mkFinding({ title: 'P1', locus: 'pr:9:a.ts:L1' }),
+    mkFinding({ title: 'P2', locus: 'pr:9:b.ts:L2', severity: 'minor' }),
+  ]);
+  const fps = ledger.loadLedger('posted').findings.map((f) => f.fp);
+
+  const updated = ledger.markPosted('posted', fps);
+  assert.equal(updated.length, 2);
+  const led = ledger.loadLedger('posted');
+  for (const f of led.findings) {
+    assert.equal(f.status, 'reworking', 'posted finding stays open for reconcile');
+    assert.ok(f.postedAt, 'carries a postedAt stamp');
+    assert.equal(f.history.at(-1).note, 'posted to PR');
+    assert.equal(f.history.at(-1).by, 'post');
+  }
+
+  // Idempotent: re-posting refreshes the stamp without piling on history entries.
+  const before = ledger.loadLedger('posted').findings[0].history.length;
+  ledger.markPosted('posted', [fps[0]]);
+  assert.equal(ledger.loadLedger('posted').findings[0].history.length, before);
+});
+
+test('readiness: posted findings do not penalize the score (awaiting author)', () => {
+  const r = ledger.readiness('posted');   // both findings posted from the previous test
+  assert.equal(r.score, 100, 'posted findings are excluded from the penalty');
+  assert.equal(r.gate, 'ready');
+  assert.equal(r.openCount, 0);
+});
+
+test('re-review reconcile: author-fixed posted finding auto-resolves, still-flagged stays', () => {
+  // P1 still flagged (same locus), P2 dropped → P2 auto-resolves, P1 stays posted/reworking.
+  const { stats } = ledger.ingestRound('posted', [mkFinding({ title: 'P1', locus: 'pr:9:a.ts:L1' })]);
+  assert.equal(stats.autoResolved, 1);
+  const led = ledger.loadLedger('posted');
+  const p1 = led.findings.find((f) => f.title === 'P1');
+  const p2 = led.findings.find((f) => f.title === 'P2');
+  assert.equal(p1.status, 'reworking');
+  assert.ok(p1.postedAt, 'still-flagged posted finding keeps its stamp');
+  assert.equal(p2.status, 'resolved', 'addressed comment auto-resolves on re-review');
+});
+
+test('reopening a posted finding drops the postedAt stamp', () => {
+  const fp = ledger.loadLedger('posted').findings.find((f) => f.title === 'P1').fp;
+  const reopened = ledger.setFindingStatus('posted', fp, { status: 'open' });
+  assert.equal(reopened.status, 'open');
+  assert.equal(reopened.postedAt, undefined, 'reopen pulls it back into the review flow');
+});
+
+test('setFindingDecision: stores approve/edit, clears on null, validates, cleared by status change', () => {
+  ledger.createFeature({ id: 'dec', title: 'Decisions', kind: 'pr-review' });
+  ledger.ingestRound('dec', [mkFinding({ title: 'D1', locus: 'pr:1:a.ts:L1' })]);
+  const fp = ledger.loadLedger('dec').findings[0].fp;
+
+  assert.equal(ledger.setFindingDecision('dec', fp, 'approve').decision, 'approve');
+  assert.equal(ledger.loadLedger('dec').findings[0].decision, 'approve');
+  assert.equal(ledger.setFindingDecision('dec', fp, 'edit').decision, 'edit');
+  assert.throws(() => ledger.setFindingDecision('dec', fp, 'nope'), (e) => e.code === 'EUSER');
+
+  // a status change supersedes (clears) the decision
+  ledger.setFindingStatus('dec', fp, { status: 'waived', reason: 'dismissed' });
+  assert.equal(ledger.loadLedger('dec').findings[0].decision, undefined);
+
+  // reopen, set, then clear with null
+  ledger.setFindingStatus('dec', fp, { status: 'open' });
+  ledger.setFindingDecision('dec', fp, 'approve');
+  assert.equal(ledger.setFindingDecision('dec', fp, null).decision, undefined);
+});
+
+test('markPosted anchors review.lastPostedAt; setFeatureReview flips/clears authorResponded', () => {
+  ledger.createFeature({ id: 'wait', title: 'Waiting', kind: 'pr-review' });
+  ledger.ingestRound('wait', [mkFinding({ title: 'W1', locus: 'pr:2:a.ts:L1' })]);
+  const fp = ledger.loadLedger('wait').findings[0].fp;
+
+  ledger.markPosted('wait', [fp]);
+  let rev = ledger.getFeature('wait').review;
+  assert.ok(rev.lastPostedAt, 'posting anchors lastPostedAt');
+  assert.equal(rev.authorRespondedAt, null, 'starts waiting (not responded)');
+
+  ledger.setFeatureReview('wait', { authorRespondedAt: '2026-06-16T12:00:00Z', note: '1 new reply' });
+  rev = ledger.getFeature('wait').review;
+  assert.equal(rev.authorRespondedAt, '2026-06-16T12:00:00Z');
+  assert.equal(rev.note, '1 new reply');
+
+  // re-posting clears the responded flag (back to waiting)
+  ledger.markPosted('wait', [fp]);
+  rev = ledger.getFeature('wait').review;
+  assert.equal(rev.authorRespondedAt, null, 're-post resets to waiting');
+  assert.equal(rev.note, null);
+});
+
+test('setFeatureStatus: marks done, reopens, validates the enum', () => {
+  ledger.createFeature({ id: 'lifecycle', title: 'Lifecycle', kind: 'pr-review' });
+  assert.equal(ledger.getFeature('lifecycle').status, 'draft');
+  assert.equal(ledger.setFeatureStatus('lifecycle', 'done').status, 'done');
+  assert.equal(ledger.getFeature('lifecycle').status, 'done');
+  assert.equal(ledger.setFeatureStatus('lifecycle', 'reworking').status, 'reworking');
+  assert.throws(() => ledger.setFeatureStatus('lifecycle', 'nonsense'), (e) => e.code === 'EUSER');
+});
+
 test('readiness math: 2 blockers + 1 major → 25 penalty → score 38, not-ready', () => {
   ledger.createFeature({ id: 'score', title: 'Score' });
   ledger.ingestRound('score', [

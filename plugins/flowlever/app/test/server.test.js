@@ -109,6 +109,102 @@ test('POST /review/apply accepts resolved (pr-review approve → will-post)', as
   assert.equal(byFp.get(target[0]).status, 'resolved');
 });
 
+test('POST /review/apply accepts posted (PR comment sent → reworking + postedAt stamp)', async () => {
+  const target = [fps()[2]];
+  const res = await fetch(`${base}/api/features/flow-feat/review/apply`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: target, status: 'posted' }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, 'posted');
+  const f = ledger.loadLedger('flow-feat').findings.find((x) => x.fp === target[0]);
+  assert.equal(f.status, 'reworking', 'posted stays open for the re-review reconcile');
+  assert.ok(f.postedAt, 'carries a postedAt stamp');
+});
+
+test('GET /api/home counts posted findings separately, not as reworking/toReview', async () => {
+  const home = await (await fetch(`${base}/api/home`)).json();
+  const row = home.find((r) => r.id === 'flow-feat');
+  assert.ok(row, 'flow-feat is in the inbox');
+  assert.ok(row.counts.posted >= 1, 'posted findings are counted under posted');
+});
+
+test('POST /features/:id/activity flips authorResponded; summaries carry it', async () => {
+  // post a comment first so the workspace is "awaiting author"
+  await fetch(`${base}/api/features/flow-feat/review/apply`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: [fps()[0]], status: 'posted' }),
+  });
+  const resp = await fetch(`${base}/api/features/flow-feat/activity`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authorResponded: true, note: '2 new replies' }),
+  });
+  assert.equal(resp.status, 200);
+  const feat = await resp.json();
+  assert.ok(feat.review.authorRespondedAt, 'authorRespondedAt is set');
+  assert.equal(feat.review.note, '2 new replies');
+
+  const all = await (await fetch(`${base}/api/features`)).json();
+  const row = all.find((r) => r.id === 'flow-feat');
+  assert.equal(row.authorResponded, true);
+  assert.equal(row.awaitingAuthor, true);
+
+  // clearing returns to waiting
+  const cleared = await fetch(`${base}/api/features/flow-feat/activity`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authorResponded: false }),
+  });
+  assert.equal((await cleared.json()).review.authorRespondedAt, null);
+});
+
+test('POST /features/:id/status marks done / reopens; home carries status', async () => {
+  const done = await fetch(`${base}/api/features/flow-feat/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'done' }),
+  });
+  assert.equal(done.status, 200);
+  assert.equal((await done.json()).status, 'done');
+
+  const home = await (await fetch(`${base}/api/home`)).json();
+  assert.equal(home.find((r) => r.id === 'flow-feat').status, 'done', 'home payload carries status');
+
+  const bad = await fetch(`${base}/api/features/flow-feat/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'nonsense' }),
+  });
+  assert.equal(bad.status, 400, 'invalid status rejected');
+
+  // reopen so later assertions see a live workspace
+  await fetch(`${base}/api/features/flow-feat/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'reworking' }),
+  });
+});
+
+test('POST /findings/:fp persists a triage decision (approve/edit) and clears on null', async () => {
+  const fp = fps()[1];
+  const approved = await fetch(`${base}/api/features/flow-feat/findings/${fp}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+  assert.equal(approved.status, 200);
+  assert.equal((await approved.json()).decision, 'approve');
+
+  // edit body + decision together
+  await fetch(`${base}/api/features/flow-feat/findings/${fp}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ suggestion: 'Edited.', decision: 'edit' }),
+  });
+  assert.equal(ledger.loadLedger('flow-feat').findings.find((f) => f.fp === fp).decision, 'edit');
+
+  // null clears it
+  const cleared = await fetch(`${base}/api/features/flow-feat/findings/${fp}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: null }),
+  });
+  assert.equal((await cleared.json()).decision, undefined);
+});
+
 test('POST /findings/:fp with suggestion edits the proposed comment body', async () => {
   const target = fps()[1];
   const res = await fetch(`${base}/api/features/flow-feat/findings/${target}`, {

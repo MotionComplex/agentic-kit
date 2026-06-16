@@ -105,6 +105,8 @@ function handleFeatureList(res, kindFilter) {
       const rounds = (ledger.loadRounds(f.id).rounds) || [];
       if (rounds.length) lastRoundAt = rounds[rounds.length - 1].at;
     } catch { /* no rounds yet */ }
+    const findings = (ledger.loadLedger(f.id).findings) || [];
+    const awaitingAuthor = findings.some((fd) => fd.postedAt && (fd.status === 'open' || fd.status === 'reworking'));
     return {
       id: f.id,
       title: f.title,
@@ -115,6 +117,9 @@ function handleFeatureList(res, kindFilter) {
       sourceCounts,
       lastRoundAt,
       readiness,
+      awaitingAuthor,                                          // has posted, unaddressed comments
+      authorResponded: !!(f.review && f.review.authorRespondedAt),
+      reviewNote: (f.review && f.review.note) || null,
     };
   });
   sendJson(res, 200, summaries);
@@ -127,19 +132,28 @@ function handleHome(res) {
   const features = ledger.listFeatures() || [];
   const rows = features.map((f) => {
     const findings = (ledger.loadLedger(f.id).findings) || [];
-    const counts = { toReview: 0, open: 0, reworking: 0, resolved: 0, waived: 0 };
+    const counts = { toReview: 0, open: 0, reworking: 0, posted: 0, resolved: 0, waived: 0 };
     for (const fd of findings) {
+      const live = fd.status === 'open' || fd.status === 'reworking';
+      // Posted findings are awaiting the author, not the reviewer: count them under `posted`,
+      // never as `reworking` or `toReview`, so the inbox stops re-surfacing what's already out.
+      if (live && fd.postedAt) { counts.posted += 1; continue; }
       if (counts[fd.status] !== undefined) counts[fd.status] += 1;
-      if ((fd.status === 'open' || fd.status === 'reworking') && fd.draft) counts.toReview += 1;
+      if (live && fd.draft) counts.toReview += 1;
     }
     let readiness = { score: 0, gate: 'in-progress' };
     try {
       const r = ledger.readiness(f.id);
       readiness = { score: r.score, gate: r.gate };
     } catch { /* feature without ledger yet */ }
-    return { id: f.id, title: f.title, kind: f.kind || 'spec', readiness, counts };
+    return {
+      id: f.id, title: f.title, kind: f.kind || 'spec', status: f.status, readiness, counts,
+      authorResponded: !!(f.review && f.review.authorRespondedAt),
+    };
   });
   rows.sort((a, b) =>
+    // Completed workspaces sink to the bottom of the inbox.
+    (Number(a.status === 'done') - Number(b.status === 'done')) ||
     (b.counts.toReview - a.counts.toReview) ||
     (b.counts.open - a.counts.open) ||
     (b.counts.reworking - a.counts.reworking) ||
@@ -157,6 +171,41 @@ function handleFeatureDetail(res, id) {
   });
 }
 
+// Set a workspace's lifecycle status — used by the "Mark review complete" / "Reopen"
+// buttons (status:'done' / status:'reworking').
+async function handleFeatureStatus(req, res, id) {
+  const body = await readJsonBody(req);
+  if (typeof body.status !== 'string') return sendError(res, 400, 'Body must include a status string');
+  try {
+    const feature = ledger.setFeatureStatus(id, body.status);
+    sendJson(res, 200, feature);
+  } catch (e) {
+    sendError(res, e.code === 'EUSER' ? 400 : 500, e.message);
+  }
+}
+
+// The "waiting on author" tracker. The /flowlever:watch runner POSTs here when it detects new
+// author activity on the PR (authorResponded:true + a note), or the UI clears it on re-review.
+async function handleFeatureActivity(req, res, id) {
+  const body = await readJsonBody(req);
+  const patch = {};
+  if (body.authorResponded !== undefined) {
+    patch.authorRespondedAt = body.authorResponded ? (typeof body.at === 'string' ? body.at : new Date().toISOString()) : null;
+    if (!body.authorResponded) patch.note = null;
+  }
+  if (body.note !== undefined) patch.note = body.note;
+  if (body.lastPostedAt !== undefined) patch.lastPostedAt = body.lastPostedAt;
+  if (Object.keys(patch).length === 0) {
+    return sendError(res, 400, 'Body must include authorResponded, note and/or lastPostedAt');
+  }
+  try {
+    const feature = ledger.setFeatureReview(id, patch);
+    sendJson(res, 200, feature);
+  } catch (e) {
+    sendError(res, e.code === 'EUSER' ? 400 : 500, e.message);
+  }
+}
+
 async function handleFindingUpdate(req, res, id, fp) {
   const body = await readJsonBody(req);
   let finding;
@@ -165,14 +214,19 @@ async function handleFindingUpdate(req, res, id, fp) {
   if (body.suggestion !== undefined) {
     finding = ledger.setFindingDetails(id, fp, { suggestion: body.suggestion, by: 'user' });
   }
+  // The reviewer's triage decision (approve/edit, or null to undo) — persisted so the board,
+  // stepper and Post screen agree and survive a refresh. A status change (below) clears it.
+  if (body.decision !== undefined) {
+    finding = ledger.setFindingDecision(id, fp, body.decision, { by: 'user' });
+  }
   const change = { by: 'user' };
   if (body.status !== undefined) change.status = body.status;
   if (body.reason !== undefined) change.reason = body.reason;
   if (body.pinned !== undefined) change.pinned = body.pinned;
   if (change.status !== undefined || change.pinned !== undefined) {
     finding = ledger.setFindingStatus(id, fp, change);
-  } else if (body.suggestion === undefined) {
-    return sendError(res, 400, 'Body must include status, pinned and/or suggestion');
+  } else if (body.suggestion === undefined && body.decision === undefined) {
+    return sendError(res, 400, 'Body must include status, pinned, suggestion and/or decision');
   }
   sendJson(res, 200, finding);
 }
@@ -210,9 +264,10 @@ async function handleDraftReview(req, res, id, fp) {
 // (additive — the finish screen reflects in-flight work without touching Confluence/ADO).
 // Validated up front so the operation is all-or-nothing: every fp must exist and the
 // target status must be in the small allowlist before any write happens.
-// `reworking` = spec rework in-flight; `resolved` = a PR-review comment approved
-// to post / a thread answered (set when the finish screen posts back to the PR).
-const REVIEW_APPLY_STATUSES = ['reworking', 'resolved'];
+// `reworking` = spec rework in-flight; `resolved` = a PR-review comment / thread closed
+// without needing the author; `posted` = a PR comment/reply sent back to the PR (stays
+// reworking + stamped postedAt → "awaiting author", auto-resolves on re-review).
+const REVIEW_APPLY_STATUSES = ['reworking', 'resolved', 'posted'];
 
 async function handleReviewApply(req, res, id) {
   const body = await readJsonBody(req);
@@ -228,7 +283,9 @@ async function handleReviewApply(req, res, id) {
   const missing = [...new Set(fps)].filter((fp) => !existing.has(fp));
   if (missing.length) return sendError(res, 400, `unknown finding(s): ${missing.join(', ')}`);
 
-  const findings = [...new Set(fps)].map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user' }));
+  const findings = status === 'posted'
+    ? ledger.markPosted(id, [...new Set(fps)], { by: 'user' })
+    : [...new Set(fps)].map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user' }));
   sendJson(res, 200, { updated: findings.length, status, findings });
 }
 
@@ -354,6 +411,12 @@ async function route(req, res) {
     }
     if (parts.length === 5 && parts[3] === 'review' && parts[4] === 'apply' && req.method === 'POST') {
       return handleReviewApply(req, res, parts[2]);
+    }
+    if (parts.length === 4 && parts[3] === 'status' && req.method === 'POST') {
+      return handleFeatureStatus(req, res, parts[2]);
+    }
+    if (parts.length === 4 && parts[3] === 'activity' && req.method === 'POST') {
+      return handleFeatureActivity(req, res, parts[2]);
     }
   }
   if (parts[1] === 'requests') {

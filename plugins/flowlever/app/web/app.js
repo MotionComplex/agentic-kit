@@ -77,6 +77,7 @@ const state = {
   // (accept/edit/redirect/waive/skip) — the actual edits persist via the draft
   // review API, this just records which path the reviewer chose.
   flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null },
+  section: { kind: null, features: [] },   // cached cards for the open PR section, re-bound to live jobs each poll
 };
 const current = { view: null, id: null, tab: null };
 let routeSeq = 0;
@@ -214,6 +215,7 @@ function computeReadiness(findings) {
   let penalty = 0;
   for (const f of findings || []) {
     if (f.status !== 'open' && f.status !== 'reworking') continue;
+    if (isPosted(f)) continue;   // posted = awaiting author, not open reviewer work → no penalty
     if (openBySeverity[f.severity] != null) openBySeverity[f.severity]++;
     penalty += SEVERITY_WEIGHTS[f.severity] ?? 0;
   }
@@ -254,6 +256,32 @@ function dialEl(score, gate, size, extraClass = '') {
     (n > 0.5 ? `<path class="dial-prog" d="${arcPath(cx, cy, r, start, end)}"/>` : '') +
     `</svg><div class="dial-num">${Math.round(n)}</div>`;
   return wrap;
+}
+
+/* "Mark review complete" / "Reopen" — sets the workspace's lifecycle status to `done`
+ * (or back to `reworking`). A done workspace reads as completed everywhere: a green check
+ * in the header, a done chip on its card, and it drops out of the "needs you" inbox. */
+function completeControl(feature) {
+  const done = feature.status === 'done';
+  return h('button', {
+    class: `btn btn-complete ${done ? 'is-done' : ''}`.trim(), type: 'button',
+    title: done ? 'Reopen this review (back to in-progress)' : 'Mark this review complete — it shows as done and leaves the inbox',
+    onclick: () => setFeatureStatus(done ? 'reworking' : 'done'),
+  }, done ? '↩ Reopen review' : '✓ Mark review complete');
+}
+
+async function setFeatureStatus(status) {
+  try {
+    await api(`/api/features/${encodeURIComponent(current.id)}/status`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    await loadDetail(current.id, true);
+    rerenderDetail();
+    toast(status === 'done' ? 'Review marked complete' : 'Review reopened', 'success');
+  } catch (e) {
+    toast(`Could not update status: ${e.message}`);
+  }
 }
 
 function statusChip(status) {
@@ -410,9 +438,44 @@ function renderGuide() {
 function hasSuggestion(f) {
   return typeof f.suggestion === 'string' && f.suggestion.trim() !== '';
 }
+/* A finding whose comment/reply has been posted back to the PR: it stays open/reworking
+ * (so a re-review reconciles it) but is "awaiting the author", not the reviewer — it sits in
+ * its own lane and is NOT re-counted as something to review. */
+function isPosted(f) {
+  return Boolean(f.postedAt) && (f.status === 'open' || f.status === 'reworking');
+}
 function reviewableFindings(findings) {
   return (findings || []).filter((f) =>
-    (f.status === 'open' || f.status === 'reworking') && (f.draft || hasSuggestion(f)));
+    (f.status === 'open' || f.status === 'reworking') && !isPosted(f) && (f.draft || hasSuggestion(f)));
+}
+function postedFindings(findings) {
+  return (findings || []).filter(isPosted);
+}
+
+/* The post-posting wait state for a PR workspace: 'waiting' (comments out, nothing to do
+ * but wait), 'responded' (the runner saw new author replies/commits — time to re-review), or
+ * null (not a PR, or still has things to review/post). Drives the loop + CTA framing. */
+function reviewWait(data) {
+  const kind = data.feature && data.feature.kind;
+  if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
+  const findings = (data.ledger && data.ledger.findings) || [];
+  if (reviewableFindings(findings).length) return null;   // still stuff to triage/post
+  if (!postedFindings(findings).length) return null;       // nothing posted → not waiting
+  return data.feature.review && data.feature.review.authorRespondedAt ? 'responded' : 'waiting';
+}
+
+/* Build the review-flow decision map from PERSISTED finding state, so a decision taken on
+ * ANY surface (board modal or the stepper) shows everywhere and survives a page refresh:
+ * a waived finding reads as Dismissed, a stored `decision` as Approve/Edit, the rest
+ * Undecided. The in-memory flow map is just a cache hydrated from this. */
+function hydrateDecisions(findings) {
+  const d = {};
+  for (const f of findings || []) {
+    if (f.status === 'waived') d[f.fp] = { kind: 'waive', reason: f.statusReason || '' };
+    else if (f.decision === 'approve') d[f.fp] = { kind: 'accept' };
+    else if (f.decision === 'edit') d[f.fp] = { kind: 'edit' };
+  }
+  return d;
 }
 
 /* Canonical loop stages keyed independent of label, so a kind can rename them.
@@ -432,6 +495,9 @@ function loopActiveStage(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
   if (!findings.length) return 'fetch';
   if (reviewableFindings(findings).length) return 'review';
+  // Nothing left to review/post. If comments are already posted, the live step is the
+  // re-review (reconcile the author's response); otherwise it's still the post/apply step.
+  if (postedFindings(findings).length) return 'reaudit';
   return 'apply';
 }
 
@@ -441,13 +507,32 @@ function loopStrip(data, rightEl) {
   const kind = (data.feature && data.feature.kind) || 'spec';
   const stages = LOOP_STAGES_BY_KIND[kind] || LOOP_STAGES_BY_KIND.spec;
   const activeIdx = STAGE_KEYS.indexOf(loopActiveStage(data));
+  const isPr = kind === 'pr-review' || kind === 'pr-respond';
+  const canReReview = isPr && !!prNumber(data.feature);
+  const wait = reviewWait(data);   // null | 'waiting' | 'responded'
   const els = [];
   stages.forEach(([ix, label], i) => {
     if (i) els.push(h('span', { class: 'loop-sep' }, '→'));
-    // Never light the trailing re-audit/(re-run) stage — it's the next step, not "now".
-    const active = i === activeIdx && i < 3;
-    els.push(h('div', { class: `loop-stage ${active ? 'active' : ''}` },
-      h('span', { class: 'loop-ix' }, ix), label));
+    // The trailing stage lights once comments are posted. While waiting on the author it's a
+    // passive "Waiting" chip; once the runner sees a response it becomes a Re-review action.
+    // It stays clickable in both (re-review anyway) for a PR with a known number.
+    const active = i === activeIdx;
+    const onLast = i === 3 && active;
+    const clickable = onLast && canReReview;
+    let stageLabel = label;
+    let stateCls = '';
+    if (onLast && wait === 'responded') { stageLabel = '↻ Re-review'; stateCls = 'loop-stage-action'; }
+    else if (onLast && wait === 'waiting') { stageLabel = '⏳ Waiting'; stateCls = 'loop-stage-waiting'; }
+    els.push(h('div', {
+      class: `loop-stage ${active ? 'active' : ''} ${stateCls}`.trim(),
+      role: clickable ? 'button' : undefined,
+      tabindex: clickable ? '0' : undefined,
+      title: clickable
+        ? (wait === 'responded' ? 'Author responded — re-review and reconcile' : 'Waiting on the author — click to re-review anyway')
+        : undefined,
+      onclick: clickable ? () => reReviewPr(data) : undefined,
+      onkeydown: clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reReviewPr(data); } } : undefined,
+    }, h('span', { class: 'loop-ix' }, ix), stageLabel));
   });
   return h('div', { class: 'loop-strip' },
     h('div', { class: 'loop-stages' }, els),
@@ -483,6 +568,30 @@ function reviewCta(data) {
       `Nothing to review — ${plural(openNone, 'open finding', 'open findings')} without ${noun}`);
   }
   if (kind === 'pr-review' || kind === 'pr-respond') {
+    // Once comments are posted the work is OUT — the workspace waits on the author. It stays in
+    // a passive "Waiting on author" state until the runner detects a reply/commit (or you act
+    // manually); only then does it surface a prominent Re-review.
+    const wait = reviewWait(data);
+    if (wait) {
+      const posted = postedFindings(findings).length;
+      const prNum = prNumber(data.feature);
+      const target = prNum ? `PR #${prNum}` : 'the PR';
+      const canReReview = !!prNum;
+      const reBtn = (cls, label) => canReReview ? h('button', {
+        class: cls, type: 'button',
+        title: 'Re-fetch the PR and reconcile the author’s response into this ledger',
+        onclick: () => reReviewPr(data),
+      }, label) : null;
+      if (wait === 'responded') {
+        const note = data.feature.review && data.feature.review.note;
+        return h('div', { class: 'review-cta-done is-responded' },
+          h('span', {}, `● Author responded on ${target}${note ? ` — ${note}` : ''}`),
+          reBtn('review-cta review-cta-rereview is-hot', '↻ Re-review'));
+      }
+      return h('div', { class: 'review-cta-done is-waiting' },
+        h('span', {}, `⏳ Waiting on author — ${plural(posted, 'comment', 'comments')} posted to ${target}`),
+        reBtn('review-cta-link', 'Re-review anyway'));
+    }
     return h('div', { class: 'review-cta-done is-ready' }, '✓ All reviewed — ready to post');
   }
   const gate = (data.readiness && data.readiness.gate) || 'in-progress';
@@ -569,7 +678,7 @@ function initFlow(data) {
   if (state.flow.featureId !== current.id || !Array.isArray(state.flow.items)) {
     state.flow = {
       active: true, finish: false, featureId: current.id,
-      items: reviewable.map((f) => f.fp), idx: 0, decisions: {}, waiving: null, editingComment: null,
+      items: reviewable.map((f) => f.fp), idx: 0, decisions: hydrateDecisions(findings), waiving: null, editingComment: null,
     };
   }
   const len = state.flow.items.length;
@@ -613,7 +722,7 @@ function ensureFlow() {
   state.flow = {
     active: false, finish: false, featureId: current.id,
     items: reviewableFindings(findings).map((f) => f.fp),
-    idx: 0, decisions: {}, waiving: null, editingComment: null,
+    idx: 0, decisions: hydrateDecisions(findings), waiving: null, editingComment: null,
   };
 }
 
@@ -766,14 +875,15 @@ function commentEditForm(kind, f) {
  * mark the finding Approved (edited), and close the editor. */
 async function saveComment(fp, val) {
   const f = findFinding(fp);
-  if (f) f.suggestion = val;            // optimistic
+  if (f) { f.suggestion = val; f.decision = 'edit'; }   // optimistic
   setFlowDecision(fp, 'edit');
   state.flow.editingComment = null;
   reviewRefresh();
   try {
+    // Persist the edited body AND the edit decision together, so the approval is durable.
     await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ suggestion: val }),
+      body: JSON.stringify({ suggestion: val, decision: 'edit' }),
     });
     await loadDetail(current.id, true);
   } catch (e) {
@@ -841,10 +951,23 @@ function decisionRow(data, f) {
     : row;
 }
 
-function undecide(f) {
+async function undecide(f) {
   delete state.flow.decisions[f.fp];
   state.flow.waiving = null;
   state.flow.editingComment = null;
+  reviewRefresh();
+  // Clear the persisted decision too: a dismissed (waived) finding is reopened; an
+  // approve/edit marker is simply removed. Keeps every surface in sync.
+  try {
+    const body = f.status === 'waived' ? { status: 'open' } : { decision: null };
+    await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(f.fp)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    await loadDetail(current.id, true);
+  } catch (e) {
+    toast(`Could not clear decision: ${e.message}`);
+  }
   reviewRefresh();
 }
 
@@ -914,15 +1037,18 @@ async function decide(data, f, kind) {
     requestAnimationFrame(() => { const ta = $('.comment-edit-ta'); if (ta) ta.focus(); });
     return;
   }
-  // pr-review: Dismiss is a one-tap decision (reason optional), then advance.
+  // pr-review: Dismiss is a one-tap decision (reason optional). Persist it as `waived`
+  // straight away so the card moves to the Waived lane and the decision survives a refresh.
   if (kind === 'waive' && cfg.quickDismiss) {
     setFlowDecision(fp, 'waive', { reason: '' });
+    await persistWaive(fp, 'dismissed');
     next();
     return;
   }
 
   if (kind === 'accept') {
     setFlowDecision(fp, 'accept');
+    await persistDecisionField(fp, 'approve');   // persist the approve so every surface agrees
     await acceptAll(f);
     next();
   } else if (kind === 'edit') {
@@ -944,6 +1070,40 @@ async function decide(data, f, kind) {
   } else if (kind === 'skip') {
     setFlowDecision(fp, 'skip');
     next();
+  }
+}
+
+/* Persist a triage decision (approve/edit, or null to clear) onto the finding so the board,
+ * stepper and Post screen stay in sync and it survives a refresh. Optimistic, then reloads. */
+async function persistDecisionField(fp, decision) {
+  const cur = findFinding(fp);
+  if (cur) { if (decision) cur.decision = decision; else delete cur.decision; }
+  try {
+    await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    });
+    await loadDetail(current.id, true);
+  } catch (e) {
+    toast(`Could not save decision: ${e.message}`);
+    try { await loadDetail(current.id, true); } catch { /* keep optimistic */ }
+  }
+}
+
+/* Dismiss = persist the finding as `waived` immediately (it moves to the Waived lane and the
+ * decision sticks across refreshes), rather than holding the decision only in the browser. */
+async function persistWaive(fp, reason) {
+  const cur = findFinding(fp);
+  if (cur) { cur.status = 'waived'; cur.statusReason = reason || 'dismissed'; }   // optimistic
+  try {
+    await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'waived', reason: reason || 'dismissed' }),
+    });
+    await loadDetail(current.id, true);
+  } catch (e) {
+    toast(`Could not dismiss: ${e.message}`);
+    try { await loadDetail(current.id, true); } catch { /* keep optimistic */ }
   }
 }
 
@@ -1147,19 +1307,21 @@ async function postBack(data, kind, verb) {
 }
 
 async function persistTriage(data) {
-  const resolveFps = [];
+  const postFps = [];
   const waiveItems = [];
   for (const fp of state.flow.items) {
     const k = flowDecisionKind(fp);
     if (k === 'skip') continue;                       // undecided → leave open
     if (k === 'waive') waiveItems.push({ fp, reason: (state.flow.decisions[fp] && state.flow.decisions[fp].reason) || 'dismissed' });
-    else resolveFps.push(fp);                          // accept / edit / redirect → will post
+    else postFps.push(fp);                             // accept / edit / redirect → posting back
   }
   try {
-    if (resolveFps.length) {
+    if (postFps.length) {
+      // Stamp them posted (awaiting author), NOT resolved: a posted comment stays open for the
+      // re-review reconcile, sits in its own lane, and stops being re-counted as "to review".
       await api(`/api/features/${encodeURIComponent(current.id)}/review/apply`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fps: resolveFps, status: 'resolved' }),
+        body: JSON.stringify({ fps: postFps, status: 'posted' }),
       });
     }
     for (const { fp, reason } of waiveItems) {
@@ -1171,6 +1333,39 @@ async function persistTriage(data) {
     await loadDetail(current.id, true);
   } catch (e) {
     toast(`Could not save triage: ${e.message}`);
+  }
+}
+
+/* Re-review: enqueue a fresh `pr-review` run for the SAME PR. The runner re-fetches the PR
+ * (the author's replies + any new commits) and re-ingests — reconciliation auto-resolves the
+ * findings the author addressed, keeps the ones still flagged, and inserts anything new. Same
+ * loop as a spec re-audit; stable `pr:<n>:<path>:<line>` loci keep fingerprints aligned. */
+async function reReviewPr(data) {
+  const feature = (data && data.feature) || (state.detail && state.detail.feature);
+  const prNum = prNumber(feature);
+  if (!prNum) { toast('Could not determine the PR number for this workspace'); return; }
+  try {
+    await api('/api/requests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // wsId pins the re-review to THIS workspace so it reconciles into the same ledger
+      // rather than spinning up a duplicate pr-<id>-<slug>.
+      body: JSON.stringify({ action: 'pr-review', prId: String(prNum), wsId: current.id, title: feature.title || null }),
+    });
+    toast(`Re-review of PR #${prNum} queued — the runner will reconcile the author’s response`, 'success');
+    // We're acting on the response now — clear the "author responded" flag (best-effort) so the
+    // workspace returns to waiting until the re-review lands.
+    try {
+      await api(`/api/features/${encodeURIComponent(current.id)}/activity`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ authorResponded: false }),
+      });
+      await loadDetail(current.id, true);
+      rerenderDetail();
+    } catch { /* non-fatal */ }
+    ensureApplyPolling();
+    pollRequestsNow();
+  } catch (e) {
+    toast(`Could not queue re-review: ${e.message}`);
   }
 }
 
@@ -1264,22 +1459,29 @@ function needsYouBits(c) {
   if (c.toReview) bits.push(`${c.toReview} to review`);
   if (c.reworking) bits.push(`${c.reworking} reworking`);
   if (!c.toReview && !c.reworking && c.open) bits.push(`${c.open} open`);
+  // Posted comments are awaiting the author — surface them so the inbox shows a PR is
+  // out for response (and can be re-reviewed), not silently "settled".
+  if (c.posted) bits.push(`${c.posted} posted`);
   return bits;
 }
 
 function inboxRow(r) {
-  const bits = needsYouBits(r.counts);
+  const done = r.status === 'done';
+  const bits = done ? [] : needsYouBits(r.counts);   // a completed workspace never nags
   const rd = r.readiness || { score: 0, gate: 'in-progress' };
-  const wrap = h('div', { class: 'ir-wrap' });
+  const wrap = h('div', { class: `ir-wrap ${done ? 'ir-done' : ''}`.trim() });
 
   const link = h('a', { class: 'inbox-row', href: `#/feature/${encodeURIComponent(r.id)}` },
     dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
     h('div', { class: 'ir-main' },
-      h('div', { class: 'ir-top' }, kindBadge(r.kind), h('span', { class: 'ir-title' }, r.title || r.id)),
+      h('div', { class: 'ir-top' }, kindBadge(r.kind), h('span', { class: 'ir-title' }, r.title || r.id),
+        done ? h('span', { class: 'chip status-done ir-done-chip' }, 'done') : null),
       h('div', { class: 'ir-needs' },
-        bits.length
-          ? bits.map((b) => h('span', { class: 'ir-bit' }, b))
-          : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you'))),
+        done
+          ? h('span', { class: 'ir-clear' }, '✓ Review complete')
+          : bits.length
+            ? bits.map((b) => h('span', { class: 'ir-bit' }, b))
+            : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you'))),
     h('span', { class: 'ir-arrow', 'aria-hidden': 'true' }, '→'));
 
   const label = r.title || r.id;
@@ -1357,7 +1559,7 @@ async function renderHome() {
     return;
   }
 
-  const actionable = rows.filter((r) => needsYouBits(r.counts).length).length;
+  const actionable = rows.filter((r) => r.status !== 'done' && needsYouBits(r.counts).length).length;
   app.replaceChildren(
     h('div', { class: 'view-head' },
       h('h1', {}, 'Home'),
@@ -1450,46 +1652,60 @@ async function renderSection(kind) {
   if (!Array.isArray(features)) features = [];
 
   const isPr = kind === 'pr-review' || kind === 'pr-respond';
-  const gridZone = h('div', { id: 'features-grid-zone' },
-    features.length ? h('div', { class: 'features-grid' }, features.map(featureCard)) : sectionEmpty(kind));
+  state.section = { kind, features };
+  const gridZone = h('div', { id: 'features-grid-zone' }, sectionGrid(kind, features, []));
 
   app.replaceChildren(...[
     sectionHead(kind, features.length || null),
     isPr ? newRequestZone(kind) : null,
-    isPr ? requestsStripEl([]) : null,
     gridZone,
   ].filter(Boolean));
 
   if (isPr) startSectionRequestsPoll(kind);
 }
 
-/* Poll requests for a PR section: keep the strip in sync, and when a job newly
- * completes, refresh the features grid so the runner's new workspace card shows. */
+/* The cards for a section, with each workspace's live job folded onto its card and a
+ * placeholder card for any in-flight review whose workspace doesn't exist yet. No
+ * separate jobs strip — the status lives on the card it belongs to. */
+function sectionGrid(kind, features, requests) {
+  const live = (requests || []).filter(isLiveJob);
+  const used = new Set();
+  const cards = features.map((f) => {
+    const job = jobForFeature(f, live);
+    if (job) used.add(job.id);
+    return featureCard(f, job);
+  });
+  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, shown first.
+  const pending = live
+    .filter((r) => r.action === kind && r.prId && !used.has(r.id))
+    .sort((a, b) => jobRank(b) - jobRank(a))
+    .map(pendingJobCard);
+  const all = [...pending, ...cards];
+  return all.length ? h('div', { class: 'features-grid' }, all) : sectionEmpty(kind);
+}
+
+/* Poll requests for a PR section: rebind jobs to cards every tick, and when a job
+ * newly completes, refetch features so the runner's new/updated workspace card shows. */
 function startSectionRequestsPoll(kind) {
   let lastDone = new Set();
-  startPolling(`section:${kind}`, (reqs) => {
+  startPolling(`section:${kind}`, async (reqs) => {
     if (current.view !== 'section' || current.kind !== kind) return;
-    const rel = reqs.filter((r) => r.action === kind);
-    populateRequestsStrip($('#requests-strip'), rel,
-      `No ${REQ_ACTION_LABEL[kind].toLowerCase()} jobs yet — “+ New ${REQ_ACTION_LABEL[kind]}” enqueues one for the runner.`);
+    // Jobs relevant to this section: same-kind reviews + apply jobs targeting its workspaces.
+    const wsIds = new Set(state.section.features.map((f) => f.id));
+    const rel = reqs.filter((r) => r.action === kind || (r.action === 'apply' && r.wsId && wsIds.has(r.wsId)));
     const doneIds = new Set(rel.filter((r) => r.status === 'done').map((r) => r.id));
     let newlyDone = false;
     doneIds.forEach((id) => { if (!lastDone.has(id)) newlyDone = true; });
     lastDone = doneIds;
-    if (newlyDone) refreshSectionGrid(kind);
+    if (newlyDone) {
+      try {
+        const fresh = await api(`/api/features?kind=${encodeURIComponent(kind)}`);
+        if (Array.isArray(fresh) && current.view === 'section' && current.kind === kind) state.section.features = fresh;
+      } catch { /* keep cache */ }
+    }
+    const zone = $('#features-grid-zone');
+    if (zone) zone.replaceChildren(sectionGrid(kind, state.section.features, rel));
   });
-}
-
-async function refreshSectionGrid(kind) {
-  let features;
-  try { features = await api(`/api/features?kind=${encodeURIComponent(kind)}`); } catch { return; }
-  if (current.view !== 'section' || current.kind !== kind) return;
-  const zone = $('#features-grid-zone');
-  if (!zone) return;
-  if (!Array.isArray(features)) features = [];
-  zone.replaceChildren(features.length
-    ? h('div', { class: 'features-grid' }, features.map(featureCard))
-    : sectionEmpty(kind));
 }
 
 function summaryReadiness(f) {
@@ -1523,7 +1739,7 @@ function lastRoundDate(f) {
   return fmtDate(at);
 }
 
-function featureCard(f) {
+function featureCard(f, job) {
   const r = summaryReadiness(f);
   const kind = f.kind || 'spec';
   const metaBits = [];
@@ -1535,7 +1751,12 @@ function featureCard(f) {
   const lr = lastRoundDate(f);
   metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
 
-  const card = h('a', { class: 'card feature-card', href: `#/feature/${encodeURIComponent(f.id)}` },
+  // A re-run on a workspace that already has findings reads as "re-reviewing".
+  const hasFindings = (r.openBySeverity && Object.values(r.openBySeverity).some(Boolean))
+    || (f.lastRoundAt || (f.rounds && f.rounds.length));
+  const busyClass = job ? ` fc-busy fc-busy-${cssSafe(job.needsInput && job.status !== 'error' ? 'needs' : job.status)}` : '';
+
+  const card = h('a', { class: `card feature-card ${f.status === 'done' ? 'fc-done' : ''}${busyClass}`.trim(), href: `#/feature/${encodeURIComponent(f.id)}` },
     h('div', { class: 'fc-top' },
       h('div', { class: 'fc-titlewrap' },
         h('div', { class: 'fc-title' }, f.title || f.id),
@@ -1543,6 +1764,7 @@ function featureCard(f) {
       ),
       dialEl(r.score, r.gate, 64, 'dial-sm'),
     ),
+    job ? cardJobRow(job, hasFindings) : (f.awaitingAuthor ? cardReviewRow(f) : null),
     sevCountsRow(r.openBySeverity),
     h('div', { class: 'fc-meta' }, metaBits),
   );
@@ -1596,6 +1818,100 @@ const REQ_STATUS = {
   error:   { glyph: '✗', label: 'Error' },
 };
 const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR' };
+
+/* ---- live job ↔ card binding ----------------------------------------------
+ * Instead of a separate "jobs" strip duplicating the cards, the active request
+ * for a workspace is folded onto its card (and a brand-new review with no
+ * workspace yet gets its own "pending" card). These helpers correlate them. */
+
+// A job worth surfacing on a card: still in flight, blocked on the user, or failed.
+// `done` jobs are not shown — the finished workspace card speaks for itself.
+function isLiveJob(r) {
+  return r.status === 'queued' || r.status === 'running' || r.status === 'error' || !!r.needsInput;
+}
+// Higher = more urgent, so a card shows the most important job when several match.
+function jobRank(r) {
+  if (r.needsInput && r.status !== 'done' && r.status !== 'error') return 4;
+  if (r.status === 'error') return 3;
+  if (r.status === 'running') return 2;
+  return 1; // queued
+}
+// The live job acting on this workspace: an apply/re-run targeting its id, or a
+// pr-review/pr-respond for the same PR number. Most-urgent wins.
+function jobForFeature(f, jobs) {
+  const pr = prNumber(f);
+  const mine = jobs.filter((r) =>
+    (r.wsId && r.wsId === f.id) ||
+    ((r.action === 'pr-review' || r.action === 'pr-respond') && r.prId && pr && String(r.prId) === String(pr)));
+  return mine.sort((a, b) => jobRank(b) - jobRank(a))[0] || null;
+}
+// What the runner is doing, in card language. `existing` ⇒ a re-run on a workspace
+// that already has findings (re-review) rather than a first pass.
+function jobVerb(job, existing) {
+  if (job.action === 'apply') return 'Posting to PR';
+  if (job.action === 'pr-review') return existing ? 'Re-reviewing' : 'Reviewing';
+  if (job.action === 'pr-respond') return existing ? 'Re-checking threads' : 'Responding';
+  return REQ_ACTION_LABEL[job.action] || job.action;
+}
+
+// The status line shown on a busy card: spinner + verb + live phase, an amber
+// "needs your input" note, or a red error note (with a dismiss).
+function cardJobRow(job, existing) {
+  const meta = REQ_STATUS[job.status] || REQ_STATUS.queued;
+  const needsInput = !!job.needsInput && job.status !== 'done' && job.status !== 'error';
+  const verb = jobVerb(job, existing);
+  const phase = job.status === 'running' && job.phase ? ` · ${job.phase}` : '';
+  const stateClass = needsInput ? 'needs' : job.status;
+  const rows = [
+    h('div', { class: 'fc-job-line' },
+      h('span', { class: `req-glyph req-glyph-${cssSafe(needsInput ? 'running' : job.status)} ${meta.spin || needsInput ? 'req-spin' : ''}`.trim() },
+        needsInput ? REQ_STATUS.running.glyph : meta.glyph),
+      h('span', { class: 'fc-job-verb' }, needsInput ? verb : verb + (job.status === 'queued' ? ' · queued' : phase))),
+  ];
+  if (needsInput) {
+    rows.push(h('div', { class: 'fc-job-needs', role: 'alert' },
+      h('span', { 'aria-hidden': 'true' }, '⚠ '), job.note || 'Waiting on you to continue.'));
+  } else if (job.status === 'error' && job.note) {
+    rows.push(h('div', { class: 'fc-job-err' }, job.note));
+  }
+  // Only a failed job is dismissible from the card (a running one can't be cancelled here).
+  const dismiss = job.status === 'error'
+    ? h('button', { class: 'btn-icon fc-job-dismiss', type: 'button', title: 'Dismiss this failed job',
+        'aria-label': 'Dismiss failed job',
+        onclick: async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          try { await api(`/api/requests/${encodeURIComponent(job.id)}`, { method: 'DELETE' }); pollRequestsNow(); }
+          catch (err) { toast(`Dismiss failed: ${err.message}`); }
+        } }, '×')
+    : null;
+  return h('div', { class: `fc-job fc-job-${cssSafe(stateClass)}` }, h('div', { class: 'fc-job-body' }, rows), dismiss);
+}
+
+// The post-posting wait state on a settled card (no job running): a passive "Waiting on
+// author" line, or a highlighted "Author responded" once the runner detected a reply/commit.
+function cardReviewRow(f) {
+  if (f.authorResponded) {
+    return h('div', { class: 'fc-review fc-review-responded' },
+      h('span', { class: 'fc-review-dot' }, '●'),
+      h('span', {}, 'Author responded', f.reviewNote ? h('span', { class: 'meta-dim' }, ` — ${f.reviewNote}`) : null,
+        ' · re-review'));
+  }
+  return h('div', { class: 'fc-review fc-review-waiting' }, '⏳ Waiting on author');
+}
+
+// A workspace doesn't exist yet (a first review still running): show a placeholder
+// card so the work is visible exactly where its real card will land.
+function pendingJobCard(job) {
+  const title = job.title || `PR ${job.prId}`;
+  return h('div', { class: 'card feature-card fc-pending' },
+    h('div', { class: 'fc-top' },
+      h('div', { class: 'fc-titlewrap' },
+        h('div', { class: 'fc-title' }, title),
+        h('div', {}, h('span', { class: 'chip status-auditing' }, 'starting…'))),
+      h('div', { class: 'fc-pending-dial', 'aria-hidden': 'true' }, '—')),
+    cardJobRow(job, false),
+    job.instructions ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
+}
 
 /* One shared poller. `scope` lets a re-render (e.g. the finish screen) reuse the
  * running interval instead of resetting it; `token` invalidates in-flight fetches
@@ -1932,6 +2248,7 @@ function detailView(data, tab) {
           h('div', { class: `dh-blocking ${blockers > 0 ? 'hot' : ''}` },
             blockers > 0 ? `${plural(blockers, 'blocker', 'blockers')} blocking` : 'nothing blocking'),
           h('div', { class: 'meta-dim num-line' }, `${totalOpen} open total`),
+          completeControl(feature),
         ),
       ),
     ),
@@ -2850,9 +3167,22 @@ function renderBoard() {
 function buildBoard(board, findings) {
   const filtered = findings.filter(matchesFilters);
   const sevRank = (s) => { const i = SEV_ORDER.indexOf(s); return i === -1 ? SEV_ORDER.length : i; };
-  board.replaceChildren(...STATUS_COLS.map((col) => {
+  // Posted findings (comment sent, awaiting author) are reworking under the hood but get their
+  // own lane so they read as "out, not in-progress". Inserted after Reworking, PR kinds only.
+  const kind = (state.detail && state.detail.feature && state.detail.feature.kind) || 'spec';
+  const isPr = kind === 'pr-review' || kind === 'pr-respond';
+  const cols = [];
+  for (const col of STATUS_COLS) {
+    cols.push(col);
+    if (isPr && col.key === 'reworking') cols.push({ key: 'posted', label: 'Posted — awaiting author' });
+  }
+  const inCol = (f, key) => key === 'posted'
+    ? isPosted(f)
+    : f.status === key && !(isPr && isPosted(f));   // posted findings leave the Reworking lane
+  board.classList.toggle('board-pr', isPr);          // 5-column grid (adds the Posted lane)
+  board.replaceChildren(...cols.map((col) => {
     const items = filtered
-      .filter((f) => f.status === col.key)
+      .filter((f) => inCol(f, col.key))
       .sort((a, b) => sevRank(a.severity) - sevRank(b.severity)
         || String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')));
     return h('section', { class: `col col-${col.key}` },
@@ -2894,6 +3224,7 @@ function findingCard(f) {
       f.dimension ? h('span', { class: 'dim-tag' }, f.dimension) : null,
       badge ? h('span', { class: `f-badge f-badge-${badge}` }, badge === 'new' ? 'NEW' : 'REGRESSED') : null,
       f.draft ? h('span', { class: 'f-draft-chip', title: 'Has a proposed change' }, '±') : null,
+      decisionChip(f),
       verdictChip(f),
       f.locus ? h('code', { class: 'f-locus' }, f.locus) : null,
     ),
@@ -2903,6 +3234,16 @@ function findingCard(f) {
 
 /* Board / header marker shown when a finding's proposal is overridden by a
  * redirect or reject verdict. Null for the default 'proposed' verdict. */
+/* Board chip for a persisted triage decision on a not-yet-posted PR comment, so the
+ * board shows "Will post" / "Edited" without opening the card. (Dismissed findings already
+ * move to the Waived lane; posted ones to the Posted lane.) */
+function decisionChip(f) {
+  if (isPosted(f) || f.status === 'waived') return null;
+  if (f.decision === 'approve') return h('span', { class: 'f-dec-chip dec-accept', title: 'Approved — will post' }, 'Will post');
+  if (f.decision === 'edit') return h('span', { class: 'f-dec-chip dec-edit', title: 'Edited — will post' }, 'Edited');
+  return null;
+}
+
 function verdictChip(f) {
   if (!f.draft) return null;
   const v = draftVerdict(f);
@@ -2951,15 +3292,27 @@ function actionsRow(f) {
   // and underlying state.flow the stepper uses, so the two agree. Spec/default
   // keeps the Reworking / Resolved / Waive / Pin lifecycle below.
   const kind = (state.detail && state.detail.feature && state.detail.feature.kind) || 'spec';
-  if (kind === 'pr-review' || kind === 'pr-respond') {
-    ensureFlow();
-    return decisionRow(state.detail, f);
-  }
   const btn = (label, body, cls = '') => h('button', {
     class: `btn ${cls}`.trim(),
     type: 'button',
     onclick: (e) => { e.stopPropagation(); doAction(f.fp, body); },
   }, label);
+  if (kind === 'pr-review' || kind === 'pr-respond') {
+    // A posted comment is past triage — it's awaiting the author. Offer manual override so it
+    // can be closed/resolved at any time (no author response needed) or reopened to re-comment,
+    // rather than the Approve/Edit/Dismiss triage row that only applies before posting.
+    if (isPosted(f)) {
+      const waiveBtnP = h('button', { class: 'btn', type: 'button',
+        onclick: (e) => { e.stopPropagation(); state.waiving = f.fp; refreshModal(); } }, '→ Dismiss');
+      return h('div', { class: 'f-actions' },
+        h('span', { class: 'f-posted-note meta-dim' }, 'Posted — awaiting author.'),
+        btn('✓ Mark resolved', { status: 'resolved' }, 'btn-good'),
+        btn('↺ Reopen (re-comment)', { status: 'open' }),
+        waiveBtnP);
+    }
+    ensureFlow();
+    return decisionRow(state.detail, f);
+  }
   const waiveBtn = h('button', {
     class: 'btn',
     type: 'button',

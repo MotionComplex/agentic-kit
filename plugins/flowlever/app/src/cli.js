@@ -19,12 +19,15 @@ Usage: node src/cli.js <command> [args]
   feature list [--json]                  List features (with readiness)
   feature show <id> [--json]             Show one feature in detail
   feature delete <id>                    Delete a workspace (features + ledger + rounds)
+  feature activity <id> --responded [--note "..."] | --clear   Mark/clear "author responded" on a posted PR review (runner)
   source add <featureId> --type confluence|ado|figma --id <id> [--title "..."] [--url <url>]
   ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]
                                          Ingest an audit round + reconcile ledger
   finding list <featureId> [--status open] [--dimension x] [--severity y] [--json]
   finding edit <featureId> <fp> [--detail "..."] [--suggestion "..."] [--severity blocker|major|minor|info] [--note "..."]
                                          Refine a finding's text/severity (fingerprint stays stable)
+  finding posted <featureId> --fps <fp>[,<fp>...]   Mark PR comment(s)/repl(ies) as posted back
+                                         (stays reworking + stamped "awaiting author"; re-review auto-resolves)
   finding set <featureId> <fp> --status open|reworking|resolved|waived
                                [--reason "..."] [--pin|--unpin]
   readiness <featureId> [--json]         Print score + gate + open blockers
@@ -51,7 +54,7 @@ function userError(msg) {
 
 // ---------- arg parsing (hand-rolled) ----------
 
-const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input']);
+const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -326,6 +329,32 @@ function cmdFindingSet({ pos, flags }) {
   console.log(`${glyph(finding.severity)} ${finding.fp}  ${finding.status}${finding.pinned ? ' 📌' : ''}  ${finding.title}`);
 }
 
+function cmdFeatureActivity({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const patch = {};
+  if (flags.responded) patch.authorRespondedAt = new Date().toISOString();
+  if (flags['no-responded'] || flags['clear']) { patch.authorRespondedAt = null; patch.note = null; }
+  if (flags.note !== undefined) patch.note = String(flags.note);
+  if (Object.keys(patch).length === 0) {
+    throw userError('Nothing to set: pass --responded [--note "..."], or --clear');
+  }
+  const feature = ledger.setFeatureReview(featureId, patch);
+  const r = feature.review || {};
+  console.log(`${feature.id}  author ${r.authorRespondedAt ? 'responded' : 'not responded'}${r.note ? `  — ${r.note}` : ''}`);
+}
+
+function cmdFindingPosted({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const raw = flags.fps !== undefined ? String(flags.fps) : pos.slice(1).join(',');
+  const fps = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!fps.length) throw userError('Pass the posted finding ids: --fps <fp>[,<fp>...] (or as positional args)');
+  const updated = ledger.markPosted(featureId, fps, { by: 'post' });
+  for (const f of updated) {
+    console.log(`${glyph(f.severity)} ${f.fp}  posted (awaiting author)  ${f.title}`);
+  }
+  console.log(`\n${updated.length} finding(s) marked posted`);
+}
+
 function cmdFindingEdit({ pos, flags }) {
   const featureId = need(pos[0], '<featureId>');
   const fp = need(pos[1], '<fp>');
@@ -483,10 +512,12 @@ async function run(argv) {
     case 'feature list': return cmdFeatureList(rest);
     case 'feature show': return cmdFeatureShow(rest);
     case 'feature delete': return cmdFeatureDelete(rest);
+    case 'feature activity': return cmdFeatureActivity(rest);
     case 'source add': return cmdSourceAdd(rest);
     case 'ingest': return cmdIngest(rest);
     case 'finding list': return cmdFindingList(rest);
     case 'finding set': return cmdFindingSet(rest);
+    case 'finding posted': return cmdFindingPosted(rest);
     case 'finding edit': return cmdFindingEdit(rest);
     case 'readiness': return cmdReadiness(rest);
     case 'report': return cmdReport(rest);

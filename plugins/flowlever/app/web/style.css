@@ -161,6 +161,13 @@ a { color: inherit; text-decoration: none; }
 .topnav a.active { color: var(--accent-text); background: var(--accent-soft); }
 
 main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
+/* The review cockpit (feature/PR detail + its board) breaks out of the centered column to
+   span the full viewport, so the status lanes use all the width and never wrap. Home and
+   Guide keep their readable centered width. */
+.detail {
+  width: 100vw; position: relative; left: 50%; margin-left: -50vw;
+  padding: 0 clamp(24px, 4vw, 64px); box-sizing: border-box;
+}
 
 /* ============================== guide ============================== */
 
@@ -236,6 +243,27 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .feature-card .dial { grid-row: span 2; align-self: center; }
 .feature-card .sev-counts { grid-column: 1 / -1; }
 
+/* Live job folded onto a workspace card — no separate jobs strip. */
+.fc-job { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 8px;
+  padding: 9px 11px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+  background: var(--panel-3); font-size: 12.5px; }
+.fc-job-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.fc-job-line { display: flex; align-items: center; gap: 8px; }
+.fc-job-verb { font-weight: 600; color: var(--fg); }
+.fc-job-needs { color: var(--major); font-weight: 540; }
+.fc-job-err { color: var(--del-fg); }
+.fc-job-dismiss { flex: none; }
+/* tint the card border by job state so a glance reads "busy / blocked / failed" */
+.fc-busy { border-color: var(--accent-line); }
+.fc-busy-error { border-color: var(--notready-line); }
+.fc-busy-needs .fc-job { border-color: var(--major-line); background: var(--major-soft); }
+.fc-busy-error .fc-job { border-color: var(--notready-line); background: var(--notready-soft); }
+/* placeholder card for a review whose workspace doesn't exist yet */
+.fc-pending { border-style: dashed; cursor: default; }
+.fc-pending:hover { border-color: var(--accent-line); box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight); }
+.fc-pending-dial { width: 64px; height: 64px; display: grid; place-items: center; color: var(--fg-mute);
+  border: 2px dashed var(--line); border-radius: 999px; font-size: 18px; }
+
 /* ============================== readiness dial ============================== */
 
 .dial { position: relative; display: grid; place-items: center; }
@@ -280,6 +308,21 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .status-ready       { color: var(--ready); border-color: var(--ready-line); background: var(--ready-soft); }
 .status-implementing{ color: var(--minor); }
 .status-done        { color: var(--fg-mute); }
+
+/* "Mark review complete" / "Reopen" — sits under the gate in the detail header. */
+.btn-complete {
+  margin-top: 8px; font-size: 12.5px; padding: 7px 14px;
+  border-color: var(--ready-line); color: var(--ready); background: var(--ready-soft);
+}
+.btn-complete:hover { background: var(--ready); color: var(--bg); border-color: var(--ready); }
+.btn-complete.is-done { border-color: var(--line); color: var(--fg-dim); background: var(--panel-3); }
+.btn-complete.is-done:hover { background: var(--panel-2); color: var(--fg); }
+/* Completed workspaces read as settled: dimmed card, muted inbox row. */
+.fc-done { opacity: .6; }
+.fc-done:hover { opacity: .85; }
+.ir-wrap.ir-done .inbox-row { opacity: .62; }
+.ir-wrap.ir-done .inbox-row:hover { opacity: .9; }
+.ir-done-chip { margin-left: 8px; }
 
 .gate-badge {
   display: inline-flex; align-items: center; gap: 7px;
@@ -401,6 +444,46 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   color: var(--fg-dim); background: var(--panel-3); border: 1px solid var(--line);
 }
 .review-cta-done.is-ready { color: var(--ready); border-color: var(--ready-line); background: var(--ready-soft); }
+/* Posted — comments are out, awaiting the author; blue (the review tint) with an inline
+   Re-review button so the next step (reconcile the response) is one click away. */
+.review-cta-done.is-posted {
+  color: var(--kind-review); border-color: var(--kind-review-line); background: var(--kind-review-soft);
+  gap: 12px;
+}
+.review-cta.review-cta-rereview {
+  padding: 8px 14px; font-size: 12.5px;
+  background: var(--kind-review-soft); border-color: var(--kind-review-line); color: var(--kind-review);
+}
+.review-cta.review-cta-rereview:hover { background: var(--kind-review); color: var(--bg); border-color: var(--kind-review); }
+/* The (re-run) loop stage becomes a clickable Re-review trigger once comments are posted. */
+.loop-stage.loop-stage-action {
+  cursor: pointer;
+  color: var(--kind-review); background: var(--kind-review-soft); border-color: var(--kind-review-line);
+}
+.loop-stage.loop-stage-action:hover { background: var(--kind-review); color: var(--bg); border-color: var(--kind-review); }
+.loop-stage.loop-stage-action:focus-visible { outline: 2px solid var(--kind-review); outline-offset: 2px; }
+/* Waiting on author — passive/muted; clickable (re-review anyway) but not shouting for it. */
+.loop-stage.loop-stage-waiting { cursor: pointer; color: var(--fg-mute); background: var(--panel-3); border-style: dashed; }
+.loop-stage.loop-stage-waiting:hover { color: var(--fg-dim); border-color: var(--line); }
+
+/* Waiting on author: muted, passive — the work is out, nothing to do but wait. */
+.review-cta-done.is-waiting { color: var(--fg-mute); border-style: dashed; gap: 12px; }
+.review-cta-link {
+  background: none; border: none; padding: 0; font: inherit; font-size: 12px; font-weight: 560;
+  color: var(--kind-review); cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+}
+.review-cta-link:hover { color: var(--fg); }
+/* Author responded: attention — blue, with a pulsing dot and a hot Re-review button. */
+.review-cta-done.is-responded {
+  color: var(--kind-review); border-color: var(--kind-review-line); background: var(--kind-review-soft); gap: 12px;
+}
+.review-cta.review-cta-rereview.is-hot { background: var(--kind-review); color: var(--bg); border-color: var(--kind-review); font-weight: 680; }
+.review-cta.review-cta-rereview.is-hot:hover { filter: brightness(1.08); }
+
+/* Card review-state line (section cards, no job running). */
+.fc-review { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.fc-review-waiting { color: var(--fg-mute); }
+.fc-review-responded { color: var(--kind-review); font-weight: 560; }
 
 /* ============================== review scope note ============================== */
 
@@ -472,7 +555,12 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .fsearch:focus, .fselect:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: start; }
+.board.board-pr { grid-template-columns: repeat(5, 1fr); }   /* + the Posted — awaiting author lane */
 .col { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 10px; min-height: 120px; }
+/* Posted lane: blue (the review tint) so it reads as "out for the author", distinct from in-progress Reworking. */
+.col-posted { border-color: var(--kind-review-line); }
+.col-posted .col-title { color: var(--kind-review); }
+.f-posted-note { width: 100%; font-size: 12px; margin-bottom: 2px; }
 .col-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 10px; }
 .col-title { font-size: 12.5px; font-weight: 640; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .5px; }
 .col-count { font-size: 12px; color: var(--fg-mute); background: var(--panel-3); border-radius: 999px; padding: 1px 8px; }
@@ -522,6 +610,13 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   font-family: var(--mono); font-size: 11px; font-weight: 700; line-height: 1;
   color: var(--minor); background: var(--minor-soft); border: 1px solid var(--minor-line); border-radius: 999px;
 }
+/* Board chip for a persisted approve/edit decision (mirrors the finish-screen pills). */
+.f-dec-chip {
+  display: inline-flex; align-items: center; padding: 1px 8px;
+  font-size: 11px; font-weight: 640; border-radius: 999px; border: 1px solid var(--line);
+}
+.f-dec-chip.dec-accept { color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft); }
+.f-dec-chip.dec-edit { color: var(--edit-fg); border-color: var(--major-line); background: var(--major-soft); }
 .fchip-draft .draft-glyph { font-family: var(--mono); font-weight: 700; }
 .fchip-draft.active { border-color: var(--minor-line); background: var(--minor-soft); color: var(--minor); }
 

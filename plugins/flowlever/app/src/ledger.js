@@ -13,6 +13,9 @@ const STATUSES = ['open', 'reworking', 'resolved', 'waived'];
 // only labels/icons differ in the UI. `spec` is the default and the back-compat
 // value for any feature on disk that predates the field.
 const KINDS = ['spec', 'pr-review', 'pr-respond'];
+// A workspace's lifecycle status (distinct from a finding's status). `done` means the
+// review/flow is finished — the cockpit shows it as completed and the inbox stops nagging.
+const FEATURE_STATUSES = ['draft', 'auditing', 'reworking', 'ready', 'implementing', 'done'];
 const SOURCE_TYPES = ['confluence', 'ado', 'figma'];
 const COVERAGE_STATUSES = ['covered', 'partial', 'uncovered', 'orphan'];
 const DRAFT_FORMATS = ['text', 'gherkin', 'markdown'];
@@ -136,6 +139,31 @@ function saveFeature(feature) {
   return feature;
 }
 
+// Set a workspace's lifecycle status (e.g. mark a review `done`, or reopen it).
+function setFeatureStatus(featureId, status) {
+  if (!FEATURE_STATUSES.includes(status)) {
+    throw euser(`invalid feature status "${status}": must be one of ${FEATURE_STATUSES.join(', ')}`);
+  }
+  const feature = getFeature(featureId);
+  feature.status = status;
+  return saveFeature(feature);
+}
+
+// The PR-review "waiting on author" tracker (pr-review / pr-respond). After posting, a
+// workspace waits on the author; the /flowlever:watch runner checks the PR for new
+// replies/commits since `lastPostedAt` and flips `authorRespondedAt` (+ a human note) so the
+// cockpit can move from a passive "Waiting on author" state to "Author responded → Re-review".
+// `patch` merges any of { lastPostedAt, authorRespondedAt, note } (null clears a field).
+function setFeatureReview(featureId, patch = {}) {
+  const feature = getFeature(featureId);
+  const review = { lastPostedAt: null, authorRespondedAt: null, note: null, ...(feature.review || {}) };
+  for (const k of ['lastPostedAt', 'authorRespondedAt', 'note']) {
+    if (patch[k] !== undefined) review[k] = patch[k];
+  }
+  feature.review = review;
+  return saveFeature(feature);
+}
+
 function addSource(featureId, { type, ...fields }) {
   if (!SOURCE_TYPES.includes(type)) {
     throw euser(`invalid source type "${type}": must be one of ${SOURCE_TYPES.join(', ')}`);
@@ -214,8 +242,18 @@ function isOpen(finding) {
   return finding.status === 'open' || finding.status === 'reworking';
 }
 
+// A finding is "posted" once its comment/reply has been sent back to the PR: it stays
+// `reworking` (so reconciliation still auto-resolves it once the author addresses it) but
+// carries a `postedAt` stamp. From the reviewer's side the work is done — it's awaiting the
+// author — so it sits in its own "Posted" lane and does NOT drag the readiness score down.
+function isPosted(finding) {
+  return Boolean(finding.postedAt) && isOpen(finding);
+}
+
 function computeReadiness(ledger, config) {
-  const open = ledger.findings.filter(isOpen);
+  // Posted findings are awaiting the author, not open work for the reviewer, so they don't
+  // penalize the score — but they remain `isOpen` for reconciliation's auto-resolve.
+  const open = ledger.findings.filter((f) => isOpen(f) && !isPosted(f));
   const openBySeverity = { blocker: 0, major: 0, minor: 0, info: 0 };
   let penalty = 0;
   for (const f of open) {
@@ -354,6 +392,10 @@ function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = '
     finding.history.push({ at, from, to: status, by, note: reason ?? '' });
     finding.status = status;
     finding.statusReason = status === 'waived' ? reason : reason ?? null;
+    // A status change supersedes any pending triage decision (approve/edit) — drop it.
+    delete finding.decision;
+    // Reopening a posted finding pulls it back into the review flow, so drop the posted stamp.
+    if (status === 'open') delete finding.postedAt;
     if (isOpen(finding)) {
       finding.resolvedInRound = null; // reopening clears the resolution round
     } else if (status === 'resolved') {
@@ -361,6 +403,73 @@ function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = '
     }
   }
 
+  finding.updatedAt = at;
+  saveLedger(ledger);
+  return finding;
+}
+
+// Mark findings as posted back to the PR (their inline comment / reply has been sent).
+// A posted finding stays `reworking` — so a later re-review reconciliation auto-resolves it
+// once the author addresses it — but gains a `postedAt` stamp that moves it into the
+// "Posted — awaiting author" lane and excludes it from the readiness penalty and the
+// "to review" count. Idempotent: re-posting refreshes the stamp without duplicating history.
+// `fps` may be a single fp or an array. Returns the updated findings.
+function markPosted(featureId, fps, { by = 'post' } = {}) {
+  const list = Array.isArray(fps) ? fps : [fps];
+  const ledger = loadLedger(featureId);
+  const at = now();
+  const updated = [];
+  for (const fp of [...new Set(list)]) {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    // Posting only applies to live findings; a waived/resolved finding isn't awaiting anyone.
+    if (finding.status === 'open') {
+      finding.history.push({ at, from: 'open', to: 'reworking', by, note: 'posted to PR' });
+      finding.status = 'reworking';
+      finding.resolvedInRound = null;
+    } else if (!finding.postedAt) {
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'posted to PR' });
+    }
+    finding.postedAt = at;
+    delete finding.decision;   // posting supersedes the pending approve/edit decision
+    finding.updatedAt = at;
+    updated.push(finding);
+  }
+  saveLedger(ledger);
+  // Posting (re)starts the wait on the author: anchor the "since" time and clear any prior
+  // "author responded" flag. Best-effort — a missing feature file shouldn't fail the post.
+  if (updated.length) {
+    try { setFeatureReview(featureId, { lastPostedAt: at, authorRespondedAt: null, note: null }); }
+    catch { /* feature gone — ignore */ }
+  }
+  return updated;
+}
+
+// The reviewer's triage decision on a PR comment that hasn't been posted yet:
+// `approve` / `edit` mean "will post on the next Post" (the finding stays open/reworking);
+// a dismiss is modelled by the `waived` status instead, not here. Persisting the decision
+// (rather than holding it only in the browser's review flow) is what keeps the board, the
+// stepper and the Post screen in sync and makes a decision survive a page refresh.
+// Pass null to clear the decision (undo). Returns the finding.
+const FINDING_DECISIONS = ['approve', 'edit'];
+function setFindingDecision(featureId, fp, decision, { by = 'user' } = {}) {
+  if (decision !== null && !FINDING_DECISIONS.includes(decision)) {
+    throw euser(`invalid decision "${decision}": must be one of ${FINDING_DECISIONS.join(', ')} or null`);
+  }
+  const ledger = loadLedger(featureId);
+  const finding = ledger.findings.find((f) => f.fp === fp);
+  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+  const at = now();
+  if (decision === null) {
+    if (finding.decision === undefined) return finding;   // nothing to clear
+    delete finding.decision;
+    finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'cleared decision' });
+  } else if (finding.decision !== decision) {
+    finding.decision = decision;
+    finding.history.push({ at, from: finding.status, to: finding.status, by, note: `decided: ${decision}` });
+  } else {
+    return finding;   // unchanged
+  }
   finding.updatedAt = at;
   saveLedger(ledger);
   return finding;
@@ -661,6 +770,7 @@ function setCoverage(featureId, coverage) {
 module.exports = {
   DATA_DIR,
   KINDS,
+  FEATURE_STATUSES,
   REQUEST_ACTIONS,
   REQUEST_STATUSES,
   initDataDir,
@@ -670,11 +780,15 @@ module.exports = {
   listFeatures,
   saveFeature,
   addSource,
+  setFeatureStatus,
+  setFeatureReview,
   loadLedger,
   loadRounds,
   fingerprint,
   ingestRound,
   setFindingStatus,
+  markPosted,
+  setFindingDecision,
   setFindingDetails,
   setFindingDraft,
   clearFindingDraft,

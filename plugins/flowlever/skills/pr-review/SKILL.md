@@ -29,8 +29,14 @@ review the whole diff as usual.
 
 ## 1. Resolve / create the workspace
 - Input = a PR id or URL (ask if missing — don't guess).
-- Workspace id `pr-<id>-<short-slug>` (e.g. `pr-482-checkout-api`). If absent:
-  `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature add <wsId> --title "PR #<id> — <pr title>" --kind pr-review`
+- **Reuse an existing workspace for this PR when one exists** — this is what makes a re-review
+  reconcile into the same ledger instead of forking a duplicate:
+  1. If the request carries a `wsId` (the cockpit's "↻ Re-review" passes the workspace to re-run),
+     use exactly that workspace.
+  2. Otherwise list workspaces and reuse any whose id starts with `pr-<id>-`
+     (`FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature list`).
+  3. Only if none exists, create one with id `pr-<id>-<short-slug>` (e.g. `pr-482-checkout-api`):
+     `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature add <wsId> --title "PR #<id> — <pr title>" --kind pr-review`
 - Register sources: the PR, plus any auto-discovered ticket/spec, via `source add` (use `ado`/`confluence`).
 - If the request carried `instructions`, persist them onto the workspace as `feature.reviewBrief` here.
 
@@ -95,5 +101,21 @@ When the user has reviewed and asks to post: read their decisions
 text, or the exported work order). For every **accepted/edited** finding (skip rejected/waived), post an
 inline PR comment anchored to the finding's file:line via `repo_create_pull_request_thread`
 (use the user's edited text if present, else the suggestion). **Never post without an explicit yes.**
-After posting, set those findings → `reworking`. A later `/flowlever:pr-review` re-run reconciles (resolved
-comments drop off, new ones appear) — same loop as specs.
+After posting, mark exactly the findings you posted as **posted** (idempotent — the cockpit's Post
+button already stamps them, this confirms it for direct runs):
+`FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding posted <wsId> --fps <fp>[,<fp>...]`.
+A posted finding stays `reworking` but is stamped `postedAt` → it moves to the cockpit's **"Posted —
+awaiting author"** lane, stops being re-counted as "to review", and no longer drags the readiness score
+down. Do **not** set posted comments to `resolved` — that would hide them from the re-review reconcile.
+
+## 6. Re-review (after the author responds) — same reconcile loop as specs
+When the author has replied or pushed new commits, **re-run this exact skill against the SAME `<wsId>`**
+(the cockpit's "↻ Re-review" button on the `(re-run)` stage enqueues a fresh `pr-review` request for the
+same PR; `/flowlever:watch` then runs this skill again). Re-fetch the PR diff + threads, re-run the
+spec-aware review, and re-`ingest` into the same workspace. Reconciliation does the rest, keyed on the
+stable `pr:<id>:<path>:L<line>` loci:
+- a posted finding the author **addressed** drops out of the new set → **auto-resolves** (moves to Resolved);
+- one **still flagged** stays (its `postedAt` and lane are preserved);
+- anything **new** is inserted as `open` for a fresh triage pass.
+The reviewer can also close a posted finding manually at any time from the board (Mark resolved / Reopen /
+Dismiss) when no author response is needed.

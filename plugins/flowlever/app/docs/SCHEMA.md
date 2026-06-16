@@ -34,11 +34,31 @@ as "Proposed comment" / "Proposed reply" and the decision row is comment triage 
 - **pr-review** → **Approve** (will post) · **Edit comment** · **Dismiss** (won't post). "Edit comment"
   opens the `suggestion` in a textarea; saving persists it via `setFindingDetails({ suggestion })`
   (`POST /api/features/:id/findings/:fp` now accepts `suggestion`) and marks the comment Approved (edited).
+Every decision is **persisted immediately**, from whichever surface it's made (board modal or stepper):
+Approve/Edit set the finding's `decision` field, Dismiss sets `status:waived`. The review flow's
+in-memory decision map is hydrated from this persisted state, so the board, the stepper and the Post
+screen always agree and a decision survives a page refresh.
 - **pr-respond** → **Reply** · **Apply fix** · **Push back** · **Skip**.
 A finding is **reviewable** (counted by the "Review N comments" CTA + walked by the stepper) when it is
-open/reworking AND carries a `draft` OR a non-empty `suggestion` — a code-diff `draft` is optional. At the
-finish/Post screen, approved/edited items are set `resolved` (will-post) and dismissed items `waived`
-(via `review/apply` + `findings/:fp`), then an `apply` request is enqueued for the runner to post back.
+open/reworking, is NOT yet posted (no `postedAt`), AND carries a `draft` OR a non-empty `suggestion` — a
+code-diff `draft` is optional. At the finish/Post screen, approved/edited items are stamped **posted**
+(`review/apply` with `status:'posted'` → stays `reworking` + sets `postedAt`) and dismissed items `waived`,
+then an `apply` request is enqueued for the runner to post the comments back.
+
+### Posted lifecycle (pr-review / pr-respond) — "awaiting author" + re-review
+A **posted** finding is one whose comment/reply has been sent back to the PR: it keeps status `reworking`
+(so reconciliation can still auto-resolve it) but carries a `postedAt` stamp. Semantically it's *awaiting
+the author*, not open reviewer work, so it:
+- sits in its own **"Posted — awaiting author"** board lane (PR kinds; rendered out of the Reworking lane),
+- is excluded from the "to review" CTA/stepper and from the home `toReview`/`reworking` counts (counted
+  under a separate `posted` count instead),
+- does **not** penalize the readiness score (`computeReadiness` skips posted findings; they remain `isOpen`
+  for reconciliation only).
+**Re-review** = re-running `/flowlever:pr-review` against the same workspace (the cockpit's "↻ Re-review"
+button on the `(re-run)` loop stage enqueues a fresh `pr-review` request for the same PR). On the next
+ingest, reconciliation auto-resolves posted findings the author addressed (gone from the new set), keeps
+the still-flagged ones (stamp preserved), and inserts anything new as `open`. The reviewer can also close a
+posted finding manually at any time (Mark resolved / Reopen — reopening drops the `postedAt` stamp / Dismiss).
 
 ## features/<featureId>.json
 ```jsonc
@@ -62,6 +82,12 @@ finish/Post screen, approved/edited items are set `resolved` (will-post) and dis
     { "sectionKey": "flow-payment", "adoIds": [42695], "figmaNodeIds": ["1:23"], "status": "covered" }
     // status: covered | partial | uncovered | orphan (ado/figma with no section)
   ],
+  "review": {                       // OPTIONAL (pr-review/pr-respond) — the "waiting on author" tracker
+    "lastPostedAt": "2026-06-16T…",  //   when comments were last posted (the "since" anchor); set by markPosted
+    "authorRespondedAt": null,       //   set by the /flowlever:watch runner when it sees new author activity;
+                                     //   null ⇒ still waiting. Cleared on re-post and on re-review.
+    "note": null                     //   human summary of the activity, e.g. "2 new replies · 1 new commit"
+  },
   "notes": "",
   "reviewBrief": ""                 // OPTIONAL — per-run review scope/focus this workspace was launched
                                     // with (copied from the enqueuing request's `instructions`, e.g.
@@ -84,6 +110,15 @@ finish/Post screen, approved/edited items are set `resolved` (will-post) and dis
       "suggestion": "Align: either add Twint to spec section or remove from AC.",
       "status": "open",                   // open | reworking | resolved | waived
       "statusReason": null,               // required when waived
+      "postedAt": null,                   // OPTIONAL (pr-review/pr-respond) ISO ts — set when the comment/reply
+                                          // was posted back to the PR. Present ⇒ "Posted — awaiting author":
+                                          // stays reworking (reconcile-eligible) but its own lane, no penalty,
+                                          // excluded from "to review". Cleared on reopen (status→open).
+      "decision": "approve",              // OPTIONAL (pr-review/pr-respond) approve | edit — the reviewer's
+                                          // PERSISTED triage decision on a not-yet-posted comment ("will post").
+                                          // Dismiss is modelled by status:waived, not here. Cleared on any
+                                          // status change (waive/resolve/reopen/post). Hydrated into the review
+                                          // flow so board + stepper + Post agree and survive a refresh.
       "pinned": false,                    // pinned findings never auto-resolve on reconciliation
       "firstSeenRound": 1,
       "lastSeenRound": 2,
@@ -202,10 +237,12 @@ clears `needsInput` whenever a terminal status (done/error) is set. All writes a
 feature add <id> --title "..."            create workspace
 feature list | feature show <id>
 feature delete <id>                       delete workspace (features + ledger + rounds files)
+feature activity <id> --responded [--note "..."] | --clear   mark/clear "author responded" on a posted PR review (watch runner)
 source add <featureId> --type confluence|ado|figma --id ... --title ... --url ...
 ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]   # audit round ingest + reconcile
 finding list <featureId> [--status open] [--dimension x] [--severity y]
 finding set <featureId> <fp> --status resolved|waived|reworking|open [--reason "..."] [--pin|--unpin]
+finding posted <featureId> --fps <fp>[,<fp>...]   mark PR comment(s)/repl(ies) posted (reworking + postedAt)
 readiness <featureId>                     print score + gate + blockers
 report <featureId> [--out report.md]      markdown report
 coverage set <featureId> --file coverage.json
@@ -218,15 +255,17 @@ Exit codes: 0 ok, 1 user error (bad args/not found), 2 internal. All output huma
 
 ## HTTP API (src/server.js, port 4173)
 ```
-GET  /api/home                      → [{ id, title, kind, readiness:{score,gate}, counts:{toReview,open,reworking,resolved,waived} }] cross-kind inbox, most-actionable first
+GET  /api/home                      → [{ id, title, kind, readiness:{score,gate}, counts:{toReview,open,reworking,posted,resolved,waived} }] cross-kind inbox, most-actionable first (posted = awaiting author, never double-counted as reworking/toReview)
 GET  /api/features[?kind=spec|pr-review|pr-respond] → [featureSummary]  (incl. kind + readiness; optional kind filter)
 GET  /api/features/:id              → { feature, ledger, rounds, readiness }
 DELETE /api/features/:id            → 200 { id, deleted: true }; 404 if missing. Removes features/<id>.json, ledger/<id>.json, rounds/<id>.json.
-POST /api/features/:id/findings/:fp → body { status?, reason?, pinned?, suggestion? }  (lifecycle ops + comment-body edit from UI; suggestion → setFindingDetails)
+POST /api/features/:id/findings/:fp → body { status?, reason?, pinned?, suggestion?, decision? }  (lifecycle ops + comment-body edit + persisted triage decision; suggestion → setFindingDetails, decision ('approve'|'edit'|null) → setFindingDecision; a status change clears decision)
 POST   /api/features/:id/findings/:fp/draft → body { target?, before, after, format? } (set rework draft; 400 w/o before+after)
 DELETE /api/features/:id/findings/:fp/draft → clear the rework draft
 POST /api/features/:id/findings/:fp/draft/review → body { hunk, status, editedText? } | { hunks } | { note? } | { verdict? } (merges)
-POST /api/features/:id/review/apply → body { fps: [...], status? } sets the listed findings to reworking (default) or resolved (PR approve→will-post); allowlist. Atomic: 400 if any fp is unknown. (review-flow finish screen)
+POST /api/features/:id/review/apply → body { fps: [...], status? } sets the listed findings to reworking (default), resolved (close without author), or posted (PR comment sent → reworking + postedAt stamp, "awaiting author"); allowlist. Atomic: 400 if any fp is unknown. (review-flow finish screen)
+POST /api/features/:id/status       → body { status } sets the workspace lifecycle status (draft|auditing|reworking|ready|implementing|done) — e.g. "Mark review complete". 400 on bad status.
+POST /api/features/:id/activity     → body { authorResponded?, note?, lastPostedAt?, at? } updates the "waiting on author" tracker (feature.review). The /flowlever:watch runner sets authorResponded:true + note when it detects new PR activity; the UI clears it on re-review. 400 if empty.
 POST /api/ingest/:id                → body { findings: [...], note?, reopenResolved? } (used by skills)
 POST /api/requests                  → body { action, prId?, wsId?, title?, instructions? } → 201 created request (400 on bad/missing fields). instructions = optional per-run review scope/focus (string)
 GET  /api/requests[?status=queued]  → [request]  (UI-triggered job queue; optional status filter)
