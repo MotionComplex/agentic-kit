@@ -80,7 +80,18 @@ For each review finding:
 - `title`: stable one-line. `detail`: what's wrong + why, quoting the relevant diff hunk.
 - `locus`: **`pr:<id>:<path>:L<line>`** (or `L<start>-<end>`). Stable loci = stable fingerprints across
   re-reviews (the diff moves — same reconcile model as spec re-audit).
-- `suggestion`: the concrete fix.
+- `suggestion`: **the proposed PR comment body — it IS what gets posted, so write it as a
+  [Conventional Comment](https://conventionalcomments.org/)**: start with a label, then the concrete fix.
+  Format: `<label>[ (blocking)]: <body>` (lowercase label, colon, space). Labels:
+  - `issue` — a problem in the code (add `(blocking)` when it must be fixed before merge, i.e. severity blocker).
+  - `suggestion` — a concrete change that isn't strictly required.
+  - `question` — something the author must clarify/answer.
+  - `nitpick` — trivial, non-blocking preference (style/naming/wording).
+  - (also valid when they fit: `praise`, `thought`, `chore`.)
+  Map from severity/dimension: blocker→`issue (blocking)`, major→`issue`, a proposed improvement→`suggestion`,
+  `ambiguity`→`question`, minor style→`nitpick`. Examples:
+  `issue (blocking): Cap retries — `if (retryCount >= MAX_RETRIES) return;` — or a persistently failing endpoint retries forever.`
+  · `nitpick: rename `buf` → `baseBuffer` to match the deployed FTD field name.`
 Where you have a concrete code change, attach a **draft** so it shows as a red/green diff in the stepper:
 `setFindingDraft(wsId, fp, { target: "<path>:L<line>", format: "text", before: "<current code>", after: "<suggested code>" })`
 (via a small node script using `require("${CLAUDE_PLUGIN_ROOT}/app/src/ledger.js")`, or a future CLI cmd).
