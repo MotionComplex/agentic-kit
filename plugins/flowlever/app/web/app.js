@@ -64,7 +64,8 @@ const state = {
   detail: null,            // { feature, ledger, rounds, readiness }
   filters: { dims: new Set(), sevs: new Set(), status: 'all', q: '', draft: false },
   waiving: null,           // fp showing the inline waive form
-  diffMode: 'unified',     // 'unified' | 'split' — proposed-change diff layout (sticky pref)
+  diffMode: 'rendered',    // 'rendered' | 'unified' | 'split' — proposed-change view (sticky pref).
+                           // 'rendered' shows markdown/gherkin formatted; raw diff falls back to unified.
   editingHunk: null,       // { fp, idx } — hunk whose inline edit textarea is open
   modalFp: null,           // fp whose finding modal is open (one at a time)
   modalMode: 'detail',     // 'detail' | 'review' — which sub-view the modal is showing
@@ -143,7 +144,11 @@ function currentRoundNum() {
 
 function findingBadge(f, currentRound) {
   if (currentRound == null) return null;
-  if (f.firstSeenRound === currentRound) return 'new';
+  // Once a finding has been acted on — resolved, waived, in-flight, posted or applied — it is no
+  // longer "new"/"regressed" to the reviewer; those badges only describe untouched open work.
+  if (f.status === 'resolved' || f.status === 'waived' || isInFlightOrOut(f)) return null;
+  // NEW = a freshly surfaced finding that hasn't been triaged yet (still Open).
+  if (f.status === 'open' && f.firstSeenRound === currentRound) return 'new';
   const hist = Array.isArray(f.history) ? f.history : [];
   // Explicitly reopened by reconcile in this round
   if (hist.some((h) => h.to === 'open' && h.by === 'reconcile' &&
@@ -215,7 +220,7 @@ function computeReadiness(findings) {
   let penalty = 0;
   for (const f of findings || []) {
     if (f.status !== 'open' && f.status !== 'reworking') continue;
-    if (isPosted(f)) continue;   // posted = awaiting author, not open reviewer work → no penalty
+    if (isInFlightOrOut(f)) continue;   // posted/applied/in-flight = not open reviewer work → no penalty
     if (openBySeverity[f.severity] != null) openBySeverity[f.severity]++;
     penalty += SEVERITY_WEIGHTS[f.severity] ?? 0;
   }
@@ -441,15 +446,47 @@ function hasSuggestion(f) {
 /* A finding whose comment/reply has been posted back to the PR: it stays open/reworking
  * (so a re-review reconciles it) but is "awaiting the author", not the reviewer — it sits in
  * its own lane and is NOT re-counted as something to review. */
+function isOpenish(f) {
+  return f.status === 'open' || f.status === 'reworking';
+}
 function isPosted(f) {
-  return Boolean(f.postedAt) && (f.status === 'open' || f.status === 'reworking');
+  return Boolean(f.postedAt) && isOpenish(f);
+}
+/* Spec mirror of isPosted: the accepted change has actually been written back to Confluence/ADO
+ * (stamped by the runner), so it's awaiting re-audit, not the reviewer. */
+function isApplied(f) {
+  return Boolean(f.appliedAt) && isOpenish(f);
+}
+/* Transient: the reviewer clicked Post/Apply and the runner is mid-flight (`pending` is
+ * 'post' | 'apply'). Shown in the "Posting…/Applying…" lane until the real completion stamp lands. */
+function isPending(f) {
+  return Boolean(f.pending) && isOpenish(f) && !f.postedAt && !f.appliedAt;
+}
+/* Out of the reviewer's hands — in flight, posted, or applied — so not "to review". */
+function isInFlightOrOut(f) {
+  return isPosted(f) || isApplied(f) || isPending(f);
 }
 function reviewableFindings(findings) {
   return (findings || []).filter((f) =>
-    (f.status === 'open' || f.status === 'reworking') && !isPosted(f) && (f.draft || hasSuggestion(f)));
+    isOpenish(f) && !isInFlightOrOut(f) && (f.draft || hasSuggestion(f)));
 }
 function postedFindings(findings) {
   return (findings || []).filter(isPosted);
+}
+/* Spec findings whose accepted change has been written back and are awaiting a re-audit to
+ * reconcile (the spec analog of postedFindings awaiting the author). */
+function appliedFindings(findings) {
+  return (findings || []).filter(isApplied);
+}
+/* A spec workspace is "ready to re-audit" once changes are applied and nothing is left to
+ * triage — the spec analog of reviewWait==='responded'. (Applying IS the trigger; unlike a PR
+ * there's no third party to wait on.) */
+function specReauditReady(data) {
+  const kind = data.feature && data.feature.kind;
+  if (kind !== 'spec') return false;
+  const findings = (data.ledger && data.ledger.findings) || [];
+  if (reviewableFindings(findings).length) return false;   // still stuff to triage
+  return appliedFindings(findings).length > 0;
 }
 
 /* The post-posting wait state for a PR workspace: 'waiting' (comments out, nothing to do
@@ -495,9 +532,9 @@ function loopActiveStage(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
   if (!findings.length) return 'fetch';
   if (reviewableFindings(findings).length) return 'review';
-  // Nothing left to review/post. If comments are already posted, the live step is the
-  // re-review (reconcile the author's response); otherwise it's still the post/apply step.
-  if (postedFindings(findings).length) return 'reaudit';
+  // Nothing left to review/post. If comments are posted (PR) or changes applied (spec), the live
+  // step is the reconcile (re-review / re-audit); otherwise it's still the post/apply step.
+  if (postedFindings(findings).length || appliedFindings(findings).length) return 'reaudit';
   return 'apply';
 }
 
@@ -509,29 +546,35 @@ function loopStrip(data, rightEl) {
   const activeIdx = STAGE_KEYS.indexOf(loopActiveStage(data));
   const isPr = kind === 'pr-review' || kind === 'pr-respond';
   const canReReview = isPr && !!prNumber(data.feature);
-  const wait = reviewWait(data);   // null | 'waiting' | 'responded'
+  const wait = reviewWait(data);   // null | 'waiting' | 'responded'  (PR)
+  const reaudit = specReauditReady(data);   // spec: changes applied → re-audit available
   const els = [];
   stages.forEach(([ix, label], i) => {
     if (i) els.push(h('span', { class: 'loop-sep' }, '→'));
-    // The trailing stage lights once comments are posted. While waiting on the author it's a
-    // passive "Waiting" chip; once the runner sees a response it becomes a Re-review action.
-    // It stays clickable in both (re-review anyway) for a PR with a known number.
+    // The trailing stage lights once comments are posted (PR) or changes applied (spec). For a
+    // PR it's "Re-review" (or a passive Waiting chip); for a spec, applying makes it "Re-audit".
     const active = i === activeIdx;
     const onLast = i === 3 && active;
-    const clickable = onLast && canReReview;
+    const prClickable = onLast && canReReview;
+    const specClickable = onLast && reaudit;
+    const clickable = prClickable || specClickable;
+    const act = specClickable ? () => reAuditSpec(data) : (prClickable ? () => reReviewPr(data) : undefined);
     let stageLabel = label;
     let stateCls = '';
-    if (onLast && wait === 'responded') { stageLabel = '↻ Re-review'; stateCls = 'loop-stage-action'; }
+    if (specClickable) { stageLabel = '↻ Re-audit'; stateCls = 'loop-stage-action'; }
+    else if (onLast && wait === 'responded') { stageLabel = '↻ Re-review'; stateCls = 'loop-stage-action'; }
     else if (onLast && wait === 'waiting') { stageLabel = '⏳ Waiting'; stateCls = 'loop-stage-waiting'; }
     els.push(h('div', {
       class: `loop-stage ${active ? 'active' : ''} ${stateCls}`.trim(),
       role: clickable ? 'button' : undefined,
       tabindex: clickable ? '0' : undefined,
       title: clickable
-        ? (wait === 'responded' ? 'Author responded — re-review and reconcile' : 'Waiting on the author — click to re-review anyway')
+        ? (specClickable ? 'Changes applied — re-audit to re-fetch the spec and reconcile these findings'
+          : wait === 'responded' ? 'Author responded — re-review and reconcile'
+          : 'Waiting on the author — click to re-review anyway')
         : undefined,
-      onclick: clickable ? () => reReviewPr(data) : undefined,
-      onkeydown: clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reReviewPr(data); } } : undefined,
+      onclick: act,
+      onkeydown: clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); } } : undefined,
     }, h('span', { class: 'loop-ix' }, ix), stageLabel));
   });
   return h('div', { class: 'loop-strip' },
@@ -589,10 +632,23 @@ function reviewCta(data) {
           reBtn('review-cta review-cta-rereview is-hot', '↻ Re-review'));
       }
       return h('div', { class: 'review-cta-done is-waiting' },
-        h('span', {}, `⏳ Waiting on author — ${plural(posted, 'comment', 'comments')} posted to ${target}`),
-        reBtn('review-cta-link', 'Re-review anyway'));
+        h('span', {}, `${plural(posted, 'comment', 'comments')} posted to ${target}`),
+        reBtn('review-cta review-cta-rereview', '↻ Re-review'));
     }
     return h('div', { class: 'review-cta-done is-ready' }, '✓ All reviewed — ready to post');
+  }
+  // Spec: once accepted changes are written back to Confluence/ADO, the workspace is "out for
+  // re-audit" — surface a prominent Re-audit that re-fetches the spec and reconciles (auto-resolves
+  // the applied findings if the spec now reflects them, or keeps them open + flags regressions).
+  if (specReauditReady(data)) {
+    const n = appliedFindings(findings).length;
+    return h('div', { class: 'review-cta-done is-responded' },
+      h('span', {}, `● ${plural(n, 'change', 'changes')} applied — re-audit to reconcile`),
+      h('button', {
+        class: 'review-cta review-cta-rereview is-hot', type: 'button',
+        title: 'Re-fetch the spec sources and reconcile: applied findings auto-resolve if the spec now reflects them.',
+        onclick: () => reAuditSpec(data),
+      }, '↻ Re-audit'));
   }
   const gate = (data.readiness && data.readiness.gate) || 'in-progress';
   return h('div', { class: 'review-cta-done is-ready' }, gate === 'ready' ? '✓ Ready to build' : '✓ Nothing to review');
@@ -732,10 +788,13 @@ function ensureFlow() {
 function ensureApplyPolling() {
   startPolling(`apply:${current.id}`, (reqs) => {
     if (current.view !== 'review-flow' || !state.flow.finish) return;
-    const next = reqs.filter((r) => r.action === 'apply' && r.wsId === current.id);
+    const next = reqs.filter((r) => (r.action === 'apply' || r.action === 'propose') && r.wsId === current.id);
     const prev = state.flow.applyReqs || [];
-    const sig = (list) => list.map((r) => `${r.id}:${r.status}:${r.note || ''}`).join('|');
+    const sig = (list) => list.map((r) => `${r.id}:${r.status}:${r.phase || ''}:${r.note || ''}:${r.needsInput ? 1 : 0}`).join('|');
     state.flow.applyReqs = next;
+    // Once the server has a queued/running apply request, that drives the busy
+    // state; clear the optimistic flag when nothing is in flight anymore.
+    state.flow.applying = next.some((r) => r.status === 'queued' || r.status === 'running');
     if (sig(prev) !== sig(next)) renderFlowInto();
   });
 }
@@ -833,10 +892,19 @@ function stepCard(data, f) {
 
   const diffSection = hasDraft ? stepDiffSection(f, verdict) : null;
 
+  // The reviewer's saved note (their objection / answer), shown read-only under the suggestion
+  // once written — distinct from the suggestion itself. Hidden while the editor is open.
+  const noteEl = (f.note && state.flow.editingComment !== f.fp)
+    ? h('div', { class: 'f-suggestion f-note' },
+        h('span', { class: 'f-suglabel' }, 'Your note'),
+        h('p', {}, f.note))
+    : null;
+
   return h('div', { class: `step-card ${verdict !== 'proposed' ? `rm-frame-${verdict}` : ''}`.trim() },
     head,
     f.detail ? h('p', { class: 'step-detail' }, f.detail) : null,
     suggestionSection(kind, f),
+    noteEl,
     diffSection,
     decisionRow(data, f));
 }
@@ -854,13 +922,42 @@ function suggestionSection(kind, f) {
 }
 
 function commentEditForm(kind, f) {
+  function cancel() { state.flow.editingComment = null; state.flow.editingKind = null; reviewRefresh(); }
+
+  // Spec: keep the audit SUGGESTION visible (read-only) and give a SEPARATE field for the
+  // reviewer's note — what they object to, or their answer if the finding asks a question.
+  // The note persists on the finding (finding.note); the suggestion is left untouched.
+  if (kind === 'spec') {
+    const decKind = state.flow.editingKind === 'redirect' ? 'redirect' : 'edit';
+    const ta = h('textarea', {
+      class: 'comment-edit-ta', rows: '4', spellcheck: 'true',
+      'aria-label': 'Your note / response',
+      placeholder: decKind === 'redirect'
+        ? "Why is this the wrong fix, or where/how should it be done instead? (your counter)"
+        : "Your note: what to change about the suggestion, or your answer if it asks for clarification.",
+      onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
+    });
+    ta.value = f.note || '';
+    const form = h('div', { class: 'comment-edit' },
+      f.suggestion ? h('div', { class: 'f-suggestion' },
+        h('span', { class: 'f-suglabel' }, 'Suggestion'),
+        h('p', {}, f.suggestion)) : null,
+      h('span', { class: 'f-suglabel' }, decKind === 'redirect' ? 'Your counter / answer' : 'Your note / answer'),
+      ta,
+      h('div', { class: 'comment-edit-actions' },
+        h('button', { class: 'btn btn-accent', type: 'button', onclick: () => saveSpecNote(f.fp, ta.value, decKind) }, 'Save note'),
+        h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel')));
+    requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
+    return form;
+  }
+
+  // PR: the suggestion IS the proposed comment, so editing it inline is the intent.
   const ta = h('textarea', {
     class: 'comment-edit-ta', rows: '5', spellcheck: 'true',
     'aria-label': `${suggestionLabel(kind)} — editing`,
     onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
   });
   ta.value = f.suggestion || '';
-  function cancel() { state.flow.editingComment = null; reviewRefresh(); }
   const form = h('div', { class: 'comment-edit proposed-comment' },
     h('span', { class: 'f-suglabel' }, `${suggestionLabel(kind)} — editing`),
     ta,
@@ -869,6 +966,30 @@ function commentEditForm(kind, f) {
       h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel')));
   requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
   return form;
+}
+
+/* Persist a spec finding's reviewer NOTE (separate from the suggestion) plus the chosen decision
+ * (edit keeps the suggestion + your note; redirect routes it elsewhere with your counter). */
+async function saveSpecNote(fp, note, decKind) {
+  const f = findFinding(fp);
+  if (f) f.note = note;                       // optimistic
+  setFlowDecision(fp, decKind);
+  state.flow.editingComment = null;
+  state.flow.editingKind = null;
+  reviewRefresh();
+  try {
+    // Persist the note; for 'edit' also persist the decision so it's durable across refresh.
+    const body = decKind === 'edit' ? { note, decision: 'edit' } : { note };
+    await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    await loadDetail(current.id, true);
+  } catch (e) {
+    toast(`Note save failed: ${e.message}`);
+    try { await loadDetail(current.id, true); } catch { /* keep optimistic */ }
+  }
+  reviewRefresh();
 }
 
 /* Persist the edited proposed-comment body (via setFindingDetails on the server),
@@ -897,9 +1018,10 @@ async function saveComment(fp, val) {
  * draft). Pulled out of stepCard so suggestion-only findings render without it. */
 function stepDiffSection(f, verdict) {
   const { adds, dels, hunks } = draftStats(f);
+  const renderable = canRenderProse(f);
   const mkTab = (mode, label) => h('button', {
-    class: `diff-tab ${state.diffMode === mode ? 'active' : ''}`, type: 'button', 'aria-label': `${label} diff`,
-    onclick: () => { state.diffMode = mode === 'split' ? 'split' : 'unified'; refreshModal(); },
+    class: `diff-tab ${state.diffMode === mode ? 'active' : ''}`, type: 'button', 'aria-label': `${label} view`,
+    onclick: () => { state.diffMode = mode; reviewRefresh(); },
   }, label);
 
   const diffHead = h('div', { class: 'step-diffhead' },
@@ -908,7 +1030,7 @@ function stepDiffSection(f, verdict) {
     h('span', { class: 'diff-counts' },
       h('span', { class: 'diff-add-n' }, `+${adds}`), ' ', h('span', { class: 'diff-del-n' }, `−${dels}`)),
     hunks.length ? h('div', { class: 'diff-toggle', role: 'group', 'aria-label': 'Diff view mode' },
-      mkTab('unified', 'Unified'), mkTab('split', 'Split')) : null);
+      renderable ? mkTab('rendered', 'Rendered') : null, mkTab('unified', 'Unified'), mkTab('split', 'Split')) : null);
 
   const banner = verdict !== 'proposed'
     ? h('div', { class: `rm-verdict-banner verdict-${verdict}` },
@@ -955,6 +1077,7 @@ async function undecide(f) {
   delete state.flow.decisions[f.fp];
   state.flow.waiving = null;
   state.flow.editingComment = null;
+  state.flow.editingKind = null;
   reviewRefresh();
   // Clear the persisted decision too: a dismissed (waived) finding is reopened; an
   // approve/edit marker is simply removed. Keeps every surface in sync.
@@ -1053,13 +1176,32 @@ async function decide(data, f, kind) {
     next();
   } else if (kind === 'edit') {
     setFlowDecision(fp, 'edit');
-    if (!f.draft) { reviewRefresh(); return; }
+    // Suggestion-only finding (no code-diff draft): there are no per-hunk controls to reveal, so
+    // open the inline editor — the reviewer keeps the suggestion visible and writes a separate
+    // note/answer. Save persists the note on the finding.
+    if (!f.draft) {
+      state.flow.editingComment = fp;
+      state.flow.editingKind = 'edit';
+      if (!inStepper) state.modalMode = 'review';
+      reviewRefresh();
+      requestAnimationFrame(() => { const ta = $('.comment-edit-ta'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } });
+      return;
+    }
     if (!inStepper) state.modalMode = 'review';
     if (draftVerdict(f) !== 'proposed') await setVerdict(fp, 'proposed');
     else reviewRefresh();   // reveal the per-hunk controls; reviewer edits then Next
   } else if (kind === 'redirect') {
     setFlowDecision(fp, 'redirect');
-    if (!f.draft) { reviewRefresh(); return; }
+    // Suggestion-only finding: same editor (suggestion read-only + a counter/answer field), so the
+    // reviewer can write where/how it should be done instead even without a code-diff draft.
+    if (!f.draft) {
+      state.flow.editingComment = fp;
+      state.flow.editingKind = 'redirect';
+      if (!inStepper) state.modalMode = 'review';
+      reviewRefresh();
+      requestAnimationFrame(() => { const ta = $('.comment-edit-ta'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } });
+      return;
+    }
     if (!inStepper) state.modalMode = 'review';
     if (draftVerdict(f) !== 'redirect') await setVerdict(fp, 'redirect');
     else reviewRefresh();
@@ -1221,13 +1363,58 @@ function finishView(data) {
     ? exportPanel(data.feature, toExport, 'feature')
     : h('p', { class: 'meta-dim export-empty' }, 'No applicable changes to export — every item was waived or skipped.');
 
-  // Spec: "mark as in-flight". PR: the Post gate is the whole action (postActionEl).
+  // Spec: "Apply accepted changes" (write-back to ADO/Confluence via the runner) is the primary
+  // action; "Mark in-flight" stays as the local-only bookkeeping. PR: the Post gate is the whole
+  // action (postActionEl). Only accept/edit are written back — redirect is countered (re-auditing),
+  // reject/waive/skip are not.
   const applyN = reworkFps.length + waiveItems.length;
+  const applyableFps = state.flow.items.filter((fp) => ['accept', 'edit'].includes(flowDecisionKind(fp)));
+  const applyableN = applyableFps.length;
+  // Apply only writes findings that carry an actual before→after draft bound to a write target
+  // (targetRef) and aren't rejected/redirected. Approving a finding ≠ having a writable proposal —
+  // drafts come from /flowlever:propose. Gating on this is what stops Apply from silently no-opping.
+  const isDraftable = (fp) => {
+    const ff = findings.find((x) => x.fp === fp);
+    const dr = ff && ff.draft;
+    const tr = dr && dr.targetRef;
+    const verdict = dr && dr.review && dr.review.verdict;
+    return !!tr && verdict !== 'reject' && verdict !== 'redirect';
+  };
+  const draftableFps = applyableFps.filter(isDraftable);
+  const draftableN = draftableFps.length;
+  const undraftedN = applyableN - draftableN;   // approved/edited but no writable draft yet
+  const applyReqs = state.flow.applyReqs || [];
+  const activeApply = applyReqs.find((r) => r.status === 'queued' || r.status === 'running');
+  const busy = !!(state.flow.applying || activeApply);
+  // The primary spec button has three modes: APPLY (writable drafts exist) · PROPOSE (approved but
+  // nothing drafted yet — clicking drafts them) · disabled (nothing accepted). This is what makes
+  // "Draft proposals first" actually DO something instead of being an inert disabled button.
+  const proposeMode = !busy && draftableN === 0 && undraftedN > 0;
+  const applyMode = !busy && draftableN > 0;
+  const applyLabel = busy
+    ? (activeApply && activeApply.status === 'running'
+        ? `⏳ Applying${activeApply.phase ? ` · ${activeApply.phase}` : '…'}`
+        : '⏳ Queued…')
+    : (applyMode ? `Apply ${plural(draftableN, 'change', 'changes')} → ADO / Confluence`
+        : proposeMode ? `Draft ${plural(undraftedN, 'proposal', 'proposals')} first`
+        : 'Nothing accepted to apply');
   const actions = h('div', { class: 'finish-actions' },
     isPr ? null : h('button', {
-      class: 'btn btn-accent', type: 'button', disabled: applyN === 0,
+      class: `btn btn-accent${busy ? ' is-busy' : ''}`, type: 'button',
+      disabled: busy || (!applyMode && !proposeMode),
+      'aria-busy': busy ? 'true' : 'false',
+      title: applyMode
+        ? 'Queue the write-back: the runner applies your accepted/edited proposals to ADO work-item fields / Confluence sections — surgically, on your confirmation (nothing is written until you click).'
+        : proposeMode
+          ? 'Draft the before→after edits for your accepted findings (runs /flowlever:propose). You then review them here and Apply.'
+          : 'Nothing accepted to apply yet.',
+      onclick: () => { if (applyMode) applySpec(draftableFps); else if (proposeMode) enqueuePropose(); },
+    }, busy ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : null, applyLabel),
+    isPr ? null : h('button', {
+      class: 'btn', type: 'button', disabled: applyN === 0 || busy,
+      title: 'Mark these findings as rework-in-flight locally (no write-back).',
       onclick: () => applyReviewed(reworkFps, waiveItems),
-    }, applyN ? `Mark ${plural(applyN, 'finding', 'findings')} as in-flight` : 'Nothing to apply'),
+    }, applyN ? `Mark ${plural(applyN, 'finding', 'findings')} in-flight` : 'Nothing to mark'),
     h('button', { class: 'btn', type: 'button', onclick: () => { state.flow.finish = false; renderFlowInto(); } }, '← Back to steps'),
     h('button', { class: 'btn', type: 'button',
       onclick: () => { location.hash = `#/feature/${encodeURIComponent(current.id)}`; } }, 'Exit to board'));
@@ -1241,7 +1428,53 @@ function finishView(data) {
       h('div', { class: 'step-section-label' }, 'Export work order — hand to a coding agent'),
       exportEl),
     actions,
+    (!isPr && undraftedN > 0 && draftableN === 0)
+      ? h('div', { class: 'apply-status apply-needs-input' },
+          h('span', { class: 'apply-dot' }, '✎'),
+          h('span', {}, `${plural(undraftedN, 'accepted finding', 'accepted findings')} have no writable draft yet. `,
+            'Run ', h('code', {}, `/flowlever:propose ${current.id}`),
+            ' to draft the before→after edits, review them, then Apply. (Structural or decision-only findings may stay as action items.)'))
+      : null,
+    isPr ? null : applyStatusEl(state.flow.applyReqs || []),
     nextStepNote(data));
+}
+
+/* Live status of the spec write-back (apply) request, shown under the finish
+ * actions so "Apply" feels responsive: queued → applying (+phase) → applied /
+ * failed, plus the amber "needs your input" cue when the runner hits a 2FA/auth
+ * prompt. Reads the latest apply request for this workspace. */
+function applyStatusEl(applyReqs) {
+  if (!applyReqs.length) return null;
+  const r = [...applyReqs].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+  if (!r) return null;
+  if (r.needsInput) {
+    return h('div', { class: 'apply-status apply-needs-input' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, r.note || 'Waiting on you — approve the auth prompt in your other window to continue.'));
+  }
+  const isPropose = r.action === 'propose';
+  if (r.status === 'queued') {
+    return h('div', { class: 'apply-status apply-running' },
+      h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', {}, 'Queued — waiting for the runner to pick it up…'));
+  }
+  if (r.status === 'running') {
+    return h('div', { class: 'apply-status apply-running' },
+      h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, isPropose ? `Drafting proposals${r.phase ? ` — ${r.phase}` : '…'}` : `Applying${r.phase ? ` — ${r.phase}` : ' to spec…'}`));
+  }
+  if (r.status === 'done') {
+    return h('div', { class: 'apply-status apply-done' },
+      h('span', { class: 'apply-dot' }, '✓'),
+      h('span', {}, isPropose
+        ? `${r.phase || 'Proposals drafted'} — review the red/green diffs, then Apply.`
+        : `${r.phase || 'Applied to spec'} — re-audit to confirm the edits landed.`));
+  }
+  if (r.status === 'error') {
+    return h('div', { class: 'apply-status apply-error' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, `Apply failed: ${r.note || 'see the Claude session for details'}`));
+  }
+  return null;
 }
 
 /* PR finish screens swap the "re-audit" hint for a posting action: enqueue an
@@ -1253,8 +1486,9 @@ function nextStepNote(data) {
   if (kind === 'pr-review' || kind === 'pr-respond') {
     return h('div', { class: 'finish-next' }, '↻ Next: post back to the PR above, then the threads update in Azure DevOps.');
   }
-  return h('div', { class: 'finish-next' }, '↻ Next: re-audit with ', h('code', {}, '/lever:audit'),
-    ' in Claude Code so the ledger reconciles your fixes.');
+  return h('div', { class: 'finish-next' }, '↻ Next: ', h('strong', {}, 'Apply'),
+    ' writes accepted changes back to ADO / Confluence (countered items re-audit automatically), then ',
+    h('code', {}, '/lever:audit'), ' reconciles the ledger.');
 }
 
 function postActionEl(data) {
@@ -1317,11 +1551,12 @@ async function persistTriage(data) {
   }
   try {
     if (postFps.length) {
-      // Stamp them posted (awaiting author), NOT resolved: a posted comment stays open for the
-      // re-review reconcile, sits in its own lane, and stops being re-counted as "to review".
+      // Mark them "Posting…" (in-flight), NOT posted: the real postedAt stamp is set by the
+      // runner once the comment is actually on the PR. This keeps the lane honest — the card
+      // reads "Posting…" until the runner finishes, then moves to "Posted — awaiting author".
       await api(`/api/features/${encodeURIComponent(current.id)}/review/apply`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fps: postFps, status: 'posted' }),
+        body: JSON.stringify({ fps: postFps, status: 'pending-post' }),
       });
     }
     for (const { fp, reason } of waiveItems) {
@@ -1369,7 +1604,70 @@ async function reReviewPr(data) {
   }
 }
 
+/* Re-audit: enqueue a fresh full audit of the SAME spec workspace. The runner re-fetches the
+ * spec sources and re-ingests — reconciliation auto-resolves the findings the spec now reflects
+ * (the applied ones), keeps any still-open, and flags regressions. `wsId` pins it to THIS
+ * workspace (the watch runner treats `audit` + wsId as "re-audit existing", not a new analysis). */
+async function reAuditSpec(data) {
+  const feature = (data && data.feature) || (state.detail && state.detail.feature);
+  try {
+    await api('/api/requests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'audit', wsId: current.id, title: (feature && feature.title) || null }),
+    });
+    toast('Re-audit queued — the runner will re-fetch the spec and reconcile', 'success');
+    ensureApplyPolling();
+    pollRequestsNow();
+  } catch (e) {
+    toast(`Could not queue re-audit: ${e.message}`);
+  }
+}
+
+/* Draft proposals: enqueue a `propose` job the runner fulfils with /flowlever:propose, which
+ * attaches before→after drafts to the accepted findings (read-only — writes nothing external).
+ * Once drafted, this same button flips to "Apply". */
+async function enqueuePropose() {
+  state.flow.applying = true;     // reuse the busy spinner while the propose job runs
+  renderFlowInto();
+  try {
+    await api('/api/requests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'propose', wsId: current.id }),
+    });
+    toast('Drafting proposals — the runner will attach before→after edits for review', 'success');
+    ensureApplyPolling();
+    pollRequestsNow();
+  } catch (e) {
+    state.flow.applying = false;
+    renderFlowInto();
+    toast(`Could not queue propose: ${e.message}`);
+  }
+}
+
+/* Spec Apply gate: first move the accepted/edited findings into the "Applying…" lane
+ * (pending=apply — in-flight, NOT yet written), then enqueue the apply request the runner
+ * fulfils. The runner stamps appliedAt on the real write → "Applied — awaiting re-audit". */
+async function applySpec(applyableFps) {
+  if (applyableFps && applyableFps.length) {
+    try {
+      await api(`/api/features/${encodeURIComponent(current.id)}/review/apply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fps: applyableFps, status: 'pending-apply' }),
+      });
+      await loadDetail(current.id, true);
+    } catch (e) {
+      toast(`Could not mark applying: ${e.message}`);
+    }
+  }
+  await enqueueApply('Apply spec changes');
+}
+
 async function enqueueApply(label) {
+  // Optimistic: flip the button into its busy state immediately (before the POST
+  // round-trips) so the click feels responsive; the apply-request polling then
+  // drives the real queued → running → done state.
+  state.flow.applying = true;
+  renderFlowInto();
   try {
     await api('/api/requests', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1379,6 +1677,8 @@ async function enqueueApply(label) {
     ensureApplyPolling();
     pollRequestsNow();
   } catch (e) {
+    state.flow.applying = false;
+    renderFlowInto();
     toast(`Could not queue: ${e.message}`);
   }
 }
@@ -1519,6 +1819,19 @@ function inboxRow(r) {
   return wrap;
 }
 
+/* Active-first lists: finished workspaces are tucked into a collapsed <details> so
+ * what still needs you stays on top. Keyed open-state survives the polling re-renders
+ * (which rebuild the list every tick) so an expanded "Done" section doesn't snap shut. */
+const doneOpen = {};
+function doneDisclosure(key, count, bodyEl) {
+  return h('details', {
+      class: 'done-disc', open: !!doneOpen[key],
+      ontoggle: (e) => { doneOpen[key] = e.currentTarget.open; },
+    },
+    h('summary', { class: 'done-disc-sum' }, `Done (${count})`),
+    bodyEl);
+}
+
 async function renderHome() {
   current.view = 'home'; current.id = null; current.tab = null;
   const seq = ++routeSeq;
@@ -1560,6 +1873,13 @@ async function renderHome() {
   }
 
   const actionable = rows.filter((r) => r.status !== 'done' && needsYouBits(r.counts).length).length;
+  const activeRows = rows.filter((r) => r.status !== 'done');
+  const doneRows = rows.filter((r) => r.status === 'done');
+  const lists = [];
+  if (activeRows.length) lists.push(h('div', { class: 'inbox' }, activeRows.map(inboxRow)));
+  else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
+  if (doneRows.length) lists.push(doneDisclosure('home', doneRows.length,
+    h('div', { class: 'inbox done-disc-body' }, doneRows.map(inboxRow))));
   app.replaceChildren(
     h('div', { class: 'view-head' },
       h('h1', {}, 'Home'),
@@ -1567,7 +1887,7 @@ async function renderHome() {
         ? `${plural(actionable, 'workspace', 'workspaces')} need you · ${plural(rows.length, 'workspace', 'workspaces')} total`
         : `All caught up · ${plural(rows.length, 'workspace', 'workspaces')} under watch`)),
     requestsStripEl([]),
-    h('div', { class: 'inbox' }, rows.map(inboxRow)),
+    h('div', { class: 'section-lists' }, ...lists),
   );
   startHomeRequestsPoll();
 }
@@ -1657,7 +1977,7 @@ async function renderSection(kind) {
 
   app.replaceChildren(...[
     sectionHead(kind, features.length || null),
-    isPr ? newRequestZone(kind) : null,
+    isPr ? newRequestZone(kind) : (kind === 'spec' ? newAuditZone() : null),
     gridZone,
   ].filter(Boolean));
 
@@ -1670,18 +1990,27 @@ async function renderSection(kind) {
 function sectionGrid(kind, features, requests) {
   const live = (requests || []).filter(isLiveJob);
   const used = new Set();
-  const cards = features.map((f) => {
+  const cardFor = (f) => {
     const job = jobForFeature(f, live);
     if (job) used.add(job.id);
     return featureCard(f, job);
-  });
+  };
+  // Active workspaces stay on top; finished ones drop into a collapsed "Done" section.
+  const activeCards = features.filter((f) => f.status !== 'done').map(cardFor);
+  const doneCards = features.filter((f) => f.status === 'done').map(cardFor);
   // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, shown first.
   const pending = live
     .filter((r) => r.action === kind && r.prId && !used.has(r.id))
     .sort((a, b) => jobRank(b) - jobRank(a))
     .map(pendingJobCard);
-  const all = [...pending, ...cards];
-  return all.length ? h('div', { class: 'features-grid' }, all) : sectionEmpty(kind);
+  const top = [...pending, ...activeCards];
+  if (!top.length && !doneCards.length) return sectionEmpty(kind);
+  const lists = [];
+  if (top.length) lists.push(h('div', { class: 'features-grid' }, top));
+  else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
+  if (doneCards.length) lists.push(doneDisclosure(kind, doneCards.length,
+    h('div', { class: 'features-grid done-disc-body' }, doneCards)));
+  return h('div', { class: 'section-lists' }, ...lists);
 }
 
 /* Poll requests for a PR section: rebind jobs to cards every tick, and when a job
@@ -1817,7 +2146,7 @@ const REQ_STATUS = {
   done:    { glyph: '✓', label: 'Done' },
   error:   { glyph: '✗', label: 'Error' },
 };
-const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR' };
+const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis' };
 
 /* ---- live job ↔ card binding ----------------------------------------------
  * Instead of a separate "jobs" strip duplicating the cards, the active request
@@ -2114,6 +2443,64 @@ function newRequestForm(kind, onClose) {
       h('button', { class: 'btn', type: 'button', onclick: onClose }, 'Cancel')));
 }
 
+/* The "+ New spec analysis" entry (spec section): a button that swaps in an inline form
+ * (source URLs + optional title) and POSTs an `audit` request. The runner (/flowlever:watch)
+ * creates the workspace from the URLs, registers the sources, and runs the audit sweep. */
+function newAuditZone() {
+  const zone = h('div', { class: 'new-request-zone', id: 'new-request-zone' });
+  const showButton = () => zone.replaceChildren(h('button', {
+    class: 'btn btn-accent nr-add', type: 'button', onclick: showForm,
+  }, '+ New spec analysis'));
+  function showForm() {
+    zone.replaceChildren(newAuditForm(showButton));
+    const ta = zone.querySelector('.nr-urls');
+    if (ta) requestAnimationFrame(() => ta.focus());
+  }
+  showButton();
+  return zone;
+}
+
+function newAuditForm(onClose) {
+  const titleInput = h('input', {
+    class: 'nr-title', type: 'text', placeholder: 'Title (optional, e.g. "Checkout redesign")', 'aria-label': 'Title',
+    onkeydown: (e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onClose(); },
+  });
+  // The source URLs (Confluence spec / ADO work items / Figma) and any focus go in
+  // `instructions`; the audit runner parses them, creates the workspace + sources, and audits.
+  const urlsInput = h('textarea', {
+    class: 'nr-urls nr-instructions', rows: '4', 'aria-label': 'Spec / work-item / Figma URLs',
+    placeholder: "Paste the spec & work-item URLs (one per line) — Confluence spec, ADO user story / bug, Figma frame. Add a focus note if you like, e.g. 'just the payment flow'.",
+    onkeydown: (e) => { if (e.key === 'Escape') onClose(); },
+  });
+  async function submit() {
+    const instructions = urlsInput.value.trim();
+    if (!instructions) { urlsInput.classList.add('invalid'); urlsInput.focus(); return; }
+    try {
+      await api('/api/requests', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'audit',
+          title: titleInput.value.trim() || undefined,
+          instructions,
+        }),
+      });
+      toast('Queued spec analysis', 'success');
+      onClose();
+      ensureApplyPolling();
+      pollRequestsNow();
+    } catch (e) {
+      toast(`Could not queue: ${e.message}`);
+    }
+  }
+  return h('div', { class: 'nr-form' },
+    h('div', { class: 'nr-row' }, titleInput),
+    h('label', { class: 'nr-instr-label' }, 'Spec / work-item / Figma URLs'),
+    urlsInput,
+    h('div', { class: 'nr-actions' },
+      h('button', { class: 'btn btn-accent', type: 'button', onclick: submit }, 'Queue analysis'),
+      h('button', { class: 'btn', type: 'button', onclick: onClose }, 'Cancel')));
+}
+
 /* ============================== detail: load + shell ============================== */
 
 async function loadDetail(id, force = false) {
@@ -2151,7 +2538,9 @@ async function renderDetail(id, tab) {
     return;
   }
   if (seq !== routeSeq) return;
+  state.featureJob = null; state.featureJobSig = '';   // reset job banner when entering a feature
   app.replaceChildren(detailView(data, tab));
+  ensureFeatureJobPolling(id);
   if (tab === 'report') loadReportInto(id, seq);
 }
 
@@ -2159,6 +2548,63 @@ function rerenderDetail() {
   if (current.view !== 'detail' || !state.detail) return;
   $('#app').replaceChildren(detailView(state.detail, current.tab));
   if (current.tab === 'report') loadReportInto(current.id, routeSeq);
+}
+
+/* Keep the feature view's job banner live: while a propose/apply job for THIS workspace is
+ * queued/running it shows "Drafting…/Applying…"; the moment it finishes we reload the detail so
+ * freshly-attached drafts / applied stamps appear, then flip the banner to "ready to review" /
+ * "applied". This is what makes the draft/apply lifecycle auto-update and read clearly. */
+function ensureFeatureJobPolling(id) {
+  startPolling(`featjob:${id}`, (reqs) => {
+    if (current.view !== 'detail' || current.id !== id) return;
+    const mine = (reqs || []).filter((r) => (r.action === 'propose' || r.action === 'apply') && r.wsId === id);
+    const latest = mine.length
+      ? [...mine].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] : null;
+    const sig = latest ? `${latest.id}:${latest.status}:${latest.phase || ''}:${latest.needsInput ? 1 : 0}` : '';
+    if (sig === (state.featureJobSig || '')) return;        // nothing changed
+    const prev = state.featureJob;
+    state.featureJob = latest; state.featureJobSig = sig;
+    const justDone = latest && latest.status === 'done'
+      && (!prev || prev.id !== latest.id || prev.status !== 'done');
+    if (justDone) { loadDetail(id, true).then(() => rerenderDetail()).catch(() => rerenderDetail()); }
+    else rerenderDetail();
+  });
+}
+
+/* The live banner above the board: what the runner is doing for this workspace right now. */
+function specJobBanner(data) {
+  const j = state.featureJob;
+  const fid = data.feature && data.feature.id;
+  if (!j || j.wsId !== fid) return null;
+  const isPropose = j.action === 'propose';
+  if (j.needsInput) {
+    return h('div', { class: 'apply-status apply-needs-input feat-job' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, j.note || 'Waiting on you — approve the auth prompt in your other window.'));
+  }
+  if (j.status === 'queued') {
+    return h('div', { class: 'apply-status apply-running feat-job' },
+      h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, isPropose ? 'Drafting proposals — queued for the runner…' : 'Applying — queued for the runner…'));
+  }
+  if (j.status === 'running') {
+    return h('div', { class: 'apply-status apply-running feat-job' },
+      h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, isPropose ? `Drafting proposals${j.phase ? ` — ${j.phase}` : '…'}` : `Applying${j.phase ? ` — ${j.phase}` : '…'}`));
+  }
+  if (j.status === 'done') {
+    return h('div', { class: 'apply-status apply-done feat-job' },
+      h('span', { class: 'apply-dot' }, '✓'),
+      h('span', {}, isPropose
+        ? 'Proposals ready — open a finding with a ± to review the red/green diff, then Apply.'
+        : 'Applied — re-audit (↻) to confirm the changes landed.'));
+  }
+  if (j.status === 'error') {
+    return h('div', { class: 'apply-status apply-error feat-job' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, `${isPropose ? 'Drafting' : 'Apply'} failed: ${j.note || 'see the Claude session'}`));
+  }
+  return null;
 }
 
 function detailSkeleton() {
@@ -2231,14 +2677,12 @@ function detailView(data, tab) {
     h('div', { class: 'detail-head' },
       h('div', { class: 'dh-left' },
         h('a', { class: 'backlink', href: km.section }, `← ${km.label}`),
-        h('div', { class: 'dh-titlerow' },
-          h('h1', {}, feature.title || feature.id || current.id),
+        h('h1', { class: 'dh-title' }, feature.title || feature.id || current.id),
+        h('div', { class: 'dh-meta' },
           kindBadge(kind),
           statusChip(feature.status),
-          detailDeleteZone(feature),
-        ),
-        h('div', { class: 'dh-sub meta-dim' },
           feature.id ? h('code', { class: 'feature-id' }, feature.id) : null,
+          detailDeleteZone(feature),
         ),
       ),
       h('div', { class: 'dh-right' },
@@ -2253,6 +2697,7 @@ function detailView(data, tab) {
       ),
     ),
     loopStrip(data, reviewCta(data)),
+    specJobBanner(data),
     reviewScopeNote(feature),
     sourcesStrip(feature),
     h('nav', { class: 'tabs', role: 'tablist' },
@@ -2306,12 +2751,14 @@ function sourcesStrip(feature) {
         h('span', { class: 'src-group' },
           g.items.map((it) => {
             const href = safeHref(it.url);
+            const txt = g.text(it).trim();
+            const ttl = `${g.label}: ${txt}`;
             const inner = [iconSpan(g.icon, `icon src-icon src-${g.key}`),
-              h('span', { class: 'src-text' }, g.text(it).trim()),
+              h('span', { class: 'src-text' }, txt),
               href ? iconSpan('link', 'icon src-out') : null];
             return href
-              ? h('a', { class: 'src-link', href, target: '_blank', rel: 'noopener noreferrer', title: g.label }, inner)
-              : h('span', { class: 'src-link src-nolink', title: g.label }, inner);
+              ? h('a', { class: 'src-link', href, target: '_blank', rel: 'noopener noreferrer', title: ttl }, inner)
+              : h('span', { class: 'src-link src-nolink', title: ttl }, inner);
           }))),
   );
 }
@@ -2367,6 +2814,62 @@ function toSplitRows(rows) {
 }
 
 const GUTTER = { add: '+', del: '−', context: ' ', empty: '' };
+
+/* ---- rendered proposal view for the READ view of a proposal diff. Reuses the app's
+ * existing DOM markdown renderer (renderMarkdown / mdInline, defined later) so the proposed
+ * text shows as real formatted content — tables, bold, code, links — instead of raw markup.
+ * gherkin gets a small DOM builder that bolds Given/When/Then. Returns a DOM NODE (appended as
+ * a child), NOT an HTML string. ---- */
+function gherkinNode(src) {
+  const KW = /^(\s*)(Given|When|Then|And|But|Scenario|Feature|Background|Examples)\b(.*)$/;
+  const wrap = h('div', { class: 'rd-gherkin' });
+  for (const l of String(src).replace(/\r\n/g, '\n').split('\n')) {
+    if (l.trim() === '') { wrap.append(h('div', { class: 'rd-gblank' })); continue; }
+    const m = KW.exec(l);
+    if (m) {
+      wrap.append(h('div', { class: 'rd-gline' },
+        m[1] ? h('span', { class: 'rd-indent' }, m[1]) : null,
+        h('strong', { class: 'rd-kw' }, m[2]),
+        mdInline(m[3])));
+    } else {
+      wrap.append(h('div', { class: 'rd-gline' }, mdInline(l)));
+    }
+  }
+  return wrap;
+}
+function proseNode(src, format) {
+  if (format === 'markdown') return renderMarkdown(src);   // existing DOM renderer → a node
+  if (format === 'gherkin') return gherkinNode(src);
+  return h('pre', { class: 'rd-pre' }, String(src));
+}
+/* True when a draft's text is worth rendering (vs. a raw code diff). */
+function canRenderProse(f) {
+  const fmt = f && f.draft && f.draft.format;
+  return fmt === 'markdown' || fmt === 'gherkin';
+}
+/* The rendered (read-only) view of one hunk: the current text (if this hunk
+ * removes anything) and the proposed text, each rendered from the draft format.
+ * Context + del → "current"; context + add → "proposed". */
+function renderedHunkEl(f, hunk) {
+  const fmt = (f.draft && f.draft.format) || 'text';
+  const beforeText = hunk.rows.filter((r) => r.type === 'context' || r.type === 'del').map((r) => r.text).join('\n');
+  const afterText = hunk.rows.filter((r) => r.type === 'context' || r.type === 'add').map((r) => r.text).join('\n');
+  const removes = hunk.rows.some((r) => r.type === 'del');
+  const adds = hunk.rows.some((r) => r.type === 'add');
+  const blocks = [];
+  if (removes && beforeText.trim()) {
+    blocks.push(h('div', { class: 'rd-block rd-current' },
+      h('div', { class: 'rd-label' }, 'Current'),
+      h('div', { class: 'rd-body' }, proseNode(beforeText, fmt))));
+  }
+  if (afterText.trim()) {
+    blocks.push(h('div', { class: 'rd-block rd-proposed' },
+      h('div', { class: 'rd-label' }, removes ? 'Proposed' : 'Proposed addition'),
+      h('div', { class: 'rd-body' }, proseNode(afterText, fmt))));
+  }
+  if (!blocks.length) blocks.push(h('div', { class: 'diff-empty-note' }, 'No changes.'));
+  return h('div', { class: 'rendered-diff' }, ...blocks);
+}
 
 function diffUnified(rows) {
   const t = h('div', { class: 'diff-table diff-unified' });
@@ -2674,10 +3177,11 @@ function reviewFrame(f) {
   // suggestion-only PR finding has none and must not read draft.* (Bug A).
   const stats = hasDraft ? draftStats(f) : null;
 
+  const renderable = canRenderProse(f);
   const mkTab = (mode, label) => h('button', {
     class: `diff-tab ${state.diffMode === mode ? 'active' : ''}`,
-    type: 'button', 'aria-label': `${label} diff`,
-    onclick: () => { state.diffMode = mode === 'split' ? 'split' : 'unified'; refreshModal(); },
+    type: 'button', 'aria-label': `${label} view`,
+    onclick: () => { state.diffMode = mode; reviewRefresh(); },
   }, label);
 
   const headMeta = hasDraft
@@ -2699,7 +3203,7 @@ function reviewFrame(f) {
     ),
     h('div', { class: 'rm-head-right' },
       hasDraft && stats.hunks.length ? h('div', { class: 'diff-toggle', role: 'group', 'aria-label': 'Diff view mode' },
-        mkTab('unified', 'Unified'), mkTab('split', 'Split')) : null,
+        renderable ? mkTab('rendered', 'Rendered') : null, mkTab('unified', 'Unified'), mkTab('split', 'Split')) : null,
       h('button', { class: 'rm-close', type: 'button', 'aria-label': 'Close review',
         onclick: () => closeModal() }, '×'),
     ),
@@ -2801,6 +3305,17 @@ function reviewNoteSection(f) {
     }
   }
 
+  // When the proposal is redirected (rejected with a counter), offer to fire the loop:
+  // POST /counter records the redirect + note AND queues a scoped re-audit so the proposer
+  // re-evaluates just this item against the counter and re-drafts.
+  const reauditBtn = verdict === 'redirect'
+    ? h('button', {
+        class: 'btn btn-accent reaudit-btn', type: 'button',
+        title: 'Send your counter and re-audit just this item against it (a scoped re-audit job is queued for /flowlever:watch).',
+        onclick: (e) => { e.stopPropagation(); sendCounter(f, ta); },
+      }, '↻ Send counter & re-audit')
+    : null;
+
   return h('div', { class: 'review-note', onclick: stop },
     h('div', { class: 'review-note-head' },
       h('span', { class: 'f-suglabel' }, 'Note to the agent / counter-proposal'),
@@ -2809,7 +3324,30 @@ function reviewNoteSection(f) {
       saved,
     ),
     ta,
+    reauditBtn,
   );
+}
+
+/* Reject + counter: POST the counter to /counter, which records verdict=redirect + the note
+ * AND enqueues a SCOPED re-audit so the proposer re-evaluates just this item against the
+ * counter and re-drafts — the per-item refine loop the spec section mirrors from PR review. */
+async function sendCounter(f, ta) {
+  const note = ((ta && ta.value) || draftNote(f) || '').trim();
+  if (!note) { toast('Write your counter-proposal in the note first'); return; }
+  try {
+    const res = await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(f.fp)}/counter`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    });
+    const cur = findFinding(f.fp);
+    if (cur && res && res.finding && res.finding.draft) cur.draft = res.finding.draft;
+    toast('Counter sent — scoped re-audit queued', 'success');
+    ensureApplyPolling();
+    pollRequestsNow();
+    refreshModal();
+  } catch (e) {
+    toast(`Could not send counter: ${e.message}`);
+  }
 }
 
 /* Optimistic finding-level verdict op: mutate locally, POST { verdict }, re-render
@@ -2838,8 +3376,11 @@ async function setVerdict(fp, verdict) {
 function hunkEl(f, hunk, decision) {
   const status = (decision && decision.status) || 'undecided';
   const editing = state.editingHunk && state.editingHunk.fp === f.fp && state.editingHunk.idx === hunk.id;
+  const rendered = !editing && canRenderProse(f) && state.diffMode === 'rendered';
   const parts = [
-    h('div', { class: 'hunk-diff' }, state.diffMode === 'split' ? diffSplit(hunk.rows) : diffUnified(hunk.rows)),
+    h('div', { class: `hunk-diff${rendered ? ' hunk-diff-rendered' : ''}` },
+      rendered ? renderedHunkEl(f, hunk)
+        : (state.diffMode === 'split' ? diffSplit(hunk.rows) : diffUnified(hunk.rows))),
   ];
   if (editing) {
     parts.push(hunkEditForm(f, hunk, decision));
@@ -3135,7 +3676,7 @@ function findingsView(data) {
     h('div', { class: 'filterbar' },
       h('div', { class: 'fgroup' }, h('span', { class: 'fgroup-label' }, 'dimension'), dimChips),
       h('div', { class: 'fgroup' }, h('span', { class: 'fgroup-label' }, 'severity'), sevChips),
-      h('div', { class: 'fgroup fgroup-end' }, draftPill, exportAllBtn, statusSel, search),
+      h('div', { class: 'fgroup fgroup-end' }, draftPill, statusSel, search, exportAllBtn),
     ),
     state.exportAll ? featureExportPanel(data) : null,
     h('div', { id: 'board', class: 'board' }),
@@ -3171,21 +3712,35 @@ function buildBoard(board, findings) {
   // own lane so they read as "out, not in-progress". Inserted after Reworking, PR kinds only.
   const kind = (state.detail && state.detail.feature && state.detail.feature.kind) || 'spec';
   const isPr = kind === 'pr-review' || kind === 'pr-respond';
+  // After Reworking, insert the transient in-flight lane (Posting…/Applying…) and the
+  // "out, awaiting reconcile" lane (Posted — awaiting author for PR, Applied — awaiting re-audit
+  // for spec). These are derived from the pending marker + the postedAt/appliedAt stamp, so an
+  // item only reads "done-ish" once the runner has actually written it back.
+  const inflightLane = isPr
+    ? { key: 'pending', label: 'Posting…' }
+    : { key: 'pending', label: 'Applying…' };
+  const outLane = isPr
+    ? { key: 'posted', label: 'Posted — awaiting author' }
+    : { key: 'applied', label: 'Applied — awaiting re-audit' };
   const cols = [];
   for (const col of STATUS_COLS) {
     cols.push(col);
-    if (isPr && col.key === 'reworking') cols.push({ key: 'posted', label: 'Posted — awaiting author' });
+    if (col.key === 'reworking') { cols.push(inflightLane); cols.push(outLane); }
   }
-  const inCol = (f, key) => key === 'posted'
-    ? isPosted(f)
-    : f.status === key && !(isPr && isPosted(f));   // posted findings leave the Reworking lane
-  board.classList.toggle('board-pr', isPr);          // 5-column grid (adds the Posted lane)
+  const inCol = (f, key) => {
+    if (key === 'pending') return isPending(f);
+    if (key === 'posted') return isPosted(f);
+    if (key === 'applied') return isApplied(f);
+    // base status lanes never show a finding that's in-flight or already out
+    return f.status === key && !isInFlightOrOut(f);
+  };
+  board.classList.toggle('board-pr', true);          // wider grid: adds the in-flight + out lanes
   board.replaceChildren(...cols.map((col) => {
     const items = filtered
       .filter((f) => inCol(f, col.key))
       .sort((a, b) => sevRank(a.severity) - sevRank(b.severity)
         || String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')));
-    return h('section', { class: `col col-${col.key}` },
+    return h('section', { class: `col col-${col.key}${items.length ? '' : ' col-vacant'}` },
       h('header', { class: 'col-head' },
         h('span', { class: 'col-title' }, col.label),
         h('span', { class: 'col-count num' }, String(items.length))),
@@ -3223,7 +3778,10 @@ function findingCard(f) {
     h('div', { class: 'f-tags' },
       f.dimension ? h('span', { class: 'dim-tag' }, f.dimension) : null,
       badge ? h('span', { class: `f-badge f-badge-${badge}` }, badge === 'new' ? 'NEW' : 'REGRESSED') : null,
-      f.draft ? h('span', { class: 'f-draft-chip', title: 'Has a proposed change' }, '±') : null,
+      // A drafted proposal that hasn't been decided yet → a clear "review me" cue.
+      (f.draft && f.draft.targetRef && !isReviewed(f) && f.decision === undefined && !isInFlightOrOut(f))
+        ? h('span', { class: 'f-review-chip', title: 'A proposed change is ready — open to review' }, '± review')
+        : (f.draft ? h('span', { class: 'f-draft-chip', title: 'Has a proposed change' }, '±') : null),
       decisionChip(f),
       verdictChip(f),
       f.locus ? h('code', { class: 'f-locus' }, f.locus) : null,

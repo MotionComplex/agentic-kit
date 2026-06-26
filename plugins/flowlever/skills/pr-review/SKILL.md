@@ -116,6 +116,10 @@ text, or the exported work order). For every **accepted/edited** finding (skip r
 inline PR comment via `repo_create_pull_request_thread` (use the user's edited text if present, else the
 suggestion). **Never post without an explicit yes.**
 
+**Post the comment body verbatim — nothing else.** Do NOT append a disclosure/attribution/AI footer
+(e.g. "_this review comment was AI-generated…_", "🤖 Generated with…", "Posted via FlowLever"). The
+posted text is exactly the finding's suggestion or the user's edited text — no signature, no footer.
+
 ### Anchoring — get the line right (this is what makes a comment land on the code it's about)
 A finding's `locus` line is a *hint*; **verify it against the live diff before posting**, because an
 off-by-N or old-vs-new-file line lands the comment on unrelated code (e.g. a JSDoc block instead of the

@@ -21,9 +21,21 @@ const COVERAGE_STATUSES = ['covered', 'partial', 'uncovered', 'orphan'];
 const DRAFT_FORMATS = ['text', 'gherkin', 'markdown'];
 const REVIEW_STATUSES = ['accepted', 'rejected', 'edited'];
 const REVIEW_VERDICTS = ['proposed', 'redirect', 'reject'];
+// The systems a draft can be written back to on apply (spec workspaces). A draft's
+// machine-addressable write target (`draft.targetRef`) names one of these.
+const TARGET_SYSTEMS = ['ado', 'confluence'];
 // UI-triggered job queue. A request is enqueued from the web UI and picked up by
 // a session-side runner skill (/lever:watch) that runs the matching adapter.
-const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply'];
+//   pr-review / pr-respond → load a PR (require prId)
+//   apply                  → write a workspace's reviewed output back to its source
+//                            (require wsId): PR comments for PR kinds, ADO/Confluence
+//                            edits for a spec workspace — the runner branches on kind
+//   re-audit               → scoped re-audit of a spec workspace (require wsId): re-check
+//                            only the findings the reviewer countered (verdict=redirect)
+//   audit                  → start a NEW spec analysis (require instructions = the spec /
+//                            work-item / Figma URLs): the runner creates the workspace,
+//                            registers the sources, and runs the audit sweep
+const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose'];
 const REQUEST_STATUSES = ['queued', 'running', 'done', 'error'];
 
 const DEFAULT_CONFIG = {
@@ -250,10 +262,26 @@ function isPosted(finding) {
   return Boolean(finding.postedAt) && isOpen(finding);
 }
 
+// Spec mirror of isPosted: a finding whose accepted change has actually been written back to
+// Confluence/ADO carries an `appliedAt` stamp. It stays `reworking` (so a re-audit auto-resolves
+// it once the spec genuinely reflects the fix) but sits in the "Applied — awaiting re-audit" lane
+// and, like posted, does not drag readiness down — the reviewer's work is out.
+function isApplied(finding) {
+  return Boolean(finding.appliedAt) && isOpen(finding);
+}
+
+// Transient: the user clicked Post/Apply and the runner is mid-flight. `pending` is 'post' | 'apply'.
+// Set on confirm, cleared the moment the runner stamps postedAt/appliedAt (or on error / reopen).
+// Only meaningful while the finding is still open/reworking and NOT yet stamped done.
+function isPending(finding) {
+  return Boolean(finding.pending) && isOpen(finding) && !finding.postedAt && !finding.appliedAt;
+}
+
 function computeReadiness(ledger, config) {
-  // Posted findings are awaiting the author, not open work for the reviewer, so they don't
-  // penalize the score — but they remain `isOpen` for reconciliation's auto-resolve.
-  const open = ledger.findings.filter((f) => isOpen(f) && !isPosted(f));
+  // Posted / applied / in-flight findings are out of the reviewer's hands (awaiting the author,
+  // awaiting re-audit, or mid write-back), not open work — so they don't penalize the score, but
+  // they remain `isOpen` for reconciliation's auto-resolve.
+  const open = ledger.findings.filter((f) => isOpen(f) && !isPosted(f) && !isApplied(f) && !isPending(f));
   const openBySeverity = { blocker: 0, major: 0, minor: 0, info: 0 };
   let penalty = 0;
   for (const f of open) {
@@ -392,10 +420,12 @@ function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = '
     finding.history.push({ at, from, to: status, by, note: reason ?? '' });
     finding.status = status;
     finding.statusReason = status === 'waived' ? reason : reason ?? null;
-    // A status change supersedes any pending triage decision (approve/edit) — drop it.
+    // A status change supersedes any pending triage decision (approve/edit) and any in-flight
+    // post/apply marker — drop them.
     delete finding.decision;
-    // Reopening a posted finding pulls it back into the review flow, so drop the posted stamp.
-    if (status === 'open') delete finding.postedAt;
+    delete finding.pending;
+    // Reopening a posted/applied finding pulls it back into the review flow, so drop the stamps.
+    if (status === 'open') { delete finding.postedAt; delete finding.appliedAt; }
     if (isOpen(finding)) {
       finding.resolvedInRound = null; // reopening clears the resolution round
     } else if (status === 'resolved') {
@@ -432,6 +462,7 @@ function markPosted(featureId, fps, { by = 'post' } = {}) {
     }
     finding.postedAt = at;
     delete finding.decision;   // posting supersedes the pending approve/edit decision
+    delete finding.pending;    // the in-flight "Posting…" marker is now resolved
     finding.updatedAt = at;
     updated.push(finding);
   }
@@ -442,6 +473,66 @@ function markPosted(featureId, fps, { by = 'post' } = {}) {
     try { setFeatureReview(featureId, { lastPostedAt: at, authorRespondedAt: null, note: null }); }
     catch { /* feature gone — ignore */ }
   }
+  return updated;
+}
+
+// Spec mirror of markPosted: the runner has actually written the accepted change back to
+// Confluence/ADO. Stamp `appliedAt` (→ "Applied — awaiting re-audit" lane), keep it `reworking`
+// so the next /flowlever:audit reconciles it (auto-resolves if the spec now reflects the fix,
+// keeps it open if not). Clears the in-flight "Applying…" marker. Idempotent.
+function markApplied(featureId, fps, { by = 'apply' } = {}) {
+  const list = Array.isArray(fps) ? fps : [fps];
+  const ledger = loadLedger(featureId);
+  const at = now();
+  const updated = [];
+  for (const fp of [...new Set(list)]) {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    if (finding.status === 'waived' || finding.status === 'resolved') continue; // not awaiting anything
+    if (finding.status === 'open') {
+      finding.history.push({ at, from: 'open', to: 'reworking', by, note: 'applied to spec' });
+      finding.status = 'reworking';
+      finding.resolvedInRound = null;
+    } else if (!finding.appliedAt) {
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'applied to spec' });
+    }
+    finding.appliedAt = at;
+    delete finding.decision;
+    delete finding.pending;
+    finding.updatedAt = at;
+    updated.push(finding);
+  }
+  saveLedger(ledger);
+  return updated;
+}
+
+// Set the transient in-flight marker when the user confirms Post/Apply: the finding leaves the
+// reviewer's queue and shows in the "Posting…/Applying…" lane until the runner stamps it done
+// (markPosted/markApplied) or it's reopened. An open finding moves to `reworking` so it's no
+// longer counted as untriaged. `kind` is 'post' | 'apply'. `fps` may be a single fp or array.
+const PENDING_KINDS = ['post', 'apply'];
+function setFindingPending(featureId, fps, kind, { by = 'user' } = {}) {
+  if (!PENDING_KINDS.includes(kind)) {
+    throw euser(`invalid pending kind "${kind}": must be one of ${PENDING_KINDS.join(', ')}`);
+  }
+  const list = Array.isArray(fps) ? fps : [fps];
+  const ledger = loadLedger(featureId);
+  const at = now();
+  const updated = [];
+  for (const fp of [...new Set(list)]) {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    if (finding.status === 'waived' || finding.status === 'resolved') continue;
+    if (finding.status === 'open') {
+      finding.history.push({ at, from: 'open', to: 'reworking', by, note: `queued for ${kind}` });
+      finding.status = 'reworking';
+      finding.resolvedInRound = null;
+    }
+    finding.pending = kind;
+    finding.updatedAt = at;
+    updated.push(finding);
+  }
+  saveLedger(ledger);
   return updated;
 }
 
@@ -470,6 +561,24 @@ function setFindingDecision(featureId, fp, decision, { by = 'user' } = {}) {
   } else {
     return finding;   // unchanged
   }
+  finding.updatedAt = at;
+  saveLedger(ledger);
+  return finding;
+}
+
+// The reviewer's free-text NOTE on a finding (distinct from the audit `suggestion` and from a
+// draft's counter-note): what they object to, their answer to a clarifying question, or context for
+// whoever actions it. Lives on the finding so suggestion-only items (no code-diff draft) can still
+// carry a reviewer response. Pass '' to clear. Surfaced in the card + the exported work order.
+function setFindingNote(featureId, fp, note, { by = 'user' } = {}) {
+  const ledger = loadLedger(featureId);
+  const finding = ledger.findings.find((f) => f.fp === fp);
+  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+  const next = typeof note === 'string' ? note : '';
+  if ((finding.note || '') === next) return finding;
+  const at = now();
+  if (next.trim()) finding.note = next; else delete finding.note;
+  finding.history.push({ at, from: finding.status, to: finding.status, by, note: next.trim() ? 'reviewer note' : 'cleared note' });
   finding.updatedAt = at;
   saveLedger(ledger);
   return finding;
@@ -514,7 +623,44 @@ function setFindingDetails(featureId, fp, { detail, suggestion, severity, by = '
 // real source. It is purely descriptive: it does NOT touch the finding's identity
 // fields (dimension/title/locus), so the fingerprint is unaffected. A history entry
 // records the draft so the trail shows when a fix was proposed.
-function setFindingDraft(featureId, fp, { target, before, after, format = 'text', by = 'user' } = {}) {
+// A targetRef is the machine-addressable write target for a draft's surgical apply
+// (distinct from `target`, the human-readable label). The spec proposer sets it so
+// /flowlever:apply-spec knows exactly where to write — an ADO work-item field, or a
+// Confluence page (optionally a section anchor + the version it was drafted against,
+// so the writer can do optimistic-concurrency and patch one node instead of rewriting
+// the whole page). Shape:
+//   { system: 'ado',        adoId, field? }
+//   { system: 'confluence', pageId, anchor?, version? }
+// plus an optional `label`. Unknown/extra keys are dropped.
+function normalizeTargetRef(ref) {
+  if (typeof ref !== 'object' || ref === null) throw euser('targetRef must be an object');
+  if (!TARGET_SYSTEMS.includes(ref.system)) {
+    throw euser(`targetRef.system must be one of ${TARGET_SYSTEMS.join(', ')}`);
+  }
+  const out = { system: ref.system };
+  if (ref.system === 'ado') {
+    if (ref.adoId === undefined || ref.adoId === null || String(ref.adoId).trim() === '') {
+      throw euser('targetRef for ado requires "adoId"');
+    }
+    out.adoId = typeof ref.adoId === 'number' ? ref.adoId : String(ref.adoId).trim();
+    if (ref.field !== undefined && ref.field !== null) out.field = String(ref.field);
+  } else {
+    if (ref.pageId === undefined || ref.pageId === null || String(ref.pageId).trim() === '') {
+      throw euser('targetRef for confluence requires "pageId"');
+    }
+    out.pageId = String(ref.pageId).trim();
+    if (ref.anchor !== undefined && ref.anchor !== null) out.anchor = String(ref.anchor);
+    if (ref.version !== undefined && ref.version !== null) {
+      const v = Number(ref.version);
+      if (!Number.isFinite(v)) throw euser('targetRef.version must be a number');
+      out.version = v;
+    }
+  }
+  if (ref.label !== undefined && ref.label !== null) out.label = String(ref.label);
+  return out;
+}
+
+function setFindingDraft(featureId, fp, { target, targetRef, before, after, format = 'text', by = 'user' } = {}) {
   const ledger = loadLedger(featureId);
   const finding = ledger.findings.find((f) => f.fp === fp);
   if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
@@ -527,13 +673,20 @@ function setFindingDraft(featureId, fp, { target, before, after, format = 'text'
   }
 
   const at = now();
-  finding.draft = {
+  const draft = {
     target: typeof target === 'string' && target.trim() ? target : finding.locus,
     format,
     before,
     after,
     updatedAt: at,
   };
+  if (targetRef !== undefined && targetRef !== null) {
+    draft.targetRef = normalizeTargetRef(targetRef);
+  } else if (finding.draft && finding.draft.targetRef) {
+    // Re-drafting the text only (e.g. an edited proposal) keeps the machine write target.
+    draft.targetRef = finding.draft.targetRef;
+  }
+  finding.draft = draft;
   finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'drafted change' });
   finding.updatedAt = at;
   saveLedger(ledger);
@@ -667,8 +820,15 @@ function addRequest({ action, prId, wsId, title, instructions } = {}) {
   if ((action === 'pr-review' || action === 'pr-respond') && (prId === undefined || prId === null || String(prId).trim() === '')) {
     throw euser(`${action} requires "prId"`);
   }
-  if (action === 'apply' && (wsId === undefined || wsId === null || String(wsId).trim() === '')) {
-    throw euser('apply requires "wsId"');
+  if ((action === 'apply' || action === 're-audit' || action === 'propose') && (wsId === undefined || wsId === null || String(wsId).trim() === '')) {
+    throw euser(`${action} requires "wsId"`);
+  }
+  // `audit` is either a NEW analysis (needs `instructions` = the spec/work-item/Figma URLs) or a
+  // RE-AUDIT of an existing workspace (needs `wsId`; sources are already registered on it).
+  if (action === 'audit'
+    && (wsId === undefined || wsId === null || String(wsId).trim() === '')
+    && (instructions === undefined || instructions === null || String(instructions).trim() === '')) {
+    throw euser('audit requires "instructions" (URLs for a new analysis) or "wsId" (to re-audit an existing workspace)');
   }
   if (instructions !== undefined && instructions !== null && typeof instructions !== 'string') {
     throw euser('instructions must be a string when provided');
@@ -788,7 +948,13 @@ module.exports = {
   ingestRound,
   setFindingStatus,
   markPosted,
+  markApplied,
+  setFindingPending,
+  isPosted,
+  isApplied,
+  isPending,
   setFindingDecision,
+  setFindingNote,
   setFindingDetails,
   setFindingDraft,
   clearFindingDraft,

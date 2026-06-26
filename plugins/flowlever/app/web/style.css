@@ -137,8 +137,8 @@ a { color: inherit; text-decoration: none; }
 
 .topbar {
   position: sticky; top: 0; z-index: 50;
-  display: flex; align-items: center;
-  height: 56px; padding: 0 24px;
+  display: flex; align-items: center; flex-wrap: wrap; row-gap: 6px;
+  min-height: 56px; padding: 8px 24px;
   background: oklch(0.18 0.012 264 / 0.72);
   -webkit-backdrop-filter: blur(16px) saturate(140%);
   backdrop-filter: blur(16px) saturate(140%);
@@ -152,7 +152,9 @@ a { color: inherit; text-decoration: none; }
   border-left: 1px solid var(--line);
 }
 
-.topnav { display: flex; gap: 4px; margin-left: 28px; }
+.topnav { display: flex; gap: 4px; margin-left: 28px; flex-wrap: wrap; }
+/* On narrow widths the nav drops below the brand; don't keep the big left indent there. */
+@media (max-width: 620px) { .topnav { margin-left: 0; } }
 .topnav a {
   font-size: 13px; font-weight: 500; color: var(--fg-mute); padding: 6px 14px; border-radius: 999px;
   transition: color var(--dur-fast) var(--ease-interactive), background var(--dur-fast) var(--ease-interactive);
@@ -392,10 +394,13 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
 }
 .dh-left { flex: 1; min-width: 0; }
-.dh-titlerow { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
-.dh-titlerow h1 { font-size: 22px; font-weight: 680; margin: 0; letter-spacing: -0.02em; }
+.dh-title { font-size: 22px; font-weight: 680; margin: 0 0 12px; letter-spacing: -0.02em; line-height: 1.28; }
+/* metadata (kind · status · id · delete) on its own row under the title, not floating
+ * beside a wrapping heading */
+.dh-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.dh-meta .feature-id { font-family: var(--mono); font-size: 12px; color: var(--fg-mute); }
 .dh-sub { color: var(--fg-mute); font-size: 13px; }
-.dh-right { display: flex; align-items: center; gap: 18px; }
+.dh-right { display: flex; align-items: center; gap: 18px; flex: none; }
 .dh-gate { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .dh-blocking {
   font-size: 12.5px; color: var(--fg-dim); padding: 4px 10px;
@@ -406,7 +411,7 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 /* ============================== loop strip + review CTA ============================== */
 
 .loop-strip {
-  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap;
   padding: 14px 20px; margin-bottom: 16px;
   background: var(--glass-bg);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
@@ -414,7 +419,9 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   border: 1px solid var(--glass-border); border-radius: var(--radius);
   box-shadow: var(--shadow);
 }
-.loop-stages { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 280px; flex-wrap: wrap; }
+/* Keep the steps together on one line as a unit; the CTA wraps to its own row below
+ * when there isn't room beside them (instead of the steps breaking mid-flow). */
+.loop-stages { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; flex-wrap: nowrap; }
 .loop-stage {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 7px 13px; border-radius: 999px; font-size: 12.5px; font-weight: 560;
@@ -501,22 +508,25 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 
 /* ============================== sources strip ============================== */
 
+/* Label as a section header on its own line; sources below in a tidy aligned grid
+ * instead of a ragged wrap of variable-width pills. */
 .sources-strip {
-  display: flex; flex-wrap: wrap; gap: 22px;
-  padding: 12px 18px; margin-bottom: 18px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 12px;
+  padding: 14px 18px; margin-bottom: 18px;
   background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius);
 }
-.src-group { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.src-label { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-mute); font-size: 12px; font-weight: 560; }
-.src-icon { color: var(--fg-dim); display: inline-flex; }
+.src-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; align-items: stretch; }
+.src-label { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-mute); font-size: 12px; font-weight: 560; text-transform: uppercase; letter-spacing: .5px; }
+.src-icon { color: var(--fg-dim); display: inline-flex; flex: none; }
+/* one uniform single-line row per source: icon · title (ellipsis) · external-link arrow */
 .src-link, .src-nolink {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 10px; border-radius: 999px; font-size: 12px;
+  display: flex; align-items: center; gap: 8px; min-width: 0; height: 36px;
+  padding: 0 12px; border-radius: var(--radius-sm); font-size: 12px;
   background: var(--panel-3); border: 1px solid var(--line); color: var(--fg-dim);
 }
 .src-link:hover { border-color: var(--accent-line); color: var(--fg); }
-.src-out { opacity: .5; }
-.src-text { color: var(--fg-dim); }
+.src-out { opacity: .5; flex: none; margin-left: auto; }
+.src-text { color: var(--fg-dim); flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ============================== tabs ============================== */
 
@@ -531,10 +541,13 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 
 /* ============================== findings board ============================== */
 
-.filterbar { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-bottom: 18px; }
+/* Three clean rows — dimension · severity · controls — with chip columns aligned via a
+ * fixed-width label, one uniform control height, and the search box free to grow. */
+.filterbar { display: flex; flex-direction: column; align-items: stretch; gap: 12px; margin-bottom: 20px; }
 .chiprow { display: flex; flex-wrap: wrap; gap: 6px; }
 .fchip {
-  padding: 4px 11px; border-radius: 999px; font-size: 12px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 0 13px; border-radius: 999px; font-size: 12px; cursor: pointer;
   background: var(--panel-2); border: 1px solid var(--line); color: var(--fg-mute);
   transition: all var(--dur-fast) var(--ease-interactive); user-select: none;
 }
@@ -544,22 +557,32 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .fchip-sev.active.sev-major   { border-color: var(--major-line); background: var(--major-soft); color: var(--major); }
 .fchip-sev.active.sev-minor   { border-color: var(--minor-line); background: var(--minor-soft); color: var(--minor); }
 .fchip-sev.active.sev-info    { border-color: var(--line); background: var(--info-soft); color: var(--info); }
-.fgroup { display: flex; align-items: center; gap: 8px; }
-.fgroup-label { color: var(--fg-mute); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
-.fgroup-end { margin-left: auto; }
+.fgroup { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fgroup-label { color: var(--fg-mute); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; min-width: 84px; flex: none; }
+.fgroup-end { gap: 8px; }
+.fgroup-end .fsearch { flex: 1 1 240px; }
 .fselect, .fsearch {
-  padding: 7px 12px; border-radius: var(--radius-sm); font: inherit; font-size: 13px;
+  padding: 0 12px; border-radius: var(--radius-sm); font: inherit; font-size: 13px;
   background: var(--panel-2); border: 1px solid var(--line); color: var(--fg);
 }
-.fsearch { min-width: 200px; }
+.fsearch { min-width: 220px; }
+/* one consistent height across every filter chip, the status select and the search box */
+.filterbar .fchip, .filterbar .fselect, .filterbar .fsearch { box-sizing: border-box; height: 32px; }
 .fsearch:focus, .fselect:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
-.board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: start; }
-.board.board-pr { grid-template-columns: repeat(5, 1fr); }   /* + the Posted — awaiting author lane */
+/* Open · Reworking · Posting/Applying · Posted/Applied · Resolved · Waived */
+/* Wide screens: a single horizontal row of lanes (classic kanban), each sharing the
+ * width. Narrow screens (below) switch to ONE vertical stack with empty lanes collapsed
+ * — never the wrapped grid that mixes both. */
+.board { display: flex; flex-direction: row; gap: 12px; align-items: flex-start; }
+.board > .col { flex: 1 1 0; min-width: 0; }
 .col { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 10px; min-height: 120px; }
-/* Posted lane: blue (the review tint) so it reads as "out for the author", distinct from in-progress Reworking. */
-.col-posted { border-color: var(--kind-review-line); }
-.col-posted .col-title { color: var(--kind-review); }
+/* Posted/Applied lane: blue (the review tint) — "out for the author / re-audit", distinct from in-progress Reworking. */
+.col-posted, .col-applied { border-color: var(--kind-review-line); }
+.col-posted .col-title, .col-applied .col-title { color: var(--kind-review); }
+/* Transient in-flight lane (Posting…/Applying…): amber, matches the in-progress cue. */
+.col-pending { border-color: var(--inprogress-line); }
+.col-pending .col-title { color: var(--inprogress); }
 .f-posted-note { width: 100%; font-size: 12px; margin-bottom: 2px; }
 .col-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 10px; }
 .col-title { font-size: 12.5px; font-weight: 640; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .5px; }
@@ -1185,6 +1208,22 @@ body.modal-open { overflow: hidden; }
 .f-badge-new { color: var(--accent-text); background: var(--accent-soft); border: 1px solid var(--accent-line); }
 .f-badge-regressed { color: var(--blocker); background: var(--blocker-soft); border: 1px solid var(--blocker-line); }
 
+/* ============================== done disclosure (active-first lists) ============================== */
+
+.section-lists { display: flex; flex-direction: column; gap: 16px; }
+.done-disc { border-top: 1px solid var(--line-soft); padding-top: 4px; }
+.done-disc-sum {
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 2px; font-size: 12px; font-weight: 600; letter-spacing: .02em;
+  color: var(--fg-mute); cursor: pointer; list-style: none; user-select: none;
+}
+.done-disc-sum::-webkit-details-marker { display: none; }
+.done-disc-sum::before { content: '▶'; font-size: 9px; transition: transform var(--dur-fast) var(--ease-interactive); }
+.done-disc[open] .done-disc-sum::before { transform: rotate(90deg); }
+.done-disc-sum:hover { color: var(--fg-dim); }
+.done-disc-body { margin-top: 4px; }
+.all-done-note { color: var(--fg-mute); font-size: 13px; margin: 2px 0; }
+
 /* ============================== timeline disclosure ============================== */
 
 .round-disc {
@@ -1213,14 +1252,24 @@ body.modal-open { overflow: hidden; }
 
 /* ============================== responsive ============================== */
 
+/* Below the width that fits a comfortable horizontal row of lanes, stack the board
+ * vertically (one full-width lane per row) instead of a cramped wrapped grid — and
+ * collapse empty lanes to just their header so they don't waste vertical space. */
+@media (max-width: 1500px) {
+  .board { flex-direction: column; align-items: stretch; }
+  .board > .col { flex: 0 0 auto; width: 100%; min-height: 0; }
+  .col-vacant { min-height: 0; }
+  .col-vacant .col-head { padding-bottom: 6px; }
+  .col-vacant .col-body { display: none; }
+}
+
 @media (max-width: 1024px) {
-  .board { grid-template-columns: 1fr 1fr; }
   .detail-head { flex-direction: column; align-items: flex-start; gap: 16px; }
 }
 @media (max-width: 620px) {
-  .board { grid-template-columns: 1fr; }
   main#app { padding: 16px 14px 60px; }
   .loop-strip { flex-direction: column; align-items: stretch; }
+  .loop-stages { flex-wrap: wrap; }
   .review-cta { justify-content: center; }
 }
 
@@ -1435,3 +1484,73 @@ a.backlink:focus-visible {
 }
 .req-row:hover .req-dismiss,
 .req-row:focus-within .req-dismiss { opacity: 1; }
+
+/* ============================================================
+   Rendered proposal view (markdown / gherkin) — the legible
+   read view of a spec proposal. Raw diff (Unified/Split) and
+   the Edit textarea remain monospace/raw.
+   ============================================================ */
+.hunk-diff-rendered { padding: 0; background: none; }
+.rendered-diff { display: flex; flex-direction: column; gap: 10px; padding: 4px; }
+.rd-block { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.rd-block .rd-label {
+  font: 600 11px/1.4 ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.04em;
+  text-transform: uppercase; padding: 6px 12px; border-bottom: 1px solid var(--line-soft);
+}
+.rd-current { border-color: var(--blocker-line); background: var(--blocker-soft); }
+.rd-current .rd-label { color: var(--del-fg); background: oklch(0.74 0.2 25 / 0.08); }
+.rd-proposed { border-color: var(--ready-line); background: var(--ready-soft); }
+.rd-proposed .rd-label { color: var(--add-fg); background: oklch(0.72 0.12 150 / 0.08); }
+.rd-body { padding: 10px 14px; color: var(--fg); font: 14px/1.55 ui-sans-serif, system-ui, sans-serif; overflow-x: auto; }
+.rd-body > :first-child { margin-top: 0; }
+.rd-body > :last-child { margin-bottom: 0; }
+.rd-p { margin: 8px 0; }
+.rd-h { margin: 10px 0 6px; font-weight: 700; line-height: 1.3; }
+.rd-ul { margin: 8px 0; padding-left: 20px; }
+.rd-ul li { margin: 3px 0; }
+.rd-body code { font: 12.5px/1.5 ui-monospace, monospace; background: var(--panel-3); padding: 1px 5px; border-radius: 6px; }
+.rd-body strong { color: var(--fg); font-weight: 700; }
+.rd-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.rd-table th, .rd-table td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+.rd-table th { background: var(--panel-3); font-weight: 600; }
+.rd-gherkin { font: 13.5px/1.7 ui-sans-serif, system-ui, sans-serif; }
+.rd-gline { white-space: pre-wrap; }
+.rd-gblank { height: 8px; }
+.rd-kw { color: var(--accent-text); font-weight: 700; margin-right: 6px; }
+.rd-indent { white-space: pre; }
+.rd-pre { white-space: pre-wrap; font: 13px/1.55 ui-monospace, monospace; margin: 0; }
+
+/* ============================================================
+   Apply (spec write-back) busy state + live status line
+   ============================================================ */
+.spinner {
+  display: inline-block; width: 13px; height: 13px; margin-right: 8px; vertical-align: -2px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.btn.is-busy { opacity: 0.92; cursor: progress; }
+.apply-status {
+  display: flex; align-items: center; gap: 9px; margin-top: 12px;
+  padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+  font: 13px/1.45 ui-sans-serif, system-ui, sans-serif; color: var(--fg-dim);
+}
+.apply-status .apply-dot { font-size: 14px; line-height: 1; }
+.apply-running { border-color: var(--inprogress-line); background: var(--inprogress-soft); color: var(--fg); }
+.apply-done { border-color: var(--ready-line); background: var(--ready-soft); color: var(--fg); }
+.apply-done .apply-dot { color: var(--add-fg); }
+.apply-error { border-color: var(--notready-line); background: var(--notready-soft); color: var(--fg); }
+.apply-error .apply-dot { color: var(--del-fg); }
+.apply-needs-input { border-color: var(--major-line); background: var(--major-soft); color: var(--fg); }
+.apply-needs-input .apply-dot { color: var(--major); }
+
+/* Reviewer note (their objection / answer) — distinct from the audit suggestion. */
+.f-note { border-left: 3px solid var(--kind-review-line); background: var(--kind-review-soft); }
+.f-note .f-suglabel { color: var(--kind-review); }
+
+/* Live job banner on the feature view + the "review me" card cue */
+.feat-job { margin: 0 0 14px; }
+.f-review-chip {
+  font: 600 11px/1 ui-sans-serif, system-ui, sans-serif; padding: 3px 8px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent-text); border: 1px solid var(--accent-line);
+}

@@ -28,8 +28,22 @@ Usage: node src/cli.js <command> [args]
                                          Refine a finding's text/severity (fingerprint stays stable)
   finding posted <featureId> --fps <fp>[,<fp>...]   Mark PR comment(s)/repl(ies) as posted back
                                          (stays reworking + stamped "awaiting author"; re-review auto-resolves)
+  finding applied <featureId> --fps <fp>[,<fp>...]  Mark spec change(s) as written back to Confluence/ADO
+                                         (stays reworking + stamped "awaiting re-audit"; re-audit auto-resolves)
   finding set <featureId> <fp> --status open|reworking|resolved|waived
                                [--reason "..."] [--pin|--unpin]
+  finding draft <featureId> <fp> --before "..." --after "..." [--target "..."]
+                               [--format text|gherkin|markdown] [--target-ref '<json>']
+                                         Attach a proposed before→after change (red/green diff in the
+                                         cockpit). --target-ref is the machine write target for apply,
+                                         e.g. '{"system":"ado","adoId":42695,"field":"...AcceptanceCriteria"}'
+                                         or '{"system":"confluence","pageId":"123","anchor":"flow-payment","version":14}'
+  finding draft-clear <featureId> <fp>   Remove a finding's proposed change
+  finding review <featureId> <fp> [--verdict proposed|redirect|reject] [--note "..."]
+                               [--hunk <idx> --hunk-status accepted|rejected|edited [--edited-text "..."]]
+                                         Record decisions on a proposal: accept/edit/reject a hunk, and/or
+                                         a finding-level verdict + counter-proposal note (redirect = do it
+                                         differently/elsewhere; reject = don't apply)
   readiness <featureId> [--json]         Print score + gate + open blockers
   report <featureId> [--out report.md]   Generate markdown report
   coverage set <featureId> --file coverage.json
@@ -355,6 +369,21 @@ function cmdFindingPosted({ pos, flags }) {
   console.log(`\n${updated.length} finding(s) marked posted`);
 }
 
+// Spec mirror of `finding posted`: the runner calls this after actually writing an accepted
+// change back to Confluence/ADO, so the finding moves from "Applying…" to "Applied — awaiting
+// re-audit" (and stops faking a completion the moment the user clicked Apply).
+function cmdFindingApplied({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const raw = flags.fps !== undefined ? String(flags.fps) : pos.slice(1).join(',');
+  const fps = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!fps.length) throw userError('Pass the applied finding ids: --fps <fp>[,<fp>...] (or as positional args)');
+  const updated = ledger.markApplied(featureId, fps, { by: 'apply' });
+  for (const f of updated) {
+    console.log(`${glyph(f.severity)} ${f.fp}  applied (awaiting re-audit)  ${f.title}`);
+  }
+  console.log(`\n${updated.length} finding(s) marked applied`);
+}
+
 function cmdFindingEdit({ pos, flags }) {
   const featureId = need(pos[0], '<featureId>');
   const fp = need(pos[1], '<fp>');
@@ -373,6 +402,63 @@ function cmdFindingEdit({ pos, flags }) {
   }
   const finding = ledger.setFindingDetails(featureId, fp, change);
   console.log(`${glyph(finding.severity)} ${finding.fp}  refined  ${finding.title}`);
+}
+
+function describeTargetRef(tr) {
+  if (!tr) return '';
+  if (tr.system === 'ado') return `ado:${tr.adoId}${tr.field ? `#${tr.field}` : ''}`;
+  if (tr.system === 'confluence') return `confluence:${tr.pageId}${tr.anchor ? `#${tr.anchor}` : ''}${tr.version != null ? ` @v${tr.version}` : ''}`;
+  return tr.system || '';
+}
+
+function cmdFindingDraft({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const fp = need(pos[1], '<fp>');
+  const before = need(flags.before, '--before');
+  const after = need(flags.after, '--after');
+  const opts = { before, after, by: 'user' };
+  if (flags.target !== undefined) opts.target = flags.target;
+  if (flags.format !== undefined) {
+    if (!['text', 'gherkin', 'markdown'].includes(flags.format)) {
+      throw userError(`--format must be text, gherkin or markdown (got '${flags.format}')`);
+    }
+    opts.format = flags.format;
+  }
+  if (flags['target-ref'] !== undefined) {
+    try { opts.targetRef = JSON.parse(flags['target-ref']); }
+    catch (err) { throw userError(`--target-ref must be valid JSON: ${err.message}`); }
+  }
+  const finding = ledger.setFindingDraft(featureId, fp, opts);
+  const where = describeTargetRef(finding.draft && finding.draft.targetRef) || (finding.draft ? finding.draft.target : '');
+  console.log(`${glyph(finding.severity)} ${finding.fp}  drafted${where ? ` → ${where}` : ''}  ${finding.title}`);
+}
+
+function cmdFindingDraftClear({ pos }) {
+  const featureId = need(pos[0], '<featureId>');
+  const fp = need(pos[1], '<fp>');
+  const finding = ledger.clearFindingDraft(featureId, fp, { by: 'user' });
+  console.log(`${glyph(finding.severity)} ${finding.fp}  draft cleared  ${finding.title}`);
+}
+
+function cmdFindingReview({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const fp = need(pos[1], '<fp>');
+  const review = {};
+  if (flags.verdict !== undefined) review.verdict = flags.verdict;
+  if (flags.note !== undefined) review.note = flags.note;
+  if (flags.hunk !== undefined) {
+    review.hunk = flags.hunk;
+    review.status = need(flags['hunk-status'], '--hunk-status (required with --hunk)');
+    if (flags['edited-text'] !== undefined) review.editedText = flags['edited-text'];
+  } else if (flags['hunk-status'] !== undefined) {
+    throw userError('--hunk-status requires --hunk <idx>');
+  }
+  if (review.verdict === undefined && review.note === undefined && review.hunk === undefined) {
+    throw userError('Nothing to review: pass --verdict, --note and/or --hunk <idx> --hunk-status ...');
+  }
+  const finding = ledger.setDraftReview(featureId, fp, review, { by: 'user' });
+  const rv = (finding.draft && finding.draft.review) || {};
+  console.log(`${glyph(finding.severity)} ${finding.fp}  verdict=${rv.verdict || 'proposed'}${rv.note ? `  — ${rv.note}` : ''}  ${finding.title}`);
 }
 
 function cmdReadiness({ pos, flags }) {
@@ -518,7 +604,11 @@ async function run(argv) {
     case 'finding list': return cmdFindingList(rest);
     case 'finding set': return cmdFindingSet(rest);
     case 'finding posted': return cmdFindingPosted(rest);
+    case 'finding applied': return cmdFindingApplied(rest);
     case 'finding edit': return cmdFindingEdit(rest);
+    case 'finding draft': return cmdFindingDraft(rest);
+    case 'finding draft-clear': return cmdFindingDraftClear(rest);
+    case 'finding review': return cmdFindingReview(rest);
     case 'readiness': return cmdReadiness(rest);
     case 'report': return cmdReport(rest);
     case 'coverage set': return cmdCoverageSet(rest);

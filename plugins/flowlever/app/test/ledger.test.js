@@ -480,6 +480,40 @@ test('setFindingDraft validates before/after and format; clearFindingDraft remov
   assert.throws(() => ledger.clearFindingDraft('draft-me', 'ffffffffff'), (e) => e.code === 'EUSER');
 });
 
+test('setFindingDraft stores + normalizes + validates targetRef; re-drafting text keeps it', () => {
+  const fp = ledger.fingerprint('draft-me', 'consistency', 'Spec and ADO disagree on payment methods', 'confluence:1#flow vs ado:42695');
+
+  // ADO target (adoId number + field reference name + optional label)
+  const ado = ledger.setFindingDraft('draft-me', fp, {
+    before: 'a', after: 'b',
+    targetRef: { system: 'ado', adoId: 42695, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', label: 'AC', junk: 'dropped' },
+  });
+  assert.deepEqual(ado.draft.targetRef, {
+    system: 'ado', adoId: 42695, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', label: 'AC',
+  }, 'unknown keys dropped, known kept');
+
+  // Confluence target — version coerced to a number
+  const conf = ledger.setFindingDraft('draft-me', fp, {
+    before: 'a', after: 'b',
+    targetRef: { system: 'confluence', pageId: '123', anchor: 'flow', version: '14' },
+  });
+  assert.deepEqual(conf.draft.targetRef, { system: 'confluence', pageId: '123', anchor: 'flow', version: 14 });
+
+  // re-drafting the text only preserves the prior machine target
+  const again = ledger.setFindingDraft('draft-me', fp, { before: 'a', after: 'c' });
+  assert.deepEqual(again.draft.targetRef, { system: 'confluence', pageId: '123', anchor: 'flow', version: 14 });
+  assert.equal(again.draft.after, 'c');
+
+  // validation
+  assert.throws(() => ledger.setFindingDraft('draft-me', fp, { before: 'a', after: 'b', targetRef: 'nope' }), /targetRef must be an object/);
+  assert.throws(() => ledger.setFindingDraft('draft-me', fp, { before: 'a', after: 'b', targetRef: { system: 'jira' } }), /targetRef.system must be one of/);
+  assert.throws(() => ledger.setFindingDraft('draft-me', fp, { before: 'a', after: 'b', targetRef: { system: 'ado' } }), /requires "adoId"/);
+  assert.throws(() => ledger.setFindingDraft('draft-me', fp, { before: 'a', after: 'b', targetRef: { system: 'confluence' } }), /requires "pageId"/);
+  assert.throws(() => ledger.setFindingDraft('draft-me', fp, { before: 'a', after: 'b', targetRef: { system: 'confluence', pageId: '1', version: 'x' } }), /version must be a number/);
+
+  ledger.clearFindingDraft('draft-me', fp); // reset for later draft tests on this finding
+});
+
 test('setDraftReview records hunk decisions, merges, clears, stays identity-stable', () => {
   const fp = ledger.fingerprint('draft-me', 'consistency', 'Spec and ADO disagree on payment methods', 'confluence:1#flow vs ado:42695');
   ledger.setFindingDraft('draft-me', fp, { before: 'a\nb\nc', after: 'a\nB\nc\nd' });
@@ -653,6 +687,33 @@ test('addRequest: ids increment monotonically from a stored counter (no clock)',
   assert.equal(doc.counter, bn);
   const c = ledger.addRequest({ action: 'apply', wsId: 'x' });
   assert.equal(Number(c.id.slice(4)), bn + 1);
+});
+
+test('addRequest: re-audit is a valid action and requires wsId', () => {
+  assert.ok(ledger.REQUEST_ACTIONS.includes('re-audit'));
+  assert.throws(() => ledger.addRequest({ action: 're-audit' }), /re-audit requires "wsId"/);
+  const r = ledger.addRequest({ action: 're-audit', wsId: 'checkout-redesign', instructions: 'recheck redirected' });
+  assert.equal(r.action, 're-audit');
+  assert.equal(r.wsId, 'checkout-redesign');
+  assert.equal(r.instructions, 'recheck redirected');
+  assert.equal(r.status, 'queued');
+});
+
+test('addRequest: audit is a valid action and requires instructions (the source URLs)', () => {
+  assert.ok(ledger.REQUEST_ACTIONS.includes('audit'));
+  assert.throws(() => ledger.addRequest({ action: 'audit' }), /audit requires "instructions"/);
+  assert.throws(() => ledger.addRequest({ action: 'audit', instructions: '   ' }), /audit requires "instructions"/);
+  const r = ledger.addRequest({
+    action: 'audit',
+    title: 'Checkout redesign',
+    instructions: 'https://uniccom.atlassian.net/wiki/x/abc\nhttps://dev.azure.com/FZAG/_workitems/edit/42695',
+  });
+  assert.equal(r.action, 'audit');
+  assert.equal(r.prId, null);
+  assert.equal(r.wsId, null);
+  assert.equal(r.title, 'Checkout redesign');
+  assert.match(r.instructions, /atlassian|azure/);
+  assert.equal(r.status, 'queued');
 });
 
 test('listRequests: returns all, filters by status, validates the status enum', () => {

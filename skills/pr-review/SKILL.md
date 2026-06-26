@@ -337,6 +337,10 @@ independently resolvable:
 Do **not** post a summary/overview thread. The PR description, the markdown review file (if
 used), and the per-thread context are sufficient.
 
+Post each comment body verbatim — **never append a disclosure/attribution/AI footer** (e.g.
+"_this review comment was AI-generated…_", "🤖 Generated with…", "Posted via …"). The posted text
+is exactly the finding body or the user's edited text.
+
 Do **not** vote on the PR (`repo_vote_pull_request`) unless the user explicitly asked for it —
 voting is a stronger action than commenting and should be opt-in.
 

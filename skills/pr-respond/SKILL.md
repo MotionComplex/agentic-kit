@@ -360,6 +360,8 @@ Per thread, in this order:
      {sha}." once committed).
    - Use Conventional Comments labels only when they fit (`question:` when asking back, plain
      prose otherwise — see Reply style below).
+   - **Never append a disclosure/attribution/AI footer** (no "_AI-generated_", "🤖 Generated
+     with…", or similar). Post the reply text and nothing else.
 3. **Thread status** — do **not** auto-resolve. Resolving is the reviewer's prerogative.
    Exception: if the user explicitly says to resolve a thread, use
    `repo_update_pull_request_thread` with status `fixed` (for agree-fix) or `byDesign` /

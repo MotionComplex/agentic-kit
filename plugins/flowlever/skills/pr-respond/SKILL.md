@@ -73,5 +73,7 @@ clear it after, then `--status done --phase "posted to PR"`.
 When the user asks to post: read decisions (`finding list <wsId> --json` + each `draft.review`). Then,
 **only on an explicit yes**, per thread: post the reply via `repo_reply_to_comment` (using the edited text
 if present), and for accepted code fixes apply the edit to the working tree (Edit/Write) for the user to
-commit. Push-backs post the user's note as the reply. After posting, set those findings → `reworking`.
+commit. Push-backs post the user's note as the reply. **Post the reply text verbatim — never append a
+disclosure/attribution/AI footer** (no "_AI-generated_", "🤖 Generated with…", or similar). After
+posting, set those findings → `reworking`.
 A re-run reconciles as the reviewer responds again — same loop.

@@ -21,6 +21,42 @@ The commands below are self-contained: the bundled app lives at `${CLAUDE_PLUGIN
 and ledger data lives per-user in `~/.flowlever` (override via `FLOWLEVER_DATA`, shared across
 repos). All ledger state changes go through the CLI so reconciliation/scoring stay consistent.
 
+## Scoped re-audit mode (the counter loop) — short-circuit
+If you were invoked for a **scoped re-audit** — a `re-audit` request from `/flowlever:watch`, or the
+user countered a proposal — do NOT re-audit everything. A "Reject + counter" records `verdict=redirect`
++ a counter `note` on the finding's draft and enqueues this scoped re-audit. Re-evaluate **only the
+countered items** against the counter, then stop:
+1. Load the redirected findings:
+   `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding list <id> --json`
+   → keep those whose `draft.review.verdict === "redirect"`. Each one's `draft.review.note` is the
+   user's counter; the request `instructions` may add scope.
+2. For each, re-fetch the relevant source(s) (READ ONLY) and weigh the counter. Then either:
+   - **Re-draft** a revised proposal that honors the counter — e.g. the user said "change the
+     Confluence section, not the story", so draft against Confluence now: set a new `before/after` and
+     a new `--target-ref`, and **clear the redirect** so it's a fresh proposal to review:
+     `finding draft <id> <fp> … --target-ref '<new target>'` then
+     `finding review <id> <fp> --verdict proposed --note ""`.
+   - **Or waive** it if the counter shows it's a non-issue/accepted tradeoff:
+     `finding set <id> <fp> --status waived --reason "<from the counter>"`.
+   - **Or, if you disagree with the counter,** keep the original draft and reply in the `note`
+     explaining why (leave `verdict=redirect`) so the user sees your reasoning on the next pass.
+3. Report what you re-drafted / waived per finding and stop. Do **not** run the full 7-dimension sweep
+   or ingest a new round. This keeps the per-item refine loop tight. (Skip the rest of this skill.)
+
+## Queued audit (started from the cockpit "+ New spec analysis")
+If you were dispatched by `/flowlever:watch` for an `audit` request (no `featureId` given — the source
+URLs are in the request `instructions`), this is a **fresh analysis kicked off from the UI**:
+1. Parse the Confluence / ADO / Figma URLs (and any focus note) out of `instructions`.
+2. Derive a kebab-case `featureId` (from the request `title` if present, else the spec page title;
+   keep it `[a-z0-9-]`). If a workspace with that id already exists, suffix it (`-2`, …) so you don't
+   collide.
+3. Create it (`feature add <id> --title "..."`, default `--kind spec`), then continue with §1–§8 below:
+   register the parsed URLs as sources, fetch, run the sweep, ingest.
+4. **Emit phases** the whole way (`requests set <reqId> --phase "<step>"`) and **flag `needsInput`
+   before the first ADO/Confluence fetch** (it can pop a 2FA/auth prompt), clearing it after. On
+   completion the runner marks the request `done --wsId <id>` so the cockpit links to the new workspace.
+With a `featureId` argument (run directly), ignore this and use §1 as normal.
+
 ## 1. Resolve the feature
 - The argument is a `featureId` (kebab-case). Run `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature list --json`.
 - If it exists, read `${FLOWLEVER_DATA:-$HOME/.flowlever}/features/<id>.json` for its `sources` and `specSections`.

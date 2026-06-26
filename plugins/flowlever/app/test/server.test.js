@@ -226,6 +226,50 @@ test('POST /findings/:fp with nothing actionable is a 400', async () => {
 
 // ---------- requests (UI-triggered job queue) ----------
 
+test('POST /findings/:fp/draft accepts a targetRef; /counter records redirect + enqueues a re-audit', async () => {
+  const fp = fps()[0];
+  // attach a proposal with a machine write target
+  const draftRes = await fetch(`${base}/api/features/flow-feat/findings/${fp}/draft`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      before: 'card, PayPal', after: 'card, PayPal, Twint',
+      targetRef: { system: 'confluence', pageId: '1', anchor: 'flow', version: 14 },
+    }),
+  });
+  assert.equal(draftRes.status, 200);
+  const drafted = await draftRes.json();
+  assert.deepEqual(drafted.draft.targetRef, { system: 'confluence', pageId: '1', anchor: 'flow', version: 14 });
+
+  // Reject + counter: records verdict=redirect + note AND enqueues a scoped re-audit
+  const res = await fetch(`${base}/api/features/flow-feat/findings/${fp}/counter`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: 'Change the ADO story instead of the spec.' }),
+  });
+  assert.equal(res.status, 200);
+  const { finding, request } = await res.json();
+  assert.equal(finding.draft.review.verdict, 'redirect');
+  assert.equal(finding.draft.review.note, 'Change the ADO story instead of the spec.');
+  assert.equal(request.action, 're-audit');
+  assert.equal(request.wsId, 'flow-feat');
+  assert.equal(request.status, 'queued');
+
+  // the re-audit is actually on the queue
+  const queue = await (await fetch(`${base}/api/requests?status=queued`)).json();
+  assert.ok(queue.some((r) => r.id === request.id && r.action === 're-audit'));
+
+  // empty note → 400 (handler guards before touching the ledger)
+  const noNote = await fetch(`${base}/api/features/flow-feat/findings/${fp}/counter`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: '   ' }),
+  });
+  assert.equal(noNote.status, 400);
+
+  // countering a finding with no draft → 400 (setDraftReview: "no draft to review")
+  const noDraft = await fetch(`${base}/api/features/flow-feat/findings/${fps()[1]}/counter`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note: 'x' }),
+  });
+  assert.equal(noDraft.status, 400);
+});
+
 test('POST /api/requests creates a request; GET lists + filters by status', async () => {
   const res = await fetch(`${base}/api/requests`, {
     method: 'POST',

@@ -219,14 +219,19 @@ async function handleFindingUpdate(req, res, id, fp) {
   if (body.decision !== undefined) {
     finding = ledger.setFindingDecision(id, fp, body.decision, { by: 'user' });
   }
+  // The reviewer's free-text note on the finding (their objection / answer to a clarifying
+  // question) — distinct from the audit suggestion; lets suggestion-only items carry a response.
+  if (body.note !== undefined) {
+    finding = ledger.setFindingNote(id, fp, body.note, { by: 'user' });
+  }
   const change = { by: 'user' };
   if (body.status !== undefined) change.status = body.status;
   if (body.reason !== undefined) change.reason = body.reason;
   if (body.pinned !== undefined) change.pinned = body.pinned;
   if (change.status !== undefined || change.pinned !== undefined) {
     finding = ledger.setFindingStatus(id, fp, change);
-  } else if (body.suggestion === undefined && body.decision === undefined) {
-    return sendError(res, 400, 'Body must include status, pinned, suggestion and/or decision');
+  } else if (body.suggestion === undefined && body.decision === undefined && body.note === undefined) {
+    return sendError(res, 400, 'Body must include status, pinned, suggestion, decision and/or note');
   }
   sendJson(res, 200, finding);
 }
@@ -238,6 +243,7 @@ async function handleDraftSet(req, res, id, fp) {
   }
   const finding = ledger.setFindingDraft(id, fp, {
     target: body.target,
+    targetRef: body.targetRef,
     before: body.before,
     after: body.after,
     format: body.format,
@@ -260,14 +266,42 @@ async function handleDraftReview(req, res, id, fp) {
   sendJson(res, 200, finding);
 }
 
+// Reject + counter-proposal (spec workspaces). The reviewer disagrees with the proposed
+// change's target/approach and supplies a counter. This does two things atomically:
+//   1. records the counter on the draft (verdict='redirect' + note), and
+//   2. enqueues a SCOPED re-audit request so the proposer re-evaluates THIS item against
+//      the counter and drafts a revised proposal — the per-item refine loop.
+// The runner (/flowlever:watch) picks up the re-audit, re-checks only the redirected
+// findings, and re-drafts. Requires the finding to already carry a draft (the thing being
+// countered) — setDraftReview throws (→400) otherwise. Body: { note, scope? }.
+async function handleFindingCounter(req, res, id, fp) {
+  const body = await readJsonBody(req);
+  if (typeof body.note !== 'string' || body.note.trim() === '') {
+    return sendError(res, 400, 'A counter requires a non-empty "note" (your counter-proposal)');
+  }
+  const finding = ledger.setDraftReview(id, fp, { verdict: 'redirect', note: body.note }, { by: 'user' });
+  const request = ledger.addRequest({
+    action: 're-audit',
+    wsId: id,
+    title: `Re-audit · ${finding.title}`.slice(0, 120),
+    instructions: typeof body.scope === 'string' && body.scope.trim()
+      ? body.scope.trim()
+      : `Counter on ${fp}: ${body.note.trim()}`,
+  });
+  sendJson(res, 200, { finding, request });
+}
+
 // Bulk-apply the review-flow finish screen: set a list of findings to reworking
 // (additive — the finish screen reflects in-flight work without touching Confluence/ADO).
 // Validated up front so the operation is all-or-nothing: every fp must exist and the
 // target status must be in the small allowlist before any write happens.
 // `reworking` = spec rework in-flight; `resolved` = a PR-review comment / thread closed
-// without needing the author; `posted` = a PR comment/reply sent back to the PR (stays
-// reworking + stamped postedAt → "awaiting author", auto-resolves on re-review).
-const REVIEW_APPLY_STATUSES = ['reworking', 'resolved', 'posted'];
+// without needing the author. The transient in-flight markers — set when the reviewer clicks
+// Post/Apply, BEFORE the runner does the real write — are `pending-post` / `pending-apply`
+// (→ "Posting…/Applying…" lane). The runner stamps the real completion (markPosted/markApplied)
+// once the comment is actually on the PR / the spec is actually written. `posted` stays accepted
+// for back-compat / the runner, but the browser no longer uses it to fake a completion.
+const REVIEW_APPLY_STATUSES = ['reworking', 'resolved', 'posted', 'pending-post', 'pending-apply'];
 
 async function handleReviewApply(req, res, id) {
   const body = await readJsonBody(req);
@@ -283,9 +317,12 @@ async function handleReviewApply(req, res, id) {
   const missing = [...new Set(fps)].filter((fp) => !existing.has(fp));
   if (missing.length) return sendError(res, 400, `unknown finding(s): ${missing.join(', ')}`);
 
-  const findings = status === 'posted'
-    ? ledger.markPosted(id, [...new Set(fps)], { by: 'user' })
-    : [...new Set(fps)].map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user' }));
+  const uniq = [...new Set(fps)];
+  let findings;
+  if (status === 'posted') findings = ledger.markPosted(id, uniq, { by: 'user' });
+  else if (status === 'pending-post') findings = ledger.setFindingPending(id, uniq, 'post', { by: 'user' });
+  else if (status === 'pending-apply') findings = ledger.setFindingPending(id, uniq, 'apply', { by: 'user' });
+  else findings = uniq.map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user' }));
   sendJson(res, 200, { updated: findings.length, status, findings });
 }
 
@@ -408,6 +445,9 @@ async function route(req, res) {
     if (parts.length === 7 && parts[3] === 'findings' && parts[5] === 'draft'
         && parts[6] === 'review' && req.method === 'POST') {
       return handleDraftReview(req, res, parts[2], parts[4]);
+    }
+    if (parts.length === 6 && parts[3] === 'findings' && parts[5] === 'counter' && req.method === 'POST') {
+      return handleFindingCounter(req, res, parts[2], parts[4]);
     }
     if (parts.length === 5 && parts[3] === 'review' && parts[4] === 'apply' && req.method === 'POST') {
       return handleReviewApply(req, res, parts[2]);

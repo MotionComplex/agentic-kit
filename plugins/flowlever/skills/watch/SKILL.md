@@ -32,6 +32,17 @@ Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowleve
      `requests set <reqId> --status done --phase "review ready" --wsId <workspaceId>` (so the UI links the request to the workspace).
    - **`pr-respond`** (has `prId`): run **`/flowlever:pr-respond <prId>`** — create the `pr-respond` workspace,
      fetch threads, ingest. Then `requests set <reqId> --status done --phase "threads ready" --wsId <workspaceId>`.
+   - **`audit`** — two shapes, branch on `wsId`:
+     - **No `wsId`** (source URLs are in `instructions`): start a NEW spec analysis. Run
+       **`/flowlever:audit`** — parse the Confluence / ADO / Figma URLs (and any focus) from `instructions`,
+       derive a kebab `featureId` (from the request `title` or the spec page title), create the `spec`
+       workspace, register the sources, run the sweep, and ingest. On success:
+       `requests set <reqId> --status done --phase "audit ready" --wsId <newWorkspaceId>`.
+     - **Has `wsId`** (the cockpit's "↻ Re-audit" button on an applied spec): **full re-audit of that
+       existing workspace.** Run **`/flowlever:audit <wsId>`** (NOT scoped mode) — re-fetch its already-
+       registered sources, run the full sweep, and ingest into the SAME workspace. Reconciliation
+       auto-resolves the findings the spec now reflects (the applied ones), keeps any still-open, and
+       flags regressions. On success: `requests set <reqId> --status done --phase "re-audited" --wsId <wsId>`.
 
    **Pass the request's `instructions` to the adapter.** Each queued request may carry an `instructions`
    string (visible in `requests list --json`) — the user's free-text scope/focus for THIS run (e.g.
@@ -39,9 +50,27 @@ Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowleve
    `pr-respond` procedure as the **review scope**: the adapter restricts/prioritizes accordingly AND copies
    it onto the created workspace as `feature.reviewBrief` (so the cockpit shows the applied scope). Apply
    requests inherit the scope already recorded on the workspace — no extra handling needed.
-   - **`apply`** (has `wsId`): run the **Apply** step of the matching adapter for that workspace's `kind`
-     (post inline comments for `pr-review`, post replies / apply fixes for `pr-respond`), reading the user's
-     decisions from the ledger. Then `requests set <reqId> --status done --phase "posted to PR"`.
+   - **`apply`** (has `wsId`): run the **Apply** step for that workspace's `kind`, reading the user's
+     decisions from the ledger — **branch on kind** (check `feature list --json` / the feature file):
+     - `pr-review` / `pr-respond` → post inline comments / replies back to the PR
+       (`/flowlever:pr-review` / `/flowlever:pr-respond` Apply step). Then `--phase "posted to PR"`.
+     - `spec` → run **`/flowlever:apply-spec <wsId>`**: write the accepted change proposals back to ADO
+       work-item fields / Confluence sections **surgically** (patch one node, never regenerate the page).
+       Then `--phase "applied to spec"`.
+     On success: `requests set <reqId> --status done --phase "<as above>"`.
+   - **`re-audit`** (has `wsId`): the user **Rejected a proposal with a counter**. Run
+     **`/flowlever:audit <wsId>` in Scoped re-audit mode** (see that skill) — re-evaluate ONLY the
+     findings whose `draft.review.verdict === "redirect"`, honoring each one's counter `note` (and the
+     request `instructions`), and re-draft or waive them. Don't run the full sweep. Then
+     `requests set <reqId> --status done --phase "re-audited"`.
+   - **`propose`** (has `wsId`): the cockpit's "Draft proposals first" button — the user accepted
+     findings but none carry a writable before→after draft yet. Run **`/flowlever:propose <wsId>`**:
+     draft the mechanically-applicable edits (ADO field / Confluence section before→after with a
+     `targetRef`) for the accepted/open findings and attach them to the ledger (READ ONLY — writes
+     nothing external). Structural / decision-only findings that can't be a surgical patch get a
+     no-targetRef hand-off draft instead; say so. Emit phases (`--phase "drafting proposals"`). On
+     success: `requests set <reqId> --status done --phase "proposals drafted" --wsId <wsId>` (the UI
+     then flips the button from "Draft proposals first" to "Apply").
 3. If a request fails (fetch error, bad PR id, auth), set `--status error --note "<short reason>"` and move
    on — never let one bad request block the rest.
 
