@@ -92,15 +92,14 @@ different lens on the domain:
 
 ### The scorecard (makes automated runs comparable)
 
-Score each candidate 0–100: pain intensity ×25, community size/reachability ×20,
-fragmentation/consolidation upside ×15, capability-shift leverage ×15, founder-
-market fit ×15 (check the user's memory/context: skills, assets, hobbies,
-audience), competitive openness ×10. Write `docs/research/00-opportunities.md`
+Score each candidate 0–100: pain intensity ×30, community size/reachability ×25,
+fragmentation/consolidation upside ×20, capability-shift leverage ×15,
+competitive openness ×10. Write `docs/research/00-opportunities.md`
 with the ranked scorecard table + one-paragraph recommendation each.
 
-**Unattended threshold:** proceed to the pipeline only for a candidate ≥ 60 with
-founder-fit ≥ 8/15; otherwise stop and report "no qualified opportunity" with
-the scorecard (that IS the deliverable — don't force a weak pipeline run).
+**Unattended threshold:** proceed to the pipeline only for a candidate ≥ 60;
+otherwise stop and report "no qualified opportunity" with the scorecard (that IS
+the deliverable — don't force a weak pipeline run).
 
 ## Phase 1 — Research fan-out (the evidence base)
 
@@ -192,8 +191,8 @@ REAL decisions; document the runner-up stack.
   of the riskiest assumption (landing-page smoke test, community post, concierge
   MVP, pre-sale) each with a KILL CRITERION — before or parallel to Phase 0.
 - **Phases 0–N** — Phase 0 is always *proof-of-riskiest-technical-assumptions*
-  with measurable **gates** on REAL data (check the user's machine/files/assets
-  for authentic corpora before inventing synthetic ones; mark synthetic
+  with measurable **gates** on REAL data (source authentic public corpora
+  before inventing synthetic ones; mark synthetic
   benchmarks explicitly synthetic). Each phase: goal, epics, checkbox tasks
   (`- [ ] N.N …`) sized for ONE agent session, exit criteria. Ship something
   real every phase. Include a **launch phase** with the GTM checklist — the
@@ -218,7 +217,6 @@ outcome and offers "say go / run /autopilot to start building."
 - **Numbers over adjectives** — prices, member counts, latencies, percentages.
 - **Honest whitespace** — discovered competitors get logged prominently, never
   buried; positioning adjusts.
-- **Founder-market fit checked** against the user's real assets and context.
 - **Specs complete enough to implement without re-research** — a build agent
   can start masterplan Phase 0 immediately.
 - **Distribution is part of done** — a plan without a launch phase and channel

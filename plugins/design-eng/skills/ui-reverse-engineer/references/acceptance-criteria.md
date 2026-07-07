@@ -44,6 +44,7 @@ Composition integrity:
 
 - [ ] The composition reproduces one specific source screen, not a hybrid of several.
 - [ ] Secondary details are present (meta lines, badges, floating nav rather than a sticky bar if the source floats).
+- [ ] The **navigation menu / overlay** is reconstructed in its *open* state (as an isolated component and wired into the composition), not left as a closed hamburger. Same for any other opener→panel pair the source has (cart, filter, search, account).
 - [ ] The skeleton is derived from the same grid and aligns with the composition.
 
 ## Catalog of common failures and their fixes

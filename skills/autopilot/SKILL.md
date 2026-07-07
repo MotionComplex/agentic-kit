@@ -69,6 +69,18 @@ Detect the toolchain:
 - **cmux-swarm present**: optionally spawn real worker panes for build/review.
 - **Otherwise**: use the generic loop below with the Agent (subagent) tool.
 
+**Model & effort policy:** the orchestrator (you) stays on the session model — planning,
+story authoring, triage, and merge judgment happen at that tier and are never delegated
+down. Delegated work uses the dedicated agent types, which pin model + reasoning effort
+in their definitions (`~/.claude/agents/`):
+- `autopilot-builder` — Opus, high effort — implements a unit.
+- `autopilot-reviewer` — Opus, high effort, **read-only tools** — adversarial review.
+- `autopilot-fixer` — Opus, medium effort — applies triaged findings.
+
+If a type is missing, fall back to a generic subagent with `model: "opus"`. Spawn cmux
+panes with `--model opus`. Escalate a single unit back to the session model only after
+the same unit fails build→review twice.
+
 Then create the two persistence files (see §2) and enter the loop.
 
 ---
@@ -123,23 +135,26 @@ For each unit of work (story / task / slice), in dependency order:
 1. **Author** — write the spec/story with full context: the change, affected files
    (real paths), acceptance criteria that **forbid mocks/noops/stubs in the prod path**,
    and how to verify. Use `bmad-create-story` if present; else a short `*-story.md`.
-   Authoring is high-stakes — do it at the strongest model tier available.
+   Authoring is high-stakes — do it yourself at the orchestrator's model tier; never
+   delegate it to a cheaper worker.
 
-2. **Build (fresh context).** Spawn a **fresh subagent** (Agent tool; or `bmad-dev-story`;
-   or a cmux worker) on a feature branch off the integration branch. It implements the
+2. **Build (fresh context).** Spawn a **fresh subagent** (Agent tool, `subagent_type:
+   "autopilot-builder"`; or `bmad-dev-story`; or a cmux worker) on a feature branch off
+   the integration branch. It implements the
    unit, follows the repo contract, and must get **test + typecheck + lint green** and
    prove it (paste the passing output). It writes no fake data and flags anything
    unavoidable loudly. See the build brief in §4.
 
 3. **Review (SEPARATE fresh context) — never self-review.** Spawn a **different** fresh
-   subagent (Agent tool; or `bmad-code-review`) that did NOT write the code. It reviews
+   subagent (Agent tool, `subagent_type: "autopilot-reviewer"`; or `bmad-code-review`)
+   that did NOT write the code. It reviews
    adversarially against the unit's acceptance criteria **and** the honesty bar (§5):
    re-runs the checks, hunts for mocks/noops/stubs/seams masquerading as real, edge
    cases, and regressions. It returns a verdict + triaged findings with file:line refs.
    See the review brief in §4.
 
-4. **Triage & fix.** Apply blockers and clear should-fixes (a fresh worker may do the
-   fixes; applying review fixes is not "self-review"). Re-run checks. If the reviewer
+4. **Triage & fix.** Apply blockers and clear should-fixes (a fresh `autopilot-fixer`
+   subagent may do the fixes; applying review fixes is not "self-review"). Re-run checks. If the reviewer
    found a mock/noop in the prod path, it is a **blocker** — fix it, don't defer it.
 
 5. **Merge.** Merge the unit into the integration branch (`--no-ff`) once green +
