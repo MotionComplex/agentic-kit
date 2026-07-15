@@ -85,6 +85,17 @@ for row in "${targets[@]}"; do
   fi
 done
 
+# Agent definitions (pinned model/effort/tools for skill-spawned workers,
+# e.g. autopilot-builder/reviewer/fixer). Same link semantics as skills.
+CLAUDE_AGENTS_DIR="$HOME/.claude/agents"
+if [[ -d "$KIT_DIR/agents" ]]; then
+  mkdir -p "$CLAUDE_AGENTS_DIR"
+  for agent_file in "$KIT_DIR"/agents/*.md; do
+    [[ -f "$agent_file" ]] || continue
+    link_into "$CLAUDE_AGENTS_DIR" "$(basename "$agent_file")" "$agent_file"
+  done
+fi
+
 echo
 echo "Done. Skills available in $CLAUDE_SKILLS_DIR."
 if [[ -d "$CURSOR_SKILLS_DIR" ]]; then

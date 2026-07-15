@@ -24,7 +24,7 @@ compatibility: >
   test/typecheck/lint commands. Does NOT spend money, use secrets, or touch external
   systems on the owner's behalf — those become logged owner-action items, never blockers.
 metadata:
-  version: 1.0.0
+  version: 1.1.0
 ---
 
 # Autopilot — autonomous plan → build → review loop
@@ -69,17 +69,28 @@ Detect the toolchain:
 - **cmux-swarm present**: optionally spawn real worker panes for build/review.
 - **Otherwise**: use the generic loop below with the Agent (subagent) tool.
 
-**Model & effort policy:** the orchestrator (you) stays on the session model — planning,
-story authoring, triage, and merge judgment happen at that tier and are never delegated
-down. Delegated work uses the dedicated agent types, which pin model + reasoning effort
-in their definitions (`~/.claude/agents/`):
-- `autopilot-builder` — Opus, high effort — implements a unit.
-- `autopilot-reviewer` — Opus, high effort, **read-only tools** — adversarial review.
-- `autopilot-fixer` — Opus, medium effort — applies triaged findings.
+**Model & effort policy — orchestrate high, work low.** The orchestrator (you) stays on
+the session model — planning, story authoring, triage, and merge judgment happen at that
+tier and are never delegated down. Execution delegates DOWN a tier; only the review gate
+keeps a top-tier model, because that is where quality failures cost the most. The
+dedicated agent types pin model + effort in their definitions (`~/.claude/agents/`):
+- `autopilot-builder` — mid-tier (Sonnet), high effort — implements a unit.
+- `autopilot-reviewer` — top worker tier (Opus), high effort, **read-only tools** —
+  adversarial review.
+- `autopilot-fixer` — mid-tier (Sonnet), medium effort — applies triaged findings.
 
-If a type is missing, fall back to a generic subagent with `model: "opus"`. Spawn cmux
-panes with `--model opus`. Escalate a single unit back to the session model only after
-the same unit fails build→review twice.
+If a type is missing, fall back to a generic subagent with `model: "sonnet"` (reviewer:
+`model: "opus"`). Spawn cmux panes with the matching `--model`.
+
+**Escalation ladder (per unit):** fails build→review once on the mid-tier → rebuild with
+an Opus builder. Fails again → one attempt at the session model. Fails a third time →
+mark the unit `blocked-investigate` in the state file, record what was tried, and move
+on to the next unit — never grind one unit forever.
+
+**Bounded parallelism (default on):** up to **2 builders concurrently** on units that are
+dependency-independent (3 only when the owner's mandate explicitly asks for it). Reviews
+may pipeline — unit A's review can run while unit B builds — but **merges are strictly
+sequential** into the integration branch. Never run multiple top-tier agents in parallel.
 
 Then create the two persistence files (see §2) and enter the loop.
 
@@ -117,10 +128,24 @@ non-blocked work first, and present the fork clearly — don't trickle questions
 Maintain two files at the repo's output location (`_bmad-output/`, `docs/`, or repo root):
 
 - **`AUTOPILOT-STATE.md`** — the living source of truth. A checklist of every unit with
-  status (`todo / building / in-review / fixing / merged / blocked-owner`), the current
-  cycle number, the branch, and a 2-line narrative per cycle. **Update it every cycle.**
+  status (`todo / building / in-review / fixing / merged / blocked-owner /
+  blocked-investigate`), the current cycle number, the branch, a 2-line narrative per
+  cycle, and a **usage ledger**: one line per unit recording the agents spawned for it
+  (builder/reviewer/fixer counts and tiers). Purely passive bookkeeping — it never
+  pauses the run; it exists so the owner can see afterwards what a run spent and which
+  unit ate it. **Update it every cycle.**
 - **`DECISIONS-FOR-OWNER.md`** — every default-and-proceed decision (§1) plus an
   "OWNER ACTIONS REQUIRED" section for gated items with exact steps.
+
+**Existing state files:** at contract time, check whether the repo already has an
+**active** project-level state file (e.g. `project_state.md`, or whatever the repo's
+CLAUDE.md names). Active means it verifiably reflects the repo's current reality — its
+updated-date and claims hold up against `git log` and the files it references. If one
+exists, write a single pointer entry into it ("autopilot run active — state in
+AUTOPILOT-STATE.md, decisions in DECISIONS-FOR-OWNER.md") and never duplicate content
+across the files — one truth, linked. A stale state file gets no pointer (flag its
+staleness in the decisions file instead); a repo with no state file needs nothing —
+never assume one exists.
 
 **Resume protocol:** at the start of every cycle (and always after a compaction/restart),
 **re-read `AUTOPILOT-STATE.md` first** and continue from the first unfinished unit. Never
@@ -140,31 +165,49 @@ For each unit of work (story / task / slice), in dependency order:
 
 2. **Build (fresh context).** Spawn a **fresh subagent** (Agent tool, `subagent_type:
    "autopilot-builder"`; or `bmad-dev-story`; or a cmux worker) on a feature branch off
-   the integration branch. It implements the
-   unit, follows the repo contract, and must get **test + typecheck + lint green** and
-   prove it (paste the passing output). It writes no fake data and flags anything
-   unavoidable loudly. See the build brief in §4.
+   the integration branch. The brief hands it the **exact file paths** the story names
+   and forbids broad exploration — workers execute a scoped spec; they don't survey the
+   repo (that's the expensive kind of agent). It implements the unit, follows the repo
+   contract, and must get **test + typecheck + lint green** and prove it with the
+   **summary line + any failures only** (never the full suite dump). It writes no fake
+   data and flags anything unavoidable loudly. See the build brief in §4.
 
 3. **Review (SEPARATE fresh context) — never self-review.** Spawn a **different** fresh
    subagent (Agent tool, `subagent_type: "autopilot-reviewer"`; or `bmad-code-review`)
    that did NOT write the code. It reviews
    adversarially against the unit's acceptance criteria **and** the honesty bar (§5):
    re-runs the checks, hunts for mocks/noops/stubs/seams masquerading as real, edge
-   cases, and regressions. It returns a verdict + triaged findings with file:line refs.
-   See the review brief in §4.
+   cases, and regressions — and when the unit has a runtime surface (a page, an
+   endpoint, a CLI), it **exercises that surface and observes the behavior**; checks
+   green is not the same as verified real. It returns a verdict + triaged findings with
+   file:line refs. See the review brief in §4.
 
 4. **Triage & fix.** Apply blockers and clear should-fixes (a fresh `autopilot-fixer`
-   subagent may do the fixes; applying review fixes is not "self-review"). Re-run checks. If the reviewer
-   found a mock/noop in the prod path, it is a **blocker** — fix it, don't defer it.
+   subagent may do the fixes; applying review fixes is not "self-review"). Re-run checks.
+   If the reviewer found a mock/noop in the prod path, it is a **blocker** — fix it,
+   don't defer it.
+
+4a. **Re-review blocker fixes before merging.** Fixes for **blocker** findings never
+   merge unverified: send the fixed unit back to a fresh reviewer with a **scoped**
+   brief (verify only the listed findings are truly resolved and nothing was stubbed to
+   get there — not a full re-review). Nits/should-fixes don't need this. Cap at **2
+   fix→re-review cycles**; if blockers still stand, mark the unit `blocked-investigate`
+   and move on.
 
 5. **Merge.** Merge the unit into the integration branch (`--no-ff`) once green +
    review-clean. Respect the repo's merge model (if `main`/`develop` is owner-merged,
    merge into the epic/integration branch and leave the final PR for the owner — and say so).
 
-6. **Record & advance.** Update `AUTOPILOT-STATE.md` and any tracker (sprint-status).
-   Move to the next unit. If new work is discovered, add it to the checklist.
+6. **Record & advance.** Update `AUTOPILOT-STATE.md` (status, narrative, usage ledger)
+   and any tracker (sprint-status). Move to the next unit. **Discovered work parks:**
+   new work found mid-unit goes to a "Backlog (discovered)" section of the state file —
+   it enters the active checklist ONLY if the DoD is unreachable without it. The DoD
+   never silently grows.
 
-Keep looping. Do not ask "should I continue?" — continue.
+Keep looping. Do not ask "should I continue?" — continue. **Run-level breaker:** if a
+majority of remaining units are `blocked-investigate` or `blocked-owner`, stop looping —
+the DoD is likely unachievable as stated; finish what is finishable, then write the
+owner report saying exactly that.
 
 ---
 
@@ -172,20 +215,30 @@ Keep looping. Do not ask "should I continue?" — continue.
 
 **Build worker (fresh context):**
 > You are a fresh build worker. Implement <unit> in <repo> on branch <branch>, off <integration-branch>.
-> Spec/acceptance: <link or inline>. Repo rules: <key CLAUDE.md/conventions points>.
+> Spec/acceptance: <link or inline>. Files involved: <exact paths from the story — work these; do NOT
+> broadly explore the repo>. Repo rules: <key CLAUDE.md/conventions points>.
 > HARD RULE: no mocks, noops, stubs, or seeded/fake data in the production path — if something is
 > genuinely unavoidable, implement the real thing behind an env/seam and FLAG it explicitly; never
-> let "works" mean "works against a mock." Get test + typecheck + lint GREEN and paste the output.
+> let "works" mean "works against a mock." Get test + typecheck + lint GREEN; paste the summary line
+> (e.g. "N passed") plus any failures — never the full suite output.
 > Return: what changed (files), how you verified it's real, and anything you flagged.
 
 **Reviewer (separate fresh context — did NOT write this code):**
 > You are an independent adversarial reviewer. You did NOT write this code. Review <unit> on <branch>
 > vs <integration-branch> against these acceptance criteria: <list> and this honesty bar: no
 > mock/noop/stub/seam presented as working in the prod path. Re-RUN test + typecheck + lint yourself
-> (don't trust the claim). Hunt for: fake/placeholder data, noop executors, stubbed adapters, seams
-> that bypass the real path, edge cases, regressions, and any acceptance criterion not actually met.
+> (don't trust the claim; report summary + failures only). If the unit has a runtime surface (page,
+> endpoint, CLI), exercise it and observe the behavior — checks green is not verified real. Hunt for:
+> fake/placeholder data, noop executors, stubbed adapters, seams that bypass the real path, edge
+> cases, regressions, and any acceptance criterion not actually met.
 > Return a verdict (Approve / Approve-with-nits / Request-changes), blockers, and triaged findings
 > with file:line refs. Do NOT modify code.
+
+**Re-reviewer (scoped, after blocker fixes — fresh context):**
+> You are verifying fixes, not re-reviewing the unit. For each finding below, confirm it is truly
+> resolved on <branch> and that the fix did not stub, bypass, or fake the real path to get green:
+> <triaged blocker findings with file:line>. Re-run the checks (summary + failures only).
+> Return: per finding, resolved / not-resolved / resolved-dishonestly, with evidence. Do NOT modify code.
 
 Vary worker focus when useful (correctness / security / "is this actually real, not mocked").
 
@@ -215,11 +268,14 @@ If a reviewer or you find a mock/noop on the real path, it is a **blocker**, ful
 document). Then produce a final **OWNER REPORT**:
 
 - ✅ What is **verified real** (with how it was proven).
-- 🟡 What is **flagged / deferred** and why.
+- 🟡 What is **flagged / deferred** and why — including any `blocked-investigate` units
+  with what was tried at each escalation tier.
 - 🔑 **OWNER ACTIONS REQUIRED** — the exact remaining steps only the owner can do (secrets,
   paid runs, deploys), copy-pasteable.
 - 🧭 **Decisions made on your behalf** — the list from `DECISIONS-FOR-OWNER.md`, so the owner
   can override any of them.
+- 📊 **Usage summary** — total agents spawned by tier (from the state file's ledger) and
+  which units were the most expensive.
 
 Be brutally honest. Do not declare done if anything real is still mocked.
 
@@ -236,3 +292,5 @@ Be brutally honest. Do not declare done if anything real is still mocked.
 - Prefer many small, reviewed, merged units over one giant unreviewed change.
 - One reviewer must always be a *different context* than the builder. This is the rule that keeps
   the output honest — never relax it.
+- Respect the delegation budget: workers run a tier below the orchestrator, at most 2 builders
+  concurrently (3 only on explicit owner request), and never multiple top-tier agents in parallel.
