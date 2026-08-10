@@ -13,6 +13,9 @@ description: >
 The browser can't reach Confluence/ADO (MCP), so when the user enqueues a job from the UI (e.g. "+ New PR
 review"), THIS skill — running in the Claude session — picks it up and executes it. Typically run on a
 loop: **`/loop /flowlever:watch`** (or a longer interval). One pass = drain the currently-queued requests.
+Scheduled sibling: **`/flowlever:poll`** additionally *discovers* PRs to review (reviewer assignments,
+author-responded re-reviews, threads on your own PRs) and enqueues them before draining — that's the one
+to run from cron.
 
 ## Each pass
 Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowlever`):

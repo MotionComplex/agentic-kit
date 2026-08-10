@@ -284,6 +284,7 @@ readiness <featureId>                     print score + gate + blockers
 report <featureId> [--out report.md]      markdown report
 coverage set <featureId> --file coverage.json
 requests list [--status queued|running|done|error] [--json]   list UI-triggered job requests
+requests add --action <action> [--prId <id>] [--wsId <id>] [--title "..."] [--instructions "..."] [--dedupe] [--json]   enqueue a job from the CLI (same queue as POST /api/requests; --dedupe no-ops on an identical queued/running request)
 requests delete <id>                      remove a request from the queue
 requests set <id> --status running|done|error [--note "..."] [--wsId <id>] [--phase "..."] [--needs-input|--no-needs-input]   update a request (runner skill); --phase = live step label, --needs-input = blocked on you (2FA/auth)
 demo                                      seed demo feature

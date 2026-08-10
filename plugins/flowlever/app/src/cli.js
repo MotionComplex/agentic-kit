@@ -48,6 +48,11 @@ Usage: node src/cli.js <command> [args]
   report <featureId> [--out report.md]   Generate markdown report
   coverage set <featureId> --file coverage.json
   requests list [--status queued|running|done|error] [--json]   List UI-triggered job requests
+  requests add --action pr-review|pr-respond|audit|apply|re-audit|propose
+                               [--prId <id>] [--wsId <id>] [--title "..."]
+                               [--instructions "..."] [--dedupe] [--json]
+                                         Enqueue a job (same queue the web UI feeds); --dedupe
+                                         no-ops when an identical queued/running request exists
   requests delete <id>                   Remove a request from the queue
   requests set <id> --status running|done|error [--note "..."] [--wsId <id>]
                                [--phase "..."] [--needs-input|--no-needs-input]
@@ -68,7 +73,7 @@ function userError(msg) {
 
 // ---------- arg parsing (hand-rolled) ----------
 
-const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear']);
+const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear', 'dedupe']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -511,6 +516,35 @@ function cmdRequestsList({ flags }) {
   console.log(`\n${requests.length} request(s)`);
 }
 
+// Enqueue a job from the CLI — the same queue the web UI feeds via POST /api/requests, so
+// automation (e.g. the /flowlever:poll scheduled pass) can enqueue without the server running.
+// --dedupe makes the call idempotent: if a queued/running request already targets the same
+// action + prId/wsId, report that one instead of stacking a duplicate.
+function cmdRequestsAdd({ flags }) {
+  const action = need(flags.action, '--action');
+  if (flags.dedupe) {
+    const existing = ledger.listRequests({}).find((r) => (r.status === 'queued' || r.status === 'running')
+      && r.action === action
+      && (flags.prId === undefined || r.prId === String(flags.prId))
+      && (flags.wsId === undefined || r.wsId === String(flags.wsId)));
+    if (existing) {
+      if (flags.json) return printJson({ ...existing, deduped: true });
+      console.log(`Already ${existing.status}: ${existing.id}  ${existing.action}  ${existing.prId ? `PR ${existing.prId}` : existing.wsId || '—'} (no duplicate queued)`);
+      return;
+    }
+  }
+  const request = ledger.addRequest({
+    action,
+    prId: flags.prId,
+    wsId: flags.wsId,
+    title: flags.title,
+    instructions: flags.instructions,
+  });
+  if (flags.json) return printJson(request);
+  const target = request.prId ? `PR ${request.prId}` : (request.wsId || '—');
+  console.log(`Queued ${request.id}  ${request.action}  ${target}${request.title ? ` — ${request.title}` : ''}`);
+}
+
 function cmdRequestsDelete({ pos }) {
   const id = need(pos[0], '<id>');
   ledger.deleteRequest(id);
@@ -613,6 +647,7 @@ async function run(argv) {
     case 'report': return cmdReport(rest);
     case 'coverage set': return cmdCoverageSet(rest);
     case 'requests list': return cmdRequestsList(rest);
+    case 'requests add': return cmdRequestsAdd(rest);
     case 'requests delete': return cmdRequestsDelete(rest);
     case 'requests set': return cmdRequestsSet(rest);
     case 'start': return cmdStart(rest);
