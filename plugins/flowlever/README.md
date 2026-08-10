@@ -103,7 +103,10 @@ Adjust the schedule by editing `StartCalendarInterval` and re-running bootout + 
 the poll pass is ingest-only by design. On Linux, plain cron works (no Keychain).
 
 **Operating it day to day:** a macOS notification arrives only when a pass produced something for
-you (findings ready, threads awaiting reply, a job errored/needs input). Open the cockpit
+you (findings ready, threads awaiting reply, a job errored/needs input). Install
+`terminal-notifier` (`brew install terminal-notifier`) so clicking the notification opens the
+cockpit directly (starting its server if needed) — without it the pass falls back to plain
+osascript notifications, which open Script Editor when clicked. Or open the cockpit yourself
 (`/flowlever:start`) to triage and Apply. The run log is `~/.flowlever/poll.log` — check it if
 passes seem silent for too long. The first scheduled ADO fetch may require a one-time 2FA/auth
 approval; run `/flowlever:poll` once from an interactive session if the log shows auth errors.

@@ -111,10 +111,17 @@ do the actual fetching + reviewing + ingest. Skip watch's own author-activity st
 above already covered it.
 
 ## 6. Notify + summarize
-After the drain, if anything actionable came out of this pass, send ONE notification. Prefer the
-PushNotification tool when available; otherwise:
+After the drain, if anything actionable came out of this pass, send ONE notification that opens
+the cockpit when clicked. Prefer `terminal-notifier` (`brew install terminal-notifier`) — its
+`-execute` starts the cockpit server if it isn't running, then opens the browser:
 ```
-osascript -e 'display notification "PR 1481: 5 findings ready · PR 1490: 3 threads await you" with title "FlowLever" sound name "Glass"'
+terminal-notifier -title "FlowLever" -message "PR 1481: 5 findings ready · PR 1490: 3 threads await you" -sound Glass \
+  -execute '/bin/zsh -lc "curl -sf -o /dev/null http://localhost:4173 || (cd '"${CLAUDE_PLUGIN_ROOT}"'/app && FLOWLEVER_DATA=${FLOWLEVER_DATA:-$HOME/.flowlever} nohup node src/cli.js start --no-open >/dev/null 2>&1 & /bin/sleep 1.5); open http://localhost:4173"'
+```
+Fallback when terminal-notifier is missing (NOTE: clicking this one opens Script Editor, not the
+cockpit — an osascript limitation, which is why terminal-notifier is preferred):
+```
+osascript -e 'display notification "..." with title "FlowLever" sound name "Glass"'
 ```
 Notify only for: new/changed draft findings ready to triage, pr-respond threads prepared, a
 request that ended `error` or is stuck `needsInput`. A pass where everything was skipped or
