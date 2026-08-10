@@ -12,8 +12,10 @@ description: >
 # /flowlever:poll — scheduled PR-review autopilot pass
 
 One pass = discover → decide → enqueue → drain → notify. Designed to be fired every ~2h by an
-external scheduler (crontab running headless `claude -p "/flowlever:poll"`); running it manually
-does exactly the same thing. Everything it queues lands in the same cockpit queue and workspaces
+external scheduler running headless `claude -p "/flowlever:poll"` — on macOS that MUST be a
+launchd LaunchAgent, not cron (cron runs outside the GUI session, can't unlock the Keychain, and
+`claude` fails with "Not logged in"; see the plugin README's "Scheduled autopilot" section for the
+plist). Running it manually does exactly the same thing. Everything it queues lands in the same cockpit queue and workspaces
 as manual `/flowlever:pr-review` runs, so manual and scheduled work can never fork or collide.
 
 **Hard rule: this pass is ingest-only.** It reviews into draft findings in the cockpit. It never
