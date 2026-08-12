@@ -111,18 +111,35 @@ osascript notifications, which open Script Editor when clicked. Or open the cock
 passes seem silent for too long. The first scheduled ADO fetch may require a one-time 2FA/auth
 approval; run `/flowlever:poll` once from an interactive session if the log shows auth errors.
 
-## Friendly hostname (optional)
+## Friendly hostname (optional): http://flowlever.test
 
-To reach the cockpit at **http://flowlever.local:4173** instead of `localhost:4173`, add a hosts
-entry once (macOS/Linux):
+Use the `.test` TLD, not `.local` — macOS routes `.local` lookups to Bonjour/mDNS at the socket
+layer, so a `/etc/hosts` entry for it resolves in `dscacheutil` but times out in curl/browsers.
+
+Hostname only (keeps the port, `http://flowlever.test:4173`):
 
 ```sh
-sudo sh -c 'echo "127.0.0.1 flowlever.local" >> /etc/hosts'
+sudo sh -c 'echo "127.0.0.1 flowlever.test" >> /etc/hosts'
 ```
 
-The server binds the wildcard interface and ignores the Host header, so no other change is needed.
-To also drop the `:4173` you'd have to forward port 80 (e.g. a pf redirect) — usually not worth the
-moving parts for a local tool.
+Hostname **without the port** (`http://flowlever.test`) additionally needs a loopback pf redirect
+80 → 4173 and a LaunchDaemon so it survives reboots — macOS still reserves ports <1024 for root.
+The pf ruleset must keep Apple's default anchors and slot the `rdr` into the translation block
+(rule-order matters):
+
+```
+scrub-anchor "com.apple/*"
+nat-anchor "com.apple/*"
+rdr-anchor "com.apple/*"
+rdr pass on lo0 inet proto tcp from any to 127.0.0.1 port 80 -> 127.0.0.1 port 4173
+dummynet-anchor "com.apple/*"
+anchor "com.apple/*"
+load anchor "com.apple" from "/etc/pf.anchors/com.apple"
+```
+
+Save as `/etc/pf-flowlever.conf`, apply with `pfctl -f /etc/pf-flowlever.conf && pfctl -e`, and
+add a `RunAtLoad` LaunchDaemon running the same two commands for boot persistence. The server
+itself needs no change — it binds the wildcard interface and ignores the Host header.
 
 ## Data location
 
