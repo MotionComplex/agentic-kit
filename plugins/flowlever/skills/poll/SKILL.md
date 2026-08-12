@@ -18,9 +18,11 @@ launchd LaunchAgent, not cron (cron runs outside the GUI session, can't unlock t
 plist). Running it manually does exactly the same thing. Everything it queues lands in the same cockpit queue and workspaces
 as manual `/flowlever:pr-review` runs, so manual and scheduled work can never fork or collide.
 
-**Hard rule: this pass is ingest-only.** It reviews into draft findings in the cockpit. It never
-posts comments, never replies, never votes, never touches the PR. `apply` requests are never
-enqueued by this skill — only the user does that from the UI.
+**Hard rule: this pass never DECIDES to post.** It reviews into draft findings in the cockpit; it
+never votes and never *enqueues* `apply` requests — only the user does that from the UI. But an
+`apply` request already sitting in the queue IS the user's explicit Post click: **drain it like
+`/flowlever:watch` would** (post the reviewed decisions back). Leaving a user-confirmed apply to
+rot in the queue is a bug, not caution.
 
 ## Config (env, all optional)
 - `FLOWLEVER_DATA` — ledger dir, default `~/.flowlever` (same as every other skill).
@@ -42,7 +44,11 @@ enqueued by this skill — only the user does that from the UI.
 Resolve the reviewer identity (email above → `core_get_identity_ids`). Then list **active** PRs
 in the project (prefer a project-level PR listing; fall back to iterating repositories if the
 tool requires a repository):
-- **Set A — PRs where I am a reviewer** (any repo, status active).
+- **Set A — PRs where I am a reviewer** (any repo, status active). **Do NOT trust the
+  `user_is_reviewer`/`i_am_reviewer` filter alone — it returns only DIRECT assignments and
+  silently misses PRs where you review via a group (e.g. `[dxp]\Frontend Team`).** List all
+  active PRs and match reviewers per PR yourself: you are a reviewer if your identity OR any
+  group you belong to appears in the PR's reviewers.
 - **Set B — PRs I created** (status active) → for the pr-respond mirror.
 
 Also load ledger state once:

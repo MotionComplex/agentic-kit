@@ -167,6 +167,13 @@ For each thread, internally produce:
 speculation, default to `clarify` rather than `agree-fix` or `disagree`. The author has more
 context than you do — surface the choice rather than committing them to a position.
 
+**Duplicate threads:** when two or more threads raise materially the same ask (same
+rule/topic/requested change — anchors and wording may differ, even across reviewers), answer
+fully in ONE canonical thread (the one with the most context, else the oldest) and give each
+duplicate a one-line cross-reference reply instead: `Same point as <reviewer>'s thread on
+<file:line> — answered there to keep the discussion in one place.` Never write two full answers
+to the same ask — they drift apart and the reviewers end up reconciling them.
+
 ---
 
 ### Step 6: Choose delivery mode

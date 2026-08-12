@@ -48,6 +48,22 @@ Via the ADO MCP: `repo_list_pull_request_threads` → filter to **active** threa
 each thread's anchor so the proposed response reflects the latest state.
 
 ## 3. Map threads → ingest shape
+
+**Duplicate-thread detection (do this FIRST, across the whole thread set):** reviewers often raise
+the same point twice — the same ask on two anchors, or two reviewers flagging the same thing. Group
+threads that are materially the same ask (same rule/topic/requested change; anchors may differ).
+Per group, pick the **canonical thread** — the one with the most context, else the oldest — and
+draft the full answer there. Every other thread in the group becomes a **cross-reference finding**:
+- `title` prefixed `[duplicate]`; `detail` MUST name the canonical thread (`duplicate of thread
+  <threadId>, <reviewer> on <file:line>`).
+- `suggestion` = a one-liner only, e.g. `Same point as <reviewer>'s thread on <file:line> — answered
+  there to keep the discussion in one place.` — never a second full answer (two full answers drift
+  apart and the reviewers reconcile them for you).
+- No code draft on the duplicate; the fix (if any) belongs to the canonical finding.
+Judge duplication by substance, not wording — two threads asking for the same behavioural change
+are duplicates even if one cites a test and the other the implementation. Two threads on the same
+file that ask *different* things are NOT duplicates.
+
 Each thread → one finding:
 - `title`: the reviewer's ask, one line. `detail`: the reviewer comment(s) + the current code at the anchor.
 - `locus`: **`pr:<id>:thread:<threadId>`** (stable across re-runs).

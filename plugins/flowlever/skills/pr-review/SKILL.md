@@ -73,6 +73,20 @@ findings anchored to specific changed files + line ranges, with spec-mismatch fi
 locus (`confluence:<pageId>#<section>`).
 
 ## 3. Map findings → ingest shape
+
+**Duplicate-comment detection (before ingesting):** compare every candidate finding against the
+PR's **existing threads** (`repo_get_pull_request_threads` — other reviewers' comments AND your own
+previously posted ones). Judge by substance, not wording:
+- Existing thread already makes the point → **drop the finding** and list it in the run summary as
+  `covered by <author>'s thread on <file:line>` — never open a parallel thread for the same point.
+- Existing thread touches the point but you add something material (a failure case, a concrete fix
+  they missed) → keep the finding, but give it locus **`pr:<id>:thread:<threadId>`** and write the
+  suggestion as a **reply into that thread** that adds ONLY the increment (open with
+  `Adding to <author>'s point:`), not a restatement. On Apply, a thread-locus finding posts via
+  thread reply, not a new thread.
+- Your own earlier findings are already reconciled by fingerprint — this check is about threads
+  from OTHER surfaces (human reviewers, other tools).
+
 For each review finding:
 - `dimension`: reuse the existing set (correctness→`feasibility`/`consistency`, missing-thing→`completeness`,
   spec-mismatch→`consistency`, unclear→`ambiguity`, test gap→`testability`, DoR/process→`dor`,
@@ -114,7 +128,9 @@ When the user has reviewed and asks to post: read their decisions
 (`FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding list <wsId> --json` → use each finding's status + `draft.review` verdict/edited
 text, or the exported work order). For every **accepted/edited** finding (skip rejected/waived), post an
 inline PR comment via `repo_create_pull_request_thread` (use the user's edited text if present, else the
-suggestion). **Never post without an explicit yes.**
+suggestion) — EXCEPT findings whose locus is `pr:<id>:thread:<threadId>` (duplicate-increment findings):
+those post as a **reply into that existing thread**, never a new one. **Never post without an explicit
+yes.**
 
 **AI disclosure line — honor the request's `instructions`.** The cockpit's Post button carries a
 disclosure toggle (default ON) as `instructions` on the apply request:

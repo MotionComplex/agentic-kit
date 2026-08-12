@@ -337,6 +337,12 @@ independently resolvable:
 Do **not** post a summary/overview thread. The PR description, the markdown review file (if
 used), and the per-thread context are sufficient.
 
+**Do not duplicate existing threads.** Before posting, compare each finding against the PR's
+existing threads (other reviewers' and your own). Same point already raised → drop yours and note
+`covered by <author>'s thread on <file:line>` in the summary. Point raised but you add something
+material → reply into that thread with only the increment (`Adding to <author>'s point: …`), never
+a parallel new thread.
+
 **AI disclosure line:** by default, append `🤖 AI comment posted by Claude` as the last line of
 each posted comment (blank line before it) — Elias wants AI-drafted comments disclosed since they
 post under his identity. Skip it only if the user says to post verbatim / without the disclosure.
