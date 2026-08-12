@@ -52,9 +52,13 @@ Each thread → one finding:
 - `title`: the reviewer's ask, one line. `detail`: the reviewer comment(s) + the current code at the anchor.
 - `locus`: **`pr:<id>:thread:<threadId>`** (stable across re-runs).
 - `dimension`: best-fit from the existing set; `severity`: how blocking the reviewer's ask is.
-- Attach a **draft** representing your proposed response: for a code change, `before`/`after` = the anchored
-  code → its fix; for a reply-only, put the drafted reply text in `after` with `before` empty (renders as
-  an additive diff). Use `setFindingDraft(wsId, fp, {...})`. (`requests set <reqId> --phase "drafting replies"`)
+- `suggestion` = **the drafted reply text — it IS what gets posted to the thread**, so every finding has
+  one (even code-fix threads get a short reply saying what was changed and why).
+- Attach a **draft** ONLY when the response includes a code change: `before`/`after` = the anchored code →
+  its fix, **code only — never put reply prose, dividers, or commentary inside `before`/`after`** (the
+  draft renders as a red/green code diff; prose in it shows up as fake added lines). Reply-only threads
+  get NO draft — the suggestion carries the reply. Use `setFindingDraft(wsId, fp, {...})`.
+  (`requests set <reqId> --phase "drafting replies"`)
 Then (`requests set <reqId> --phase "ingesting threads"`) ingest:
 `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" ingest <wsId> --file <findings.json> --note "PR #<id> open threads @ <iteration>"`.
 The runner then marks the request `done --phase "threads ready" --wsId <wsId>`.
