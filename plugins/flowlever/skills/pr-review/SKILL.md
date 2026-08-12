@@ -79,6 +79,11 @@ PR's **existing threads** (`repo_get_pull_request_threads` — other reviewers' 
 previously posted ones). Judge by substance, not wording:
 - Existing thread already makes the point → **drop the finding** and list it in the run summary as
   `covered by <author>'s thread on <file:line>` — never open a parallel thread for the same point.
+  If it is worth keeping visible in the cockpit (e.g. the user should still triage it), ingest it
+  with **`duplicateOf`** set (`{ "label": "<author> on <file:line>", "url": "<deep link>" }` — deep
+  link: `.../pullRequest/<prId>?discussionId=<threadId>`; the cockpit shows an amber DUPLICATE chip
+  linking there) and `suggestion` = the generic
+  `Duplicate of [<author>'s comment on <file:line>](<deep link>) — already being handled there.`
 - Existing thread touches the point but you add something material (a failure case, a concrete fix
   they missed) → keep the finding, but give it locus **`pr:<id>:thread:<threadId>`** and write the
   suggestion as a **reply into that thread** that adds ONLY the increment (open with

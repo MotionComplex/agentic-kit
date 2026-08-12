@@ -903,6 +903,7 @@ function stepCard(data, f) {
     h('div', { class: 'step-tags' },
       f.dimension ? h('span', { class: 'dim-tag' }, f.dimension) : null,
       badge ? h('span', { class: `f-badge f-badge-${badge}` }, badge === 'new' ? 'NEW' : 'REGRESSED') : null,
+      duplicateChip(f),
       statusChip(f.status),
       verdictChip(f),
       f.locus ? h('code', { class: 'f-locus' }, f.locus) : null));
@@ -3820,6 +3821,7 @@ function findingCard(f) {
     h('div', { class: 'f-tags' },
       f.dimension ? h('span', { class: 'dim-tag' }, f.dimension) : null,
       badge ? h('span', { class: `f-badge f-badge-${badge}` }, badge === 'new' ? 'NEW' : 'REGRESSED') : null,
+      duplicateChip(f),
       // A drafted proposal that hasn't been decided yet → a clear "review me" cue.
       (f.draft && f.draft.targetRef && !isReviewed(f) && f.decision === undefined && !isInFlightOrOut(f))
         ? h('span', { class: 'f-review-chip', title: 'A proposed change is ready — open to review' }, '± review')
@@ -3837,6 +3839,19 @@ function findingCard(f) {
 /* Board chip for a persisted triage decision on a not-yet-posted PR comment, so the
  * board shows "Will post" / "Edited" without opening the card. (Dismissed findings already
  * move to the Waived lane; posted ones to the Posted lane.) */
+/* Amber DUPLICATE chip: instantly flags a finding that mirrors an already-raised comment.
+ * Links to the canonical comment when duplicateOf.url is set (click must not open the modal). */
+function duplicateChip(f) {
+  const d = f.duplicateOf;
+  if (!d || !d.label) return null;
+  const title = `Duplicate of ${d.label} — the full answer lives there`;
+  if (d.url) {
+    return h('a', { class: 'f-dup-chip', href: d.url, target: '_blank', rel: 'noopener', title,
+      onclick: (e) => e.stopPropagation() }, 'DUPLICATE ↗');
+  }
+  return h('span', { class: 'f-dup-chip', title }, 'DUPLICATE');
+}
+
 function decisionChip(f) {
   if (isPosted(f) || f.status === 'waived') return null;
   if (f.decision === 'approve') return h('span', { class: 'f-dec-chip dec-accept', title: 'Approved — will post' }, 'Will post');

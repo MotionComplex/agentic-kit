@@ -123,6 +123,23 @@ test('validateIngestFinding rejects bad dimension/severity/missing fields', () =
   assert.equal(ledger.validateIngestFinding(mkFinding()).severity, 'major');
 });
 
+test('duplicateOf: validated on ingest, stored on the finding, editable later', () => {
+  assert.throws(() => ledger.validateIngestFinding(mkFinding({ duplicateOf: 'thread 7' })), (e) => e.code === 'EUSER');
+  assert.throws(() => ledger.validateIngestFinding(mkFinding({ duplicateOf: { url: 'https://x' } })), (e) => e.code === 'EUSER'); // label required
+  ledger.createFeature({ id: 'dup', title: 'Dup' });
+  ledger.ingestRound('dup', [
+    mkFinding({ title: 'Canonical', locus: 'a' }),
+    mkFinding({ title: 'Copycat', locus: 'b', duplicateOf: { label: 'Oriol on a.cs:39', url: 'https://ado/pr?discussionId=1' } }),
+  ]);
+  const led = ledger.loadLedger('dup');
+  assert.equal(led.findings.find((f) => f.title === 'Canonical').duplicateOf, null);
+  assert.equal(led.findings.find((f) => f.title === 'Copycat').duplicateOf.label, 'Oriol on a.cs:39');
+  const copy = led.findings.find((f) => f.title === 'Copycat');
+  const updated = ledger.setFindingDetails('dup', copy.fp, { duplicateOf: { label: 'Marta on b.cs:12' } });
+  assert.equal(updated.duplicateOf.label, 'Marta on b.cs:12');
+  assert.equal(ledger.setFindingDetails('dup', copy.fp, { duplicateOf: null }).duplicateOf, null);
+});
+
 test('ingest round 1 inserts findings as open with firstSeenRound=1', () => {
   ledger.createFeature({ id: 'ing', title: 'Ingest' });
   const { round, stats } = ledger.ingestRound('ing', [

@@ -54,11 +54,14 @@ the same point twice — the same ask on two anchors, or two reviewers flagging 
 threads that are materially the same ask (same rule/topic/requested change; anchors may differ).
 Per group, pick the **canonical thread** — the one with the most context, else the oldest — and
 draft the full answer there. Every other thread in the group becomes a **cross-reference finding**:
-- `title` prefixed `[duplicate]`; `detail` MUST name the canonical thread (`duplicate of thread
-  <threadId>, <reviewer> on <file:line>`).
-- `suggestion` = a one-liner only, e.g. `Same point as <reviewer>'s thread on <file:line> — answered
-  there to keep the discussion in one place.` — never a second full answer (two full answers drift
-  apart and the reviewers reconcile them for you).
+- Set **`duplicateOf`** on the finding (first-class field — the cockpit shows an amber DUPLICATE
+  chip linking to the canonical comment):
+  `"duplicateOf": { "label": "<reviewer> on <file:line>", "url": "<canonical deep link>", "fp": "<canonical finding fp, once known>" }`
+  Deep-link format: `https://dev.azure.com/<org>/<project>/_git/<repo>/pullRequest/<prId>?discussionId=<threadId>`.
+- `suggestion` = the **generic duplicate message with the link** — this is what gets posted:
+  `Duplicate of [<reviewer>'s comment on <file:line>](<deep link>) — already being handled there.`
+  Add at most one short thread-specific sentence when that thread contains something the canonical
+  one doesn't (e.g. a factual correction) — never a second full answer.
 - No code draft on the duplicate; the fix (if any) belongs to the canonical finding.
 Judge duplication by substance, not wording — two threads asking for the same behavioural change
 are duplicates even if one cites a test and the other the implementation. Two threads on the same

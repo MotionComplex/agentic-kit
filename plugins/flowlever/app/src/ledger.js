@@ -245,7 +245,24 @@ function validateIngestFinding(f) {
       throw euser(`finding ${opt} must be a string when provided`);
     }
   }
+  if (f.duplicateOf !== undefined && f.duplicateOf !== null) {
+    validateDuplicateOf(f.duplicateOf);
+  }
   return f;
+}
+
+// A finding can mark itself as a duplicate of an already-raised comment/finding, so the UI
+// can badge it and the posted reply can be a cross-reference instead of a second answer.
+// Shape: { label: "Oriol on OktaErrorHelper.cs:39", url?: <deep link>, threadId?: <n>, fp?: <fp> }.
+function validateDuplicateOf(d) {
+  if (typeof d !== 'object' || Array.isArray(d)) throw euser('duplicateOf must be an object');
+  if (typeof d.label !== 'string' || d.label.trim() === '') throw euser('duplicateOf.label is required (e.g. "Oriol on file.cs:39")');
+  for (const opt of ['url', 'fp']) {
+    if (d[opt] !== undefined && d[opt] !== null && typeof d[opt] !== 'string') {
+      throw euser(`duplicateOf.${opt} must be a string when provided`);
+    }
+  }
+  return d;
 }
 
 // ---------- readiness ----------
@@ -334,6 +351,7 @@ function ingestRound(featureId, findings, { note = '', reopenResolved = false, t
         detail: incoming.detail ?? '',
         locus: incoming.locus,
         suggestion: incoming.suggestion ?? '',
+        duplicateOf: incoming.duplicateOf ?? null,
         status: 'open',
         statusReason: null,
         pinned: false,
@@ -351,6 +369,7 @@ function ingestRound(featureId, findings, { note = '', reopenResolved = false, t
       existing.lastSeenRound = n;
       existing.detail = incoming.detail ?? existing.detail;
       existing.suggestion = incoming.suggestion ?? existing.suggestion;
+      existing.duplicateOf = incoming.duplicateOf ?? existing.duplicateOf ?? null;
       existing.updatedAt = at;
       stats.stillOpen += 1;
     } else {
@@ -588,7 +607,7 @@ function setFindingNote(featureId, fp, note, { by = 'user' } = {}) {
 // dimension feed the fingerprint, so they are intentionally NOT editable here — changing
 // them would create a different finding. detail/suggestion/severity can be corrected as
 // understanding improves during refinement; a history entry records the refinement.
-function setFindingDetails(featureId, fp, { detail, suggestion, severity, by = 'user', note = '' } = {}) {
+function setFindingDetails(featureId, fp, { detail, suggestion, severity, duplicateOf, by = 'user', note = '' } = {}) {
   const ledger = loadLedger(featureId);
   const finding = ledger.findings.find((f) => f.fp === fp);
   if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
@@ -596,14 +615,16 @@ function setFindingDetails(featureId, fp, { detail, suggestion, severity, by = '
   if (severity !== undefined && !SEVERITIES.includes(severity)) {
     throw euser(`invalid severity "${severity}": must be one of ${SEVERITIES.join(', ')}`);
   }
-  if (detail === undefined && suggestion === undefined && severity === undefined) {
-    throw euser('nothing to refine: provide detail, suggestion or severity');
+  if (duplicateOf !== undefined && duplicateOf !== null) validateDuplicateOf(duplicateOf);
+  if (detail === undefined && suggestion === undefined && severity === undefined && duplicateOf === undefined) {
+    throw euser('nothing to refine: provide detail, suggestion, severity or duplicateOf');
   }
 
   const at = now();
   const changed = [];
   if (detail !== undefined && detail !== finding.detail) { finding.detail = String(detail); changed.push('detail'); }
   if (suggestion !== undefined && suggestion !== finding.suggestion) { finding.suggestion = String(suggestion); changed.push('suggestion'); }
+  if (duplicateOf !== undefined) { finding.duplicateOf = duplicateOf; changed.push(duplicateOf ? `marked duplicate of ${duplicateOf.label}` : 'duplicate mark cleared'); }
   if (severity !== undefined && severity !== finding.severity) {
     changed.push(`severity ${finding.severity}→${severity}`);
     finding.severity = severity;

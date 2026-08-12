@@ -29,6 +29,12 @@ reconciliation and review stepper; only the UI label/icon differs.
 (`/pr-review`, `/pr-respond`) land in a later phase; the engine is kind-agnostic today.
 
 ### Comment triage (pr-review / pr-respond)
+A finding may carry **`duplicateOf`** — a marker that the same point was already raised elsewhere
+(`{ "label": "Oriol on OktaErrorHelper.cs:39", "url": "<ADO deep link>", "fp": "<canonical fp>" }`,
+label required). The cockpit renders an amber DUPLICATE chip linking to `url`; the posted reply
+should be the generic cross-reference (`Duplicate of [<label>](<url>) — already being handled
+there.`), never a second full answer. Validated on ingest and via `setFindingDetails`.
+
 For PR kinds a finding's **`suggestion` IS the proposed PR comment / reply body** — the cockpit shows it
 as "Proposed comment" / "Proposed reply" and the decision row is comment triage rather than spec rework:
 - **pr-review** → **Approve** (will post) · **Edit comment** · **Dismiss** (won't post). "Edit comment"
