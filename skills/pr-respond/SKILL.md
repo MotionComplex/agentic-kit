@@ -170,9 +170,12 @@ context than you do — surface the choice rather than committing them to a posi
 **Duplicate threads:** when two or more threads raise materially the same ask (same
 rule/topic/requested change — anchors and wording may differ, even across reviewers), answer
 fully in ONE canonical thread (the one with the most context, else the oldest) and give each
-duplicate a one-line cross-reference reply instead: `Same point as <reviewer>'s thread on
-<file:line> — answered there to keep the discussion in one place.` Never write two full answers
-to the same ask — they drift apart and the reviewers end up reconciling them.
+duplicate a one-line cross-reference reply instead. The reply addresses the reviewer, so phrase
+it by author: same reviewer on both threads → `Same point as your comment on <file:line> —
+answered there to keep the discussion in one place.`; different reviewer → `Same point as
+<name>'s comment on <file:line> — answered there…`. Never name the person you are replying to in
+the third person. Never write two full answers to the same ask — they drift apart and the
+reviewers end up reconciling them.
 
 ---
 

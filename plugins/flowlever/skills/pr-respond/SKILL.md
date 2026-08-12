@@ -58,8 +58,14 @@ draft the full answer there. Every other thread in the group becomes a **cross-r
   chip linking to the canonical comment):
   `"duplicateOf": { "label": "<reviewer> on <file:line>", "url": "<canonical deep link>", "fp": "<canonical finding fp, once known>" }`
   Deep-link format: `https://dev.azure.com/<org>/<project>/_git/<repo>/pullRequest/<prId>?discussionId=<threadId>`.
-- `suggestion` = the **generic duplicate message with the link** — this is what gets posted:
-  `Duplicate of [<reviewer>'s comment on <file:line>](<deep link>) — already being handled there.`
+- `suggestion` = the **generic duplicate message with the link** — this is what gets posted, and it
+  is a REPLY TO THE REVIEWER, so address them correctly:
+  - canonical thread is by the **same reviewer** you're replying to →
+    `Same point as [your comment on <file:line>](<deep link>) — handling it there to keep the discussion in one place.`
+  - canonical thread is by **someone else** →
+    `Same point as [<name>'s comment on <file:line>](<deep link>) — handling it there to keep the discussion in one place.`
+  NEVER name the person you are replying to in the third person — telling Oriol his comment
+  duplicates "Oriol's comment" reads as if you don't know who you're talking to.
   Add at most one short thread-specific sentence when that thread contains something the canonical
   one doesn't (e.g. a factual correction) — never a second full answer.
 - No code draft on the duplicate; the fix (if any) belongs to the canonical finding.
