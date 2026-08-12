@@ -100,9 +100,19 @@ When run as an `apply` request, emit phases: `--phase "posting replies (may need
 --needs-input --note "Approve the auth prompt in your other window if asked."` before the first post,
 clear it after, then `--status done --phase "posted to PR"`.
 When the user asks to post: read decisions (`finding list <wsId> --json` + each `draft.review`). Then,
-**only on an explicit yes**, per thread: post the reply via `repo_reply_to_comment` (using the edited text
-if present), and for accepted code fixes apply the edit to the working tree (Edit/Write) for the user to
-commit. Push-backs post the user's note as the reply. **AI disclosure line — honor the request's
+**only on an explicit yes**, complete the full fix-and-reply loop — a reply saying "Fixed" with the fix
+sitting uncommitted on disk is a lie on the PR:
+1. **Apply** every accepted code fix to the working tree (Edit/Write) — in the PR's OWN repository
+   (resolve it from the PR, never assume the current repo) on its source branch. Guard rails: check out
+   the source branch if the checkout isn't on it (abort to manual mode if that would clobber local work),
+   stage ONLY the files the fixes touched, never force-push.
+2. **Verify** with the project's quick checks when they exist locally (build/affected tests); if the
+   toolchain isn't available locally (e.g. CI-only builds), say so in the run summary instead of skipping
+   silently.
+3. **Commit** in the repo's own message convention and **push** — the PR gets a new iteration and the
+   fix is real before anyone reads about it.
+4. **Reply** per thread via `repo_reply_to_comment` (edited text if present), citing the actual commit
+   (`Fixed in <short-sha>.`) for fix threads. Push-backs post the user's note as the reply. **AI disclosure line — honor the request's
 `instructions`:** the cockpit's Post toggle (default ON) arrives as `instructions` on the apply
 request; unless it says `disclosure: off`, append `🤖 AI comment posted by Claude` as the last line
 of every posted reply (blank line before it). Beyond that one line add nothing — no other

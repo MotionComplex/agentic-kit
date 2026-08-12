@@ -360,10 +360,16 @@ posted to the PR.
 
 Per thread, in this order:
 
-1. **Code changes** — apply via `Edit` (preferred) or `Write` on the source-branch file paths.
-   Do **not** commit or push automatically. After all code changes for the session are
-   applied, tell the user the list of files changed and let them decide when to commit. If
-   they ask to commit, follow the standard commit flow (no auto-push).
+1. **Code changes** — apply via `Edit` (preferred) or `Write` on the source-branch file paths,
+   then **commit and push as part of the same confirmed pass** (the user's go-ahead to post
+   covers the loop — a reply saying "Fixed" must be true on the PR when it lands):
+   - Work in the PR's own repository on its source branch (check it out if needed; abort to
+     manual mode rather than clobber unrelated local work).
+   - Verify with the project's quick checks when the toolchain exists locally; if it doesn't
+     (CI-only builds), say so in the summary.
+   - Stage ONLY the files the fixes touched, commit in the repo's message convention, push —
+     never force-push. Replies then cite the real sha (`Fixed in <short-sha>.`).
+   - Skip the commit/push only if the user explicitly asked for replies-only or edits-only.
 2. **Reply** — post via `repo_reply_to_comment` on the thread. The reply text should:
    - Be brief and factual.
    - Reference the fix concretely if applicable ("Fixed in the next commit." or "Done in
