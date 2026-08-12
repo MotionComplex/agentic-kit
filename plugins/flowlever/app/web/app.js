@@ -514,6 +514,20 @@ function hydrateDecisions(findings) {
     if (f.status === 'waived') d[f.fp] = { kind: 'waive', reason: f.statusReason || '' };
     else if (f.decision === 'approve') d[f.fp] = { kind: 'accept' };
     else if (f.decision === 'edit') d[f.fp] = { kind: 'edit' };
+    else {
+      // No finding-level decision stored — derive one from the persisted draft review,
+      // so accepting a proposal hunk-by-hunk counts as deciding the finding (otherwise
+      // the finish screen reads it as Undecided and silently drops it from the post).
+      const rv = f.draft && f.draft.review;
+      if (!rv) continue;
+      if (rv.verdict === 'redirect') { d[f.fp] = { kind: 'redirect', reason: rv.note || '' }; continue; }
+      if (rv.verdict === 'reject') continue;   // an explicit "don't apply" stays undecided here
+      const hunkDecs = rv.hunks || {};
+      const statuses = draftStats(f).hunks.map((hk) => (hunkDecs[String(hk.id)] || {}).status);
+      if (statuses.length && statuses.every((s) => s === 'accepted' || s === 'edited')) {
+        d[f.fp] = { kind: statuses.includes('edited') ? 'edit' : 'accept' };
+      }
+    }
   }
   return d;
 }
