@@ -119,8 +119,11 @@ layer, so a `/etc/hosts` entry for it resolves in `dscacheutil` but times out in
 Hostname only (keeps the port, `http://flowlever.test:4173`):
 
 ```sh
-sudo sh -c 'echo "127.0.0.1 flowlever.test" >> /etc/hosts'
+sudo sh -c 'echo "127.0.0.1 flowlever.test flowlever.localhost" >> /etc/hosts'
 ```
+
+`flowlever.localhost` rides along as an alias: browsers hardwire `*.localhost` to loopback even
+without the hosts entry, but curl and most CLI tools don't — the entry makes it universal.
 
 Hostname **without the port** (`http://flowlever.test`) additionally needs a loopback pf redirect
 80 → 4173 and a LaunchDaemon so it survives reboots — macOS still reserves ports <1024 for root.
