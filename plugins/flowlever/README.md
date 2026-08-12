@@ -144,6 +144,16 @@ Save as `/etc/pf-flowlever.conf`, apply with `pfctl -f /etc/pf-flowlever.conf &&
 add a `RunAtLoad` LaunchDaemon running the same two commands for boot persistence. The server
 itself needs no change — it binds the wildcard interface and ignores the Host header.
 
+**pf reflection quirk:** if the `rdr` target is the same IP the rule matches (`127.0.0.1` →
+`127.0.0.1`), direct connections to the target port (`:4173`) start timing out — replies collide
+with the translation state. Fix: redirect to a dedicated loopback alias instead
+(`ifconfig lo0 alias 127.94.41.73` + `rdr … -> 127.94.41.73 port 4173`; add the ifconfig to the
+LaunchDaemon). The server hears it because it binds the wildcard interface.
+
+**Keep the server up:** the cockpit dies with the session that started it. A user-level
+`KeepAlive` LaunchAgent running `node app/src/cli.js start --no-open` (with `FLOWLEVER_DATA` set)
+makes `flowlever.test` always-on and restarts the server if it crashes.
+
 ## Data location
 
 Ledger state (features, findings, rounds, requests, briefs) lives **per-user** in `~/.flowlever`,
