@@ -1412,6 +1412,8 @@ a.backlink:focus-visible {
 .finish-post-row .btn { padding: 10px 18px; font-size: 13px; }
 .post-status { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 560; }
 .post-flow { font-family: var(--mono); font-size: 11px; }
+.post-disclosure { display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 12px; cursor: pointer; user-select: none; }
+.post-disclosure input { accent-color: var(--accent); cursor: pointer; }
 
 /* ============================== delete / dismiss affordances ============================== */
 

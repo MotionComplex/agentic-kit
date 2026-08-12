@@ -83,6 +83,9 @@ const state = {
 const current = { view: null, id: null, tab: null };
 let routeSeq = 0;
 
+/* Footer appended to AI-drafted PR comments/replies when the post toggle is on (the default). */
+const DISCLOSURE_LINE = '🤖 AI comment posted by Claude';
+
 /* ============================== tiny DOM lib ============================== */
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -1524,12 +1527,23 @@ function postActionEl(data) {
     onclick: () => postBack(data, kind, verb),
   }, active ? 'Queued…' : posted ? `${verb} again` : errored ? 'Retry post' : postLabel);
 
+  // AI-disclosure toggle: on by default; the choice rides the apply request's
+  // `instructions`, so the runner needs no other channel to know it.
+  if (state.flow.disclosure === undefined) state.flow.disclosure = true;
+  const disclosureToggle = h('label', { class: 'post-disclosure meta-dim', title: `When on, each posted ${noun[0]} ends with "${DISCLOSURE_LINE}".` },
+    h('input', {
+      type: 'checkbox', checked: state.flow.disclosure ? 'checked' : undefined, disabled: active ? 'disabled' : undefined,
+      onchange: (e) => { state.flow.disclosure = e.target.checked; },
+    }),
+    ` ${DISCLOSURE_LINE}`);
+
   return h('div', { class: 'finish-post' },
     h('div', { class: 'step-section-label' }, `${verb} — nothing is sent until you click this`),
     h('div', { class: 'finish-post-row' },
       btn,
       statusLine,
-      h('span', { class: 'meta-dim post-flow' }, 'queued → running → posted')));
+      h('span', { class: 'meta-dim post-flow' }, 'queued → running → posted')),
+    disclosureToggle);
 }
 
 /* Post gate for PR workspaces: first persist the triage to finding statuses
@@ -1537,7 +1551,7 @@ function postActionEl(data) {
  * `apply` request the runner posts back to the PR. */
 async function postBack(data, kind, verb) {
   await persistTriage(data);
-  await enqueueApply(verb);
+  await enqueueApply(verb, kind);
 }
 
 async function persistTriage(data) {
@@ -1662,16 +1676,23 @@ async function applySpec(applyableFps) {
   await enqueueApply('Apply spec changes');
 }
 
-async function enqueueApply(label) {
+async function enqueueApply(label, kind) {
   // Optimistic: flip the button into its busy state immediately (before the POST
   // round-trips) so the click feels responsive; the apply-request polling then
   // drives the real queued → running → done state.
   state.flow.applying = true;
   renderFlowInto();
   try {
+    const isPr = kind === 'pr-review' || kind === 'pr-respond';
+    // For PR posts, spell the disclosure choice out on the request so the runner
+    // never has to guess (checkbox in postActionEl; default on).
+    const instructions = !isPr ? undefined
+      : (state.flow.disclosure !== false
+          ? `disclosure: append "${DISCLOSURE_LINE}" as the last line of every posted ${kind === 'pr-review' ? 'comment' : 'reply'}`
+          : 'disclosure: off — post the reviewed text verbatim, no AI footer');
     await api('/api/requests', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'apply', wsId: current.id }),
+      body: JSON.stringify({ action: 'apply', wsId: current.id, instructions }),
     });
     toast(`${label} queued`, 'success');
     ensureApplyPolling();

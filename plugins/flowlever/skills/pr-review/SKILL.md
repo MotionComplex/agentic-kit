@@ -116,9 +116,14 @@ text, or the exported work order). For every **accepted/edited** finding (skip r
 inline PR comment via `repo_create_pull_request_thread` (use the user's edited text if present, else the
 suggestion). **Never post without an explicit yes.**
 
-**Post the comment body verbatim — nothing else.** Do NOT append a disclosure/attribution/AI footer
-(e.g. "_this review comment was AI-generated…_", "🤖 Generated with…", "Posted via FlowLever"). The
-posted text is exactly the finding's suggestion or the user's edited text — no signature, no footer.
+**AI disclosure line — honor the request's `instructions`.** The cockpit's Post button carries a
+disclosure toggle (default ON) as `instructions` on the apply request:
+- `disclosure: append …` (or no instructions at all) → append `🤖 AI comment posted by Claude` as
+  the **last line** of every posted comment, separated by a blank line.
+- `disclosure: off` → post the reviewed text verbatim.
+Beyond that one line, add NOTHING else — no other signature, attribution, or footer (no
+"_AI-generated…_", "🤖 Generated with…", "Posted via FlowLever"). The body is exactly the finding's
+suggestion or the user's edited text (+ the disclosure line when on).
 
 ### Anchoring — get the line right (this is what makes a comment land on the code it's about)
 A finding's `locus` line is a *hint*; **verify it against the live diff before posting**, because an

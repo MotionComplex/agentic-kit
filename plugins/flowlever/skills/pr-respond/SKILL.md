@@ -73,7 +73,9 @@ clear it after, then `--status done --phase "posted to PR"`.
 When the user asks to post: read decisions (`finding list <wsId> --json` + each `draft.review`). Then,
 **only on an explicit yes**, per thread: post the reply via `repo_reply_to_comment` (using the edited text
 if present), and for accepted code fixes apply the edit to the working tree (Edit/Write) for the user to
-commit. Push-backs post the user's note as the reply. **Post the reply text verbatim — never append a
-disclosure/attribution/AI footer** (no "_AI-generated_", "🤖 Generated with…", or similar). After
-posting, set those findings → `reworking`.
+commit. Push-backs post the user's note as the reply. **AI disclosure line — honor the request's
+`instructions`:** the cockpit's Post toggle (default ON) arrives as `instructions` on the apply
+request; unless it says `disclosure: off`, append `🤖 AI comment posted by Claude` as the last line
+of every posted reply (blank line before it). Beyond that one line add nothing — no other
+signature/attribution/footer. After posting, set those findings → `reworking`.
 A re-run reconciles as the reviewer responds again — same loop.
