@@ -258,6 +258,9 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 /* tint the card border by job state so a glance reads "busy / blocked / failed" */
 .fc-busy { border-color: var(--accent-line); }
 .fc-busy-error { border-color: var(--notready-line); }
+/* Needs-your-input cards are sorted to the top and tinted whole-card so they can't be missed. */
+.feature-card.fc-busy-needs { border-color: var(--major-line); background: var(--major-soft); }
+.feature-card.fc-busy-needs:hover { border-color: var(--major); }
 .fc-busy-needs .fc-job { border-color: var(--major-line); background: var(--major-soft); }
 .fc-busy-error .fc-job { border-color: var(--notready-line); background: var(--notready-soft); }
 /* placeholder card for a review whose workspace doesn't exist yet */
@@ -1369,7 +1372,7 @@ a.backlink:focus-visible {
 /* "Needs your input" — a job blocked waiting on the user (e.g. a 2FA/auth prompt).
    Deliberately a hotter orange-amber than the brand yellow so it reads as an alert,
    not as normal running. */
-.req-row.req-needs { border-color: oklch(0.74 0.17 55 / 0.6); box-shadow: inset 2px 0 0 oklch(0.78 0.17 55); }
+.req-row.req-needs { border-color: oklch(0.74 0.17 55 / 0.6); box-shadow: inset 2px 0 0 oklch(0.78 0.17 55); background: var(--major-soft); }
 .req-needsinput {
   display: flex; gap: 9px; align-items: flex-start; margin-top: 9px;
   padding: 9px 11px; border-radius: var(--radius-sm);

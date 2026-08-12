@@ -2011,20 +2011,25 @@ async function renderSection(kind) {
 function sectionGrid(kind, features, requests) {
   const live = (requests || []).filter(isLiveJob);
   const used = new Set();
-  const cardFor = (f) => {
+  const withJob = features.map((f) => {
     const job = jobForFeature(f, live);
     if (job) used.add(job.id);
-    return featureCard(f, job);
-  };
+    return { f, job };
+  });
+  // Cards sort by how urgently they need the user: needs-input first, then
+  // errored, running, queued jobs, then idle workspaces (stable within a rank).
+  const urgency = (job) => (job ? jobRank(job) : 0);
   // Active workspaces stay on top; finished ones drop into a collapsed "Done" section.
-  const activeCards = features.filter((f) => f.status !== 'done').map(cardFor);
-  const doneCards = features.filter((f) => f.status === 'done').map(cardFor);
-  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, shown first.
+  const activeCards = withJob
+    .filter(({ f }) => f.status !== 'done')
+    .map(({ f, job }) => ({ rank: urgency(job), el: featureCard(f, job) }));
+  const doneCards = withJob.filter(({ f }) => f.status === 'done').map(({ f, job }) => featureCard(f, job));
+  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards,
+  // ranked in the same urgency pool as the workspace cards.
   const pending = live
     .filter((r) => r.action === kind && r.prId && !used.has(r.id))
-    .sort((a, b) => jobRank(b) - jobRank(a))
-    .map(pendingJobCard);
-  const top = [...pending, ...activeCards];
+    .map((r) => ({ rank: jobRank(r), el: pendingJobCard(r) }));
+  const top = [...pending, ...activeCards].sort((a, b) => b.rank - a.rank).map((c) => c.el);
   if (!top.length && !doneCards.length) return sectionEmpty(kind);
   const lists = [];
   if (top.length) lists.push(h('div', { class: 'features-grid' }, top));
@@ -2395,11 +2400,13 @@ function populateRequestsStrip(strip, requests, emptyText) {
     else strip.replaceChildren();
     return;
   }
+  // Jobs blocked on the user first, then errors/running/queued (stable within a rank).
+  const ordered = [...requests].sort((a, b) => jobRank(b) - jobRank(a));
   strip.replaceChildren(
     h('div', { class: 'requests-head' },
       h('span', { class: 'f-suglabel' }, plural(requests.length, 'job', 'jobs')),
       requestsLegend()),
-    h('div', { class: 'requests-list' }, requests.map(requestRow)));
+    h('div', { class: 'requests-list' }, ordered.map(requestRow)));
 }
 
 /* The "+ New PR review/respond" entry: a button that swaps in an inline form

@@ -111,6 +111,19 @@ osascript notifications, which open Script Editor when clicked. Or open the cock
 passes seem silent for too long. The first scheduled ADO fetch may require a one-time 2FA/auth
 approval; run `/flowlever:poll` once from an interactive session if the log shows auth errors.
 
+## Friendly hostname (optional)
+
+To reach the cockpit at **http://flowlever.local:4173** instead of `localhost:4173`, add a hosts
+entry once (macOS/Linux):
+
+```sh
+sudo sh -c 'echo "127.0.0.1 flowlever.local" >> /etc/hosts'
+```
+
+The server binds the wildcard interface and ignores the Host header, so no other change is needed.
+To also drop the `:4173` you'd have to forward port 80 (e.g. a pf redirect) — usually not worth the
+moving parts for a local tool.
+
 ## Data location
 
 Ledger state (features, findings, rounds, requests, briefs) lives **per-user** in `~/.flowlever`,
