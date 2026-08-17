@@ -850,3 +850,38 @@ test('a lock timeout answers 503 with Retry-After, not 400', async () => {
     fs.rmSync(lock, { recursive: true, force: true });
   }
 });
+
+test('Z-1: every write route answers 503 on a lock timeout, not 400', async () => {
+  // handleFeatureStatus and handleFeatureActivity caught EUSER themselves and reported 400, so the
+  // central lockTimeout->503 mapping never saw them: a write that merely collided with the CLI was
+  // reported as a bad request. Genuine bad input must still be 400.
+  ledger.createFeature({ id: 'z1-ws', title: 'Z1' });
+  const lock = path.join(tmpDir, 'features', 'z1-ws.json.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner'), `999999\n${Date.now()}\n`);
+  try {
+    for (const [route, body] of [
+      ['status', { status: 'done' }],
+      ['activity', { lastActivityBy: 'someone' }],
+    ]) {
+      const res = await fetch(`${base}/api/features/z1-ws/${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      assert.equal(res.status, 503, `${route} must report a lock timeout as transient`);
+      assert.equal(res.headers.get('retry-after'), '1', `${route} must say when to retry`);
+    }
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+
+  const ok = await fetch(`${base}/api/features/z1-ws/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'done' }),
+  });
+  assert.equal(ok.status, 200, 'and it works once the lock clears');
+  const bad = await fetch(`${base}/api/features/z1-ws/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'bogus' }),
+  });
+  assert.equal(bad.status, 400, 'a real validation error is still a bad request');
+});

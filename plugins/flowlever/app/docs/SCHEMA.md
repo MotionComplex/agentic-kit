@@ -42,8 +42,12 @@ live one by:
   is eventually reclaimed rather than blocking that file's writes forever.
 - Breaking a stale lock is an atomic rename, so if several waiters decide to break it at once
   exactly one wins; the rest get `ENOENT` and retry.
-- A waiter that can't acquire the lock within `FLOWLEVER_LOCK_WAIT_MS` (**10s** default) gives up
-  with `EUSER`: *"timed out waiting for a lock on `<file>` — another FlowLever process is writing
+- A waiter that can't acquire the lock within its ceiling gives up with `EUSER` carrying
+  `lockTimeout: true`, which the HTTP layer answers as **503 with `Retry-After: 1`** (transient — retry;
+  it is not a bad request). The ceiling is `FLOWLEVER_LOCK_WAIT_MS`, default **10s** for the CLI and the
+  runner (where blocking costs nothing) but **1.5s in the server**, which sets its own via
+  `configureLocking` because a wait there blocks every other request. Setting the env var overrides
+  BOTH, so raising it also raises the server's worst-case stall. The message reads: *"timed out waiting for a lock on `<file>` — another FlowLever process is writing
   it. If nothing is running, remove `<lock>` and retry."* — that message names the exact directory
   to delete.
 - Re-entrant within one process (the module is fully synchronous), so nested internal calls never
@@ -106,10 +110,14 @@ the author*, not open reviewer work, so it:
 - does **not** penalize the readiness score (`computeReadiness` skips posted findings; they remain `isOpen`
   for reconciliation only).
 ### The fix gate — a claimed code fix must point at a real pushed commit
-**Invariant: a `pr-review`/`pr-respond` finding whose agreed response is a CODE CHANGE cannot be marked
-posted without the sha of the commit that carries it.** `markPosted` throws EUSER otherwise (→ 400 on
-the HTTP path, exit 1 on the CLI), validating the whole batch before writing anything so a mixed batch
-cannot half-apply.
+**Invariant: a `pr-respond` finding whose agreed response is a CODE CHANGE cannot be marked posted
+without a shape-valid sha for the commit that carries it.** `markPosted` throws EUSER otherwise (→ 400
+on the HTTP path, exit 1 on the CLI), validating the whole batch before writing anything so a mixed
+batch cannot half-apply. **Limit:** the sha is recorded and shape-checked, never verified against a
+repository — the ledger has no checkout — so a well-formed invention (`deadbeef`) satisfies the gate and
+`unbackedFixes` then reports that finding as delivered. It raises the cost of a false claim and leaves a
+machine-checkable record; it is not proof. Verification against the branch belongs to `/flowlever:watch`,
+which has the checkout.
 
 This exists because the ledger previously recorded no link between a finding and the commit that carried
 its fix, so a delivered fix and a missing one were indistinguishable. An audit found 11 findings across
@@ -136,8 +144,12 @@ gate turns "was this really done?" from an investigation into a lookup.
   git sha — `isValidSha`/`SHA_RE` requires **7–40 hex characters** — checked on **every** path that
   can set it, HTTP included (the API used to accept any non-empty string, e.g. `"lol-no-commit"`,
   and write it verbatim; only the CLI validated the shape).
-- **Scope:** PR kinds only. A `spec` workspace's drafts are Confluence/ADO edits whose proof of delivery
-  is `appliedAt` (`markApplied`), so no sha is owed. An unreadable kind fails **closed** (gate on).
+- **Scope:** `pr-respond` only (`owesGitCommit`). A `pr-review` workspace is a review of someone else's
+  PR — a before→after there is a suggestion for *their* author to commit, so demanding a sha stranded
+  the finding in "Posting…". A `spec` workspace's drafts are Confluence/ADO edits whose proof of
+  delivery is `appliedAt` (`markApplied`). An **unrecognised** kind and an **unreadable** feature file
+  both fail **closed** (gate on); `unbackedFixes` uses the same predicate, so the audit and the
+  enforcement always agree about which workspaces owe a commit.
 - **`unbackedFixes(featureId)`** (CLI `finding unbacked [--json]`) audits the inverse: agreed code fixes
   closed as handled with no commit behind them. The cockpit shows a red banner + `⚠ fix not pushed`
   chips and offers to reopen them; `/flowlever:watch` runs the audit every pass and reopens confirmed

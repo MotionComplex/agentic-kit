@@ -82,7 +82,9 @@ function requestsPath() { return path.join(DATA_DIR, 'requests.json'); }
 let realDataDir = null;
 function assertInsideDataDir(file) {
   if (realDataDir === null) {
-    try { realDataDir = fs.realpathSync(DATA_DIR); } catch { realDataDir = path.resolve(DATA_DIR); }
+    // Only a resolved root is cached. Caching a fallback would poison every later read if the data
+    // dir did not exist yet at first call and the real path differs (/tmp -> /private/tmp).
+    try { realDataDir = fs.realpathSync(DATA_DIR); } catch { return; }
   }
   let real;
   try { real = fs.realpathSync(file); } catch { return; }   // missing: the caller's own check reports it
@@ -433,10 +435,14 @@ function getFeature(id) {
 // Warn once per file+mtime, not once per call: the board polls, so an unchanged bad file otherwise
 // reprints its warning on every request and buries the log.
 const warnedSkips = new Set();
+const WARNED_SKIPS_CAP = 500;
 function warnSkipOnce(file, reason) {
   let key = `${file}:?`;
   try { key = `${file}:${fs.statSync(file).mtimeMs}`; } catch { /* gone; warn under '?' */ }
   if (warnedSkips.has(key)) return;
+  // Keyed by mtime, so a file rewritten in a loop would otherwise grow this forever in a
+  // long-running server. Dropping the oldest just means an old warning may repeat once.
+  if (warnedSkips.size >= WARNED_SKIPS_CAP) warnedSkips.delete(warnedSkips.values().next().value);
   warnedSkips.add(key);
   console.warn(`FlowLever: skipping ${path.basename(file)} — ${reason}`);
 }
@@ -995,8 +1001,11 @@ function isAgreedCodeFix(finding) {
 }
 
 // THE GATE. Marking a `pr-respond` finding done means telling the reviewer their point is handled.
-// When the agreed response is a code change, "handled" is only true if that change is actually on
-// the branch — so stamping it REQUIRES the sha of the pushed commit that carries it.
+// When the agreed response is a code change, calling it "handled" should mean the change is actually
+// on the branch — so stamping it REQUIRES the sha of the pushed commit that carries it. That sha is
+// recorded and shape-checked, NOT verified against the repository (see isValidSha): this makes a
+// false claim cost a deliberate fabrication rather than a silence, which is a different thing from
+// making it impossible.
 //
 // This exists because nothing used to tie a finding to the commit that fixed it, so a delivered fix
 // and a missing one looked identical in the ledger. An audit found 11 findings across 5 workspaces

@@ -213,6 +213,14 @@ function handleFeatureDetail(res, id) {
   });
 }
 
+// A handler that catches EUSER itself must still let a LOCK TIMEOUT through as a transient 503,
+// otherwise it reports "your request was wrong" for a write that merely collided with the CLI or the
+// runner. Rethrowing hands it to the central error path, which knows the difference.
+function sendHandlerError(res, err) {
+  if (err && err.lockTimeout) throw err;
+  return sendError(res, err && err.code === 'EUSER' ? euserStatus(err) : 500, err.message);
+}
+
 // Set a workspace's lifecycle status — used by the "Mark review complete" / "Reopen"
 // buttons (status:'done' / status:'reworking').
 async function handleFeatureStatus(req, res, id) {
@@ -222,7 +230,7 @@ async function handleFeatureStatus(req, res, id) {
     const feature = ledger.setFeatureStatus(id, body.status);
     sendJson(res, 200, feature);
   } catch (e) {
-    sendError(res, e.code === 'EUSER' ? 400 : 500, e.message);
+    return sendHandlerError(res, e);
   }
 }
 
@@ -253,7 +261,7 @@ async function handleFeatureActivity(req, res, id) {
     const feature = ledger.setFeatureReview(id, patch);
     sendJson(res, 200, feature);
   } catch (e) {
-    sendError(res, e.code === 'EUSER' ? 400 : 500, e.message);
+    return sendHandlerError(res, e);
   }
 }
 
@@ -659,6 +667,13 @@ async function route(req, res) {
   // and the inbox stopped nagging, which is quieter than the whole-board error it replaced but no
   // more honest. The list routes flag the count on X-FlowLever-Skipped and point here for detail.
   if (parts[1] === 'diagnostics' && parts.length === 2 && req.method === 'GET') {
+    // Loopback (or an explicit opt-in) only: this reports the absolute data path, the bind, and
+    // whether remote writes are on — reconnaissance an unauthenticated remote reader has no business
+    // with, even though it is a GET.
+    if (!IS_LOOPBACK && !ALLOW_REMOTE_WRITES) {
+      return sendError(res, 403, 'Diagnostics are available from loopback only (they report local '
+        + 'paths and the trust-boundary configuration).');
+    }
     const listed = ledger.listFeatures({ withSkipped: true });
     return sendJson(res, 200, {
       dataDir: ledger.DATA_DIR,

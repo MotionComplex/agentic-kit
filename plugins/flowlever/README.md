@@ -95,10 +95,18 @@ confirms you want it to go out now. Details:
 
 ### A claimed fix must point at a real commit
 
-**Fix + reply** and **Fix only** promise a code change, so the ledger refuses to mark such an item done
-without the sha of the pushed commit carrying it. `finding posted` hard-errors; the runner is told to
-either supply `--sha` or `finding cancel` the item. There is no path where a reply says "Fixed" and the
-branch doesn't contain the change.
+**Fix + reply** and **Fix only** promise a code change, so on a **`pr-respond`** workspace the ledger
+refuses to mark such an item done without the sha of the pushed commit carrying it. `finding posted`
+hard-errors; the runner is told to either supply `--sha` or `finding cancel` the item.
+
+**What this does and does not guarantee.** The sha is recorded and checked for *shape* (7–40 hex
+characters) — it is **not** verified against the repository, because the ledger has no checkout to ask.
+So a fabricated but well-formed sha (`deadbeef`) passes, and `finding unbacked` then reads that finding
+as delivered. The guard turns "claim a fix and say nothing" into "claim a fix and invent a commit id",
+which is a real change in cost and leaves a machine-checkable record — but it is a bookkeeping guard,
+not proof. The verification that closes that gap lives in the runner, which has the checkout:
+`/flowlever:watch` re-checks each unbacked candidate against the branch and reopens the ones that
+never landed.
 
 This is a bookkeeping guard, and it earned its place. The ledger used to record *no* link between a
 finding and the commit that fixed it, so a delivered fix and a missing one looked identical. An audit
@@ -115,7 +123,10 @@ agent — can audit it, and confident wrong conclusions are as likely as correct
   **`⚠ fix not pushed`** chip plus a workspace banner offering to reopen it.
 - `node src/cli.js finding unbacked` audits the whole ledger for them; `/flowlever:watch` runs it every
   pass, checks each against the branch, and reopens the ones that genuinely never landed.
-- Spec workspaces are exempt (their proof of delivery is `appliedAt`, not a git sha).
+- **Scope:** `pr-respond` only — that is the flow where *you* are the PR author and owe the commit. A
+  `pr-review` workspace is you reviewing someone else's PR, where a suggested diff is a comment for
+  *their* author to commit, so no sha is owed. Spec workspaces prove delivery with `appliedAt`. An
+  unrecognised or unreadable workspace kind fails **closed** (gate on).
 
 **A Post can never silently look done.** Clicking Post in the cockpit writes nothing — the browser can't
 reach Azure DevOps. It marks the items **“Posting…”** and queues an `apply` job; only the runner can
@@ -261,7 +272,7 @@ so it's shared across repositories and kept out of the plugin. Override the loca
 | `PORT` | HTTP port for the cockpit server / `cli.js start --port`. | `4173` |
 | `FLOWLEVER_HOST` | Bind address for the cockpit server. | `127.0.0.1` (loopback-only — the cockpit has no authentication, so anything else is reachable by anyone who can hit the port). A non-loopback value prints a startup warning and makes the API **read-only**: every mutation answers 403 unless paired with `FLOWLEVER_ALLOW_REMOTE_WRITES=1`. |
 | `FLOWLEVER_ALLOW_REMOTE_WRITES` | Opt-in to allow **any** write — queue a job, decide a finding, start the runner — while `FLOWLEVER_HOST` is non-loopback. Guarding only the runner was not enough: the job queue is itself a write surface, so anyone reaching the port could enqueue work your next local runner would dutifully execute. | Unset (reads allowed, all mutations 403). Set to `1` only if you accept that anyone reaching the port can change your review data and trigger ADO writes. `FLOWLEVER_ALLOW_REMOTE_RUNNER=1` is still honoured as the older, narrower name. |
-| `FLOWLEVER_LOCK_WAIT_MS` | How long a write waits for a contended file lock before failing with a retryable error. | `10000`. A write costs ~5 ms, so this is a safety net rather than an expected latency — raise it only on a slow or network filesystem. |
+| `FLOWLEVER_LOCK_WAIT_MS` | How long a write waits for a contended file lock before failing with a retryable 503. | `10000` for the CLI and the runner; **the server overrides this to `1500`** because a wait there blocks every other request. A write costs ~5 ms, so this is a safety net, not an expected latency. Setting the variable overrides BOTH — raising it also raises the server's worst-case stall to the value you choose. |
 | `FLOWLEVER_FSYNC_DIR` | Also fsync the containing **directory** after each write, making the rename itself crash-durable. | Unset. Measured cost: 5.16 → 10.05 ms per write, and that time is spent holding a lock, so it is off by default. `tmp`+rename already guarantees a reader never sees a torn file; what this buys is not losing the *last* write in an OS-level crash (you keep the previous good file either way). |
 | `FLOWLEVER_CLAUDE_BIN` | Explicit path to the `claude` binary the runner spawns. | Unset: auto-resolve via `~/.local/bin/claude`, then `command -v claude` in a login shell. |
 | `FLOWLEVER_ADO_PROJECT` | Azure DevOps project `/flowlever:poll` scans. | Unset: derive from the current repo's git remote (skill-level behavior, `skills/poll/SKILL.md`); if neither is available, the pass stops and says so. |
