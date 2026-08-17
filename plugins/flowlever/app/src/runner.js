@@ -15,7 +15,10 @@
 //     fork ten sessions posting the same comments.
 //   * Output is appended to <data>/runner.log and tailed over the API, so a headless failure
 //     (expired auth, missing MCP) is visible in the UI instead of silently doing nothing.
-//   * Localhost-only server, no CORS — same trust boundary as the CLI that starts it.
+//   * The server binds loopback by default, which is what makes "same trust boundary as the CLI
+//     that starts it" true. It is NOT true of a non-loopback bind, so server.js refuses to start a
+//     runner in that case unless the operator explicitly opts in. (This comment previously claimed
+//     the server was localhost-only while listen() bound every interface.)
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -84,8 +87,53 @@ function resolveBin() {
   };
 }
 
-function isRunning() {
+function inProcessRunning() {
   return Boolean(state.child) && state.exitCode === null && state.signal === null;
+}
+
+// The "one run at a time" guard used to live only in this module's memory, so restarting the server
+// forgot it entirely: a runner started before the restart was invisible, and the next click spawned
+// a second session draining the same queue. The pid file makes the guard survive a restart.
+//
+// A recycled pid could in principle read as alive. That errs toward REFUSING to start a second
+// runner, which is the safe direction — the cost is a stale-looking "already going" the operator can
+// clear by stopping it, versus two sessions posting the same comments twice.
+const PID_PATH = () => path.join(DATA_DIR, 'runner.pid');
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';   // exists but owned by someone else
+  }
+}
+
+function writePidFile(pid, action, startedAt) {
+  try { fs.writeFileSync(PID_PATH(), JSON.stringify({ pid, action, startedAt }, null, 2) + '\n'); }
+  catch { /* the guard degrades to in-process only */ }
+}
+
+function clearPidFile() {
+  try { fs.rmSync(PID_PATH(), { force: true }); } catch { /* ignore */ }
+}
+
+// A runner this process did not spawn (started before a server restart), still alive.
+function externalRunner() {
+  if (inProcessRunning()) return null;
+  let doc;
+  try { doc = JSON.parse(fs.readFileSync(PID_PATH(), 'utf8')); }
+  catch { return null; }
+  const pid = Number(doc && doc.pid);
+  if (!Number.isInteger(pid) || pid <= 1 || !pidAlive(pid)) {
+    clearPidFile();
+    return null;
+  }
+  return { pid, action: doc.action || null, startedAt: doc.startedAt || null };
+}
+
+function isRunning() {
+  return inProcessRunning() || Boolean(externalRunner());
 }
 
 function tailLog() {
@@ -108,18 +156,22 @@ function tailLog() {
 function status() {
   const resolved = resolveBin();
   const sh = loginShell();
+  // An adopted runner (started before a restart) must show up as running with ITS pid/action, not
+  // as idle — otherwise the UI offers a Start button that will be refused.
+  const external = externalRunner();
   return {
     available: Boolean(resolved.bin) && Boolean(sh),
     reason: resolved.bin ? (sh ? null : 'No POSIX shell found to launch the runner') : resolved.reason,
     bin: resolved.bin,
     binFrom: resolved.from || null,
     running: isRunning(),
-    action: state.action,
-    pid: isRunning() ? state.pid : null,
-    startedAt: state.startedAt,
-    finishedAt: state.finishedAt,
-    exitCode: state.exitCode,
-    signal: state.signal,
+    adopted: Boolean(external),
+    action: external ? external.action : state.action,
+    pid: external ? external.pid : (inProcessRunning() ? state.pid : null),
+    startedAt: external ? external.startedAt : state.startedAt,
+    finishedAt: external ? null : state.finishedAt,
+    exitCode: external ? null : state.exitCode,
+    signal: external ? null : state.signal,
     logPath: LOG_PATH(),
     actions: Object.fromEntries(Object.entries(ACTIONS).map(([k, v]) => [k, v.label])),
   };
@@ -174,6 +226,7 @@ function start(action = 'watch') {
   state.finishedAt = null;
   state.exitCode = null;
   state.signal = null;
+  writePidFile(child.pid, action, startedAt);
 
   child.on('exit', (code, signal) => {
     state.exitCode = code === null ? null : code;
@@ -181,12 +234,14 @@ function start(action = 'watch') {
     // A process that exits with neither a code nor a signal would leave isRunning() true forever.
     if (state.exitCode === null && state.signal === null) state.exitCode = -1;
     state.finishedAt = new Date().toISOString();
+    clearPidFile();
     try { fs.writeSync(logFd, `=== ${action} exited (code ${code}${signal ? `, signal ${signal}` : ''}) ===\n`); } catch { /* log closed */ }
     try { fs.closeSync(logFd); } catch { /* already closed */ }
   });
   child.on('error', (err) => {
     state.exitCode = -1;
     state.finishedAt = new Date().toISOString();
+    clearPidFile();
     try { fs.writeSync(logFd, `=== ${action} failed to start: ${err.message} ===\n`); } catch { /* ignore */ }
   });
   // Don't hold the server's event loop open for the child.
@@ -197,13 +252,32 @@ function start(action = 'watch') {
 
 // Stop the current run. SIGTERM only — the runner writes to the ledger, so it gets the chance to
 // finish the write it is in. A half-done drain is safe: every job is idempotent and re-checked.
+// Signal the whole process GROUP, not just the shell. The child is spawned `detached: true`, so it
+// leads its own group — and `sh -lc "<cmd>"` only becomes the `claude` process when the shell
+// chooses to exec instead of fork, which is profile- and shell-dependent. Signalling `state.pid`
+// alone therefore killed the shell and left the `claude` grandchild running on some setups while
+// `state` recorded the run as finished, so the next start() spawned a SECOND runner posting the
+// same comments. Negative pid = the group. Falls back to the single pid if the group is already gone.
 function stop() {
   if (!isRunning()) return { ok: false, code: 'EIDLE', error: 'no runner is going' };
+  const external = externalRunner();
+  const pid = external ? external.pid : state.pid;
   try {
-    process.kill(state.pid, 'SIGTERM');
+    process.kill(-pid, 'SIGTERM');
   } catch (err) {
-    return { ok: false, code: 'EKILL', error: `Could not stop the runner: ${err.message}` };
+    if (err.code !== 'ESRCH') {
+      return { ok: false, code: 'EKILL', error: `Could not stop the runner: ${err.message}` };
+    }
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (err2) {
+      if (err2.code !== 'ESRCH') {
+        return { ok: false, code: 'EKILL', error: `Could not stop the runner: ${err2.message}` };
+      }
+    }
   }
+  // An adopted runner has no exit handler here to clear its stamp.
+  if (external) clearPidFile();
   return { ok: true, status: status() };
 }
 

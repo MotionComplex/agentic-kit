@@ -105,3 +105,87 @@ test('a missing binary is reported, not spawned blindly', () => {
     process.env.FLOWLEVER_CLAUDE_BIN = saved;
   }
 });
+
+// ---------- stopping the whole process group, and surviving a restart (C-13) ----------
+
+const cp = require('node:child_process');
+
+// Earlier tests in this file leave a fake runner lingering on purpose (they assert the one-at-a-time
+// refusal), so these tests must start from a genuinely idle module.
+async function quiesce() {
+  if (runner.isRunning()) runner.stop();
+  for (let i = 0; i < 60 && runner.isRunning(); i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  fs.rmSync(path.join(tmpDir, 'runner.pid'), { force: true });
+  assert.equal(runner.isRunning(), false, 'could not reach an idle runner state');
+}
+
+// The child is spawned via `sh -lc "<cmd>"` with detached:true, so it LEADS a process group. Whether
+// the shell execs the command or forks it is shell- and profile-dependent — which is why two
+// reviewers disagreed about whether stop() leaked. Signalling the group makes it deterministic.
+test('stop() reaps a grandchild the shell forked, not just the shell', async () => {
+  const marker = `flowlever-orphan-test-${process.pid}`;
+  const forking = path.join(tmpDir, 'forking-claude');
+  fs.writeFileSync(forking, `#!/bin/bash\nbash -c 'exec -a ${marker} sleep 240' &\nwait\n`);
+  fs.chmodSync(forking, 0o755);
+
+  await quiesce();
+  const saved = process.env.FLOWLEVER_CLAUDE_BIN;
+  process.env.FLOWLEVER_CLAUDE_BIN = forking;
+  const count = () => {
+    try { return Number(cp.execSync(`pgrep -f ${marker} | wc -l`).toString().trim()); }
+    catch { return 0; }
+  };
+  try {
+    const started = runner.start('watch');
+    assert.ok(started.ok, `start failed: ${started.error || ''}`);
+    // Give the stub time to fork its grandchild, otherwise the assertion proves nothing.
+    for (let i = 0; i < 40 && count() === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(count() >= 1, 'the test stub must actually fork a grandchild for this to mean anything');
+
+    assert.ok(runner.stop().ok);
+    for (let i = 0; i < 30 && count() > 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(count(), 0, 'a shell-only SIGTERM would have left this process running');
+  } finally {
+    try { cp.execSync(`pkill -f ${marker}`); } catch { /* already gone */ }
+    process.env.FLOWLEVER_CLAUDE_BIN = saved;
+    if (runner.isRunning()) runner.stop();
+  }
+});
+
+test('liveness survives a server restart: an adopted runner blocks a second start', async () => {
+  // The guard used to live only in module memory, so restarting the server forgot a live runner and
+  // the next click spawned a second session draining the same queue.
+  await quiesce();
+  const outsider = cp.spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+  fs.writeFileSync(path.join(tmpDir, 'runner.pid'),
+    JSON.stringify({ pid: outsider.pid, action: 'watch', startedAt: new Date().toISOString() }));
+  try {
+    assert.equal(runner.isRunning(), true, 'a live pid on disk means a runner is going');
+    const st = runner.status();
+    assert.equal(st.adopted, true);
+    assert.equal(st.pid, outsider.pid);
+    assert.equal(st.exitCode, null, 'an adopted runner must not report a finished state');
+
+    const second = runner.start('watch');
+    assert.equal(second.ok, false);
+    assert.equal(second.code, 'EBUSY');
+  } finally {
+    try { outsider.kill(); } catch { /* gone */ }
+    fs.rmSync(path.join(tmpDir, 'runner.pid'), { force: true });
+  }
+});
+
+test('a stale pid file (dead process) does not block a start', async () => {
+  await quiesce();
+  // A very high pid that is essentially certain not to exist, to avoid pid-reuse flakiness.
+  fs.writeFileSync(path.join(tmpDir, 'runner.pid'),
+    JSON.stringify({ pid: 999999, action: 'watch', startedAt: new Date().toISOString() }));
+  assert.equal(runner.isRunning(), false, 'a dead runner must not hold the guard');
+  assert.ok(!fs.existsSync(path.join(tmpDir, 'runner.pid')), 'and the stale stamp is cleaned up');
+});
