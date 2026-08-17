@@ -183,11 +183,20 @@ at all**. For those threads:
    threadId:<n> status:"Fixed"`. This is not optional bookkeeping — a thread left `Active` whose
    newest comment is still the reviewer's gets re-detected as "awaiting your reply" by step 2 of
    every later run, so the item would come back forever and the user would keep re-deciding it.
-4. Stamp it like any other completed item — **with the sha**: `finding posted <wsId> --fps <fp> --sha
-   <sha>`. The user's response *is* out — as a pushed commit plus a resolved thread — so it belongs in
-   the "awaiting reviewer" lane, not back in the queue. (Without `--sha` the ledger rejects this call,
-   which is the point: a silently-resolved thread with no commit behind it would be invisible to
-   everyone, including the reviewer who is no longer being asked to look.)
+4. **Stamp it — this is the step that gets forgotten, and it is not optional.** Immediately after the
+   `update_status` call for a thread, run:
+   ```
+   ... cli.js finding posted <wsId> --fps <fp> --sha <sha>
+   ```
+   `finding fixed` (step 7) records the commit; it does **not** complete the item. Skipping this leaves
+   the finding sitting in the cockpit's "Posting…" lane forever even though the fix is pushed and the
+   thread is resolved — observed in the wild: a fix-only run pushed both fixes, set both threads to
+   Fixed, and stamped neither, so the cockpit reported "not confirmed as posted" for work that was
+   genuinely done. Treat `update_status` and `finding posted` as one indivisible pair, per finding.
+   The user's response *is* out — a pushed commit plus a resolved thread — so it belongs in the
+   "awaiting reviewer" lane, not back in the queue. (Without `--sha` the ledger rejects the call, which
+   is the point: a silently-resolved thread with no commit behind it would be invisible to everyone,
+   including the reviewer who is no longer being asked to look.)
 Say in the run summary which threads were fixed silently, so the user can see what went out without
 a comment. If a `fix-only` finding somehow has no code draft there is nothing to push: leave it
 open, don't reply, and flag it — never quietly resolve a thread you did nothing about.

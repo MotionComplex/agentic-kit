@@ -3284,11 +3284,35 @@ function specJobBanner(data) {
     // "done" is the runner's word, not proof of a stamp: if items are still pending after the job
     // finished, the write did not complete for them — say that instead of implying success.
     if (!isPropose && pending.length) {
+      // Two very different situations wear the same "still pending" shape, and conflating them gives
+      // actively wrong advice:
+      //   (a) the work DID go out — a commit is recorded — and only the completion stamp is missing.
+      //       Telling the user to "retry" here would re-push an applied fix.
+      //   (b) nothing is recorded, so the write genuinely isn't confirmed.
+      const withCommit = pending.filter((f) => f.fixCommit && f.fixCommit.sha);
+      const without = pending.filter((f) => !(f.fixCommit && f.fixCommit.sha));
+      if (withCommit.length && !without.length) {
+        const shas = [...new Set(withCommit.map((f) => f.fixCommit.sha.slice(0, 8)))].join(', ');
+        return h('div', { class: 'apply-status apply-done feat-job' },
+          h('span', { class: 'apply-dot' }, '✓'),
+          h('div', { class: 'apply-stalled-body' },
+            h('span', {}, `${plural(withCommit.length, 'fix is', 'fixes are')} pushed (`,
+              h('code', {}, shas), ') — only the completion stamp is missing, so they still show as ',
+              `“${writeVerb}…”.`),
+            h('span', { class: 'meta-dim' },
+              'The code is on the branch. Mark them done to move them out of the queue — nothing gets re-pushed.')),
+          h('button', {
+            class: 'btn btn-good', type: 'button',
+            title: 'Record these as done using the commit already on file',
+            onclick: () => confirmPushedFixes(fid, withCommit.map((f) => f.fp)),
+          }, `✔ Mark ${withCommit.length} done`));
+      }
       return h('div', { class: 'apply-status apply-error feat-job' },
         h('span', { class: 'apply-dot' }, '⚠'),
         h('div', { class: 'apply-stalled-body' },
-          h('span', {}, `The job finished but ${plural(pending.length, 'item is', 'items are')} still marked “${writeVerb}…” — `,
-            h('strong', {}, isPr ? 'those comments were not confirmed as posted' : 'those edits were not confirmed as written'), '.'),
+          h('span', {}, `The job finished but ${plural(without.length, 'item is', 'items are')} still marked “${writeVerb}…” with `,
+            h('strong', {}, 'no commit on file'),
+            isPr ? ' — not confirmed as posted.' : ' — not confirmed as written.'),
           h('span', { class: 'meta-dim' }, 'Check the PR, then put them back in the queue and retry if they are missing.')),
         h('button', {
           class: 'btn btn-cancel-pending', type: 'button',
@@ -3314,6 +3338,23 @@ function specJobBanner(data) {
       }, '↩ Back to the review queue') : null);
   }
   return null;
+}
+
+/* Stamp findings whose fix is already pushed as done, using the commit already on file. Safe by
+ * construction: the ledger's fix gate accepts this precisely because a fixCommit exists, so it can
+ * never be used to fake a completion for work that didn't happen. */
+async function confirmPushedFixes(wsId, fps) {
+  try {
+    await api(`/api/features/${encodeURIComponent(wsId)}/review/apply`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fps, status: 'posted' }),
+    });
+    await loadDetail(wsId, true);
+    rerenderDetail();
+    toast(`${plural(fps.length, 'fix', 'fixes')} marked done — the commit was already on file`, 'success');
+  } catch (e) {
+    toast(`Could not mark done: ${e.message}`);
+  }
 }
 
 /* Release this workspace's in-flight markers (no job to drop — just the stranded findings). */
