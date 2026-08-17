@@ -23,12 +23,22 @@ Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowleve
 0. **Stop check.** If `${FLOWLEVER_DATA:-$HOME/.flowlever}/.watch-stop` exists, delete it, say "watch loop
    stopped", and **end the loop — do NOT reschedule another pass.** (`/flowlever:stop` drops this sentinel.)
    Otherwise continue:
-1. **Read the queue:** `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" requests list --status queued --json`. If empty, say "no queued
-   requests" and stop (the loop will check again).
-2. **For each request** (oldest first), mark it running, then dispatch by `action` — and on completion
-   mark it `done` (or `error` with a short note):
+1. **Claim the next request — do NOT list-then-set.** Listing queued requests and separately
+   marking one `running` is a race: two runners (a scheduled `/flowlever:poll` and a
+   manually-started `/flowlever:watch`) can both see the same queued row and both execute it,
+   posting every PR comment twice. Instead take work with the compare-and-swap claim, which only
+   ever succeeds for one caller:
    ```
-   FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" requests set <reqId> --status running --phase "starting"
+   FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" requests claim --json
+   ```
+   Prints "Nothing queued." (JSON `null`) when the queue is empty — say "no queued requests" and
+   stop (the loop will check again). Otherwise the printed request is now **exclusively yours**
+   (already `running`, with `claimedBy`/`claimedAt` stamped) — dispatch it per step 2 below, then
+   loop back and claim again (it always takes the oldest queued row) until the queue is empty.
+2. **Dispatch the claimed request by `action`** — set a starting phase, then on completion mark it
+   `done` (or `error` with a short note):
+   ```
+   FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" requests set <reqId> --phase "starting"
    ```
    - **`pr-review`** (has `prId`): run the **`/flowlever:pr-review <prId>`** procedure — create/locate the
      `pr-review` workspace, fetch + review, ingest findings. On success:

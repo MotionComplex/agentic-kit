@@ -12,9 +12,13 @@ description: >
 # /flowlever:pr-review — PR review, in the cockpit
 
 Bridges the existing `/pr-review` skill into the FlowLever review cockpit. The **fetch + analysis is
-identical to `/pr-review`** (read that skill at `~/development/agentic-kit/skills/pr-review/SKILL.md`
-for the spec-aware review methodology, auto-discovery of ticket/spec, and severity calibration). The
-difference: findings go into a `pr-review` **workspace** so they're reviewed in the same stepper as
+identical to `/pr-review`** — if this monorepo also has that standalone skill checked out (a sibling
+of `plugins/`, typically at `skills/pr-review/SKILL.md` relative to the repo root; `${CLAUDE_PLUGIN_ROOT}`
+won't resolve it, since it points inside `plugins/flowlever`), read it there for the fuller
+methodology. A standalone plugin install won't have it, so don't depend on it: everything you
+actually need is inlined below — spec-aware review methodology (§2's mandatory spec discovery),
+auto-discovery of ticket/spec, and severity calibration (§3). The difference from the standalone
+skill: findings go into a `pr-review` **workspace** so they're reviewed in the same stepper as
 specs, and decisions are posted back as inline PR comments on **Apply**.
 
 ## Review scope (per-run instructions)
