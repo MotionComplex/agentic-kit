@@ -27,9 +27,18 @@ findings verified still live.
 - [merged] U4 report.js — `a8e1e20` (delegated). C-9: split "Open (scored)" vs "On the board" with an
   in-place note wherever they diverge. New test/report.test.js (6 tests).
 - [building] U5 web/app.js — delegated. U-1, U-2, U-3, U-4, U-8, C-18, C-24, C-25, F-5 client (+U-5 optional).
-- [building] U6 docs/skills/packaging — delegated. G-1, G-2, G-3, G-5, G-6, G-7, G-8, G-9 + skills
-  updated to use the atomic claim and pass `scope`.
-- [todo] RV independent Opus review of every unit, then re-review of any blocker fix.
+- [merged] U6 docs/skills/packaging — `178ad9e`. G-1..G-9. Verified independently: zero `/lever:` left
+  in any .md or in app.js; .gitignore present; plugin.json lists all 12 skills; SCHEMA.md documents
+  every command I spot-checked plus /api/config and /api/version. app/README.md was reduced to a
+  pointer (rather than rewritten) so there is one source of truth — a reasonable call. It also caught
+  a stale README claim about the wildcard bind that my server change invalidated.
+- [merged] U7 runner.js — `d382b4a` (orchestrator). C-13 both halves: process-group kill proven with a
+  forking stub (1 grandchild before stop, 0 after), and a pid-file guard that survives a restart
+  (adopted runner blocks a second start with EBUSY; a dead pid is cleaned up, not sticky).
+  This settles the disagreement between the two original reviewers — the leak was shell-dependent.
+- [in-review] RV1 adversarial Opus review of ledger+server+runner (`533d6ab`, `b9e6444`, `d382b4a`) —
+  briefed to falsify 10 specific claims, stress the lock, and audit the 3 changed test assertions.
+- [todo] RV2 adversarial review of cli+report+docs+app.js once U5 lands.
 
 ## Real-data validation (beyond the test suite)
 The owner's live cockpit runs against `~/.flowlever` (40 workspaces, 189 findings), NOT the repo's
@@ -49,6 +58,9 @@ workspaces and by the live server still serving them). No real data was lost. Th
 failure C-16's guard now prevents, and the guard shipped in the same commit.
 
 ## Cycle log
+- Cycle 1 (cont.): 6 of 7 build units merged; end-to-end smoke on new code green (demo seed -> server
+  -> API -> report; readiness still 53 for the demo, matching the documented pre-change value, so
+  scoring did not regress). No references to flowlever outside the plugin, so no cross-plugin risk.
 - Cycle 1: ledger + server done by the orchestrator; cli, report, docs, app.js delegated.
   Ledger lock had a real self-inflicted race (missing stamp treated as stale) found by stress test
   and fixed before commit — 1 lost write in 240 became 0 in 1920.
