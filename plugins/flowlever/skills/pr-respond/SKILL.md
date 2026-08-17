@@ -111,10 +111,12 @@ clear it after, then `--status done --phase "posted to PR"`.
 ### ⛔ The rule this skill exists to not break
 **A code fix is not done until it is pushed. You may not say otherwise, in any channel.**
 
-This went wrong in production and must not repeat: a run applied nothing, replied "Fixed" on two
-threads, reported the job `done` with the phase *"posted to PR + fixes applied"*, and the reviewer
-re-raised both points five days later because the branch never changed. Replying is the easy half and
-it succeeded on its own, which made every downstream surface read as complete.
+Why the rule is absolute rather than a best effort: the ledger used to record no link between a finding
+and the commit that fixed it, so a delivered fix and a missing one were indistinguishable — an audit
+found 11 findings across 5 workspaces closed as handled with no commit on file. Answering "did this
+actually ship?" then took a commit-by-commit read of the repo, and a first attempt reached a confident
+wrong conclusion. Replying is the easy half and succeeds on its own, so a run that skips the commit
+still *looks* complete everywhere downstream. A required sha removes the ambiguity entirely.
 
 So the order is **fix → push → verify → only then speak**, and the ledger enforces it: `finding posted`
 **refuses** to stamp any finding whose agreed response is a code change unless you pass `--sha <pushed

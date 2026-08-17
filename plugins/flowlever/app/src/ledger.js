@@ -526,11 +526,13 @@ function isAgreedCodeFix(finding) {
 // When the agreed response is a code change, "handled" is only true if that change is actually on
 // the branch — so stamping it REQUIRES the sha of the pushed commit that carries it.
 //
-// This exists because the opposite happened: a runner replied "Fixed", reported the job done, and
-// never committed anything. The reviewer re-raised both points five days later. Prose in the skill
-// ("apply, verify, commit, push, then reply") could be skipped while the reply still succeeded, and
-// every downstream surface read the reply as completion. Now it cannot: no sha, no stamp, hard
-// error, and the finding stays in the queue where the user can see it.
+// This exists because nothing used to tie a finding to the commit that fixed it, so a delivered fix
+// and a missing one looked identical in the ledger. An audit found 11 findings across 5 workspaces
+// closed as handled with no commit on file, and answering "did this actually ship?" took a
+// commit-by-commit read of the repo — which is exactly the kind of question that gets answered
+// confidently and wrongly. Prose in the skill ("apply, verify, commit, push, then reply") can be
+// skipped while the reply still succeeds; a required sha cannot. No sha, no stamp, hard error, and
+// the finding stays in the queue where the user can see it.
 //
 // A finding with an existing fixCommit passes (idempotent re-stamp). Comment/reply-only findings
 // (no agreed code change) are unaffected — a reply IS the whole deliverable there.

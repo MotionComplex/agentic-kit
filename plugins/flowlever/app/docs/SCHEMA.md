@@ -70,10 +70,11 @@ posted without the sha of the commit that carries it.** `markPosted` throws EUSE
 the HTTP path, exit 1 on the CLI), validating the whole batch before writing anything so a mixed batch
 cannot half-apply.
 
-This exists because the opposite happened: a run replied "Fixed" on two threads, reported the job `done`
-with the phase *"posted to PR + fixes applied"*, and never committed anything. The reviewer re-raised
-both points five days later. Replying is the easy half and succeeded alone, so every downstream surface
-read the reply as completion.
+This exists because the ledger previously recorded no link between a finding and the commit that carried
+its fix, so a delivered fix and a missing one were indistinguishable. An audit found 11 findings across
+5 workspaces closed as handled with no commit on file; establishing what had actually shipped required a
+commit-by-commit read of the repo, and a first attempt at that reached a confident wrong conclusion. The
+gate turns "was this really done?" from an investigation into a lookup.
 
 - **`isAgreedCodeFix(finding)`** — the gate's trigger: a `draft` whose `after` differs from `before`,
   not vetoed by a `redirect`/`reject` verdict, AND signed off either finding-level (`decision` of

@@ -100,10 +100,13 @@ without the sha of the pushed commit carrying it. `finding posted` hard-errors; 
 either supply `--sha` or `finding cancel` the item. There is no path where a reply says "Fixed" and the
 branch doesn't contain the change.
 
-This is a regression guard, not a precaution. It happened: a run replied "Fixed" on two threads of
-PR 5751, reported `done` with the phase *"posted to PR + fixes applied"*, and committed nothing — the
-reviewer re-raised both points five days later. Replying is the easy half, it succeeded on its own, and
-every surface downstream read the reply as completion.
+This is a bookkeeping guard, and it earned its place. The ledger used to record *no* link between a
+finding and the commit that fixed it, so a delivered fix and a missing one looked identical. An audit
+of PR 5751 and four other workspaces turned up 11 findings closed as handled with no commit on file —
+and reconstructing what had actually shipped took a commit-by-commit read of the repo, during which a
+run was wrongly blamed for replying without committing (the commit existed; the reviewer's re-raise was
+a substantive disagreement with a push-back). If the record isn't machine-checkable, nobody — human or
+agent — can audit it, and confident wrong conclusions are as likely as correct ones.
 
 - The runner's apply step is now **fix → push → verify → then speak**: verify the edit is on disk, that
   the sha is on the remote, and that the anchor file *at that sha* contains the change — only then reply
