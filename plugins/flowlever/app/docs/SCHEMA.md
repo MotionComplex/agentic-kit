@@ -36,16 +36,26 @@ platform and, unlike a lockfile, leaves something a crashed holder's lock can be
 live one by:
 - A holder stamps `<lock>/owner` with its pid + acquire time. A waiter treats the lock as **stale**
   (safe to break) only once that stamp is provably older than **30s** — a lock with a *missing*
-  stamp is NOT stale (it's mid-acquire or just released) and is never broken, only retried.
+  stamp is NOT stale on that basis (it may be mid-acquire, microseconds old; deleting it there is
+  exactly what loses a write). Such a lock is instead aged by its own **directory mtime** against a
+  much longer **60s** grace, so a lock orphaned by a process that died between `mkdir` and its stamp
+  is eventually reclaimed rather than blocking that file's writes forever.
 - Breaking a stale lock is an atomic rename, so if several waiters decide to break it at once
   exactly one wins; the rest get `ENOENT` and retry.
-- A waiter that can't acquire the lock within **10s** gives up with `EUSER`: *"timed out waiting
-  for a lock on `<file>` — another FlowLever process is writing it. If nothing is running, remove
-  `<lock>` and retry."* — that message names the exact directory to delete.
+- A waiter that can't acquire the lock within `FLOWLEVER_LOCK_WAIT_MS` (**10s** default) gives up
+  with `EUSER`: *"timed out waiting for a lock on `<file>` — another FlowLever process is writing
+  it. If nothing is running, remove `<lock>` and retry."* — that message names the exact directory
+  to delete.
 - Re-entrant within one process (the module is fully synchronous), so nested internal calls never
   self-deadlock.
-- `writeJson` itself fsyncs the file and its containing directory before returning, so a visible
-  rename implies visible contents even across a crash.
+- **This blocks the event loop.** The module is synchronous by design, so on the server a request
+  waiting for a contended lock stalls *every* request until it clears. A write costs ~5 ms, so this
+  is normally invisible; the wait timeout bounds the pathological case into a retryable error.
+- `writeJson` fsyncs the **file** before renaming, so a visible rename implies visible contents.
+  The **directory** fsync — which would additionally make the rename itself crash-durable — is
+  opt-in via `FLOWLEVER_FSYNC_DIR=1`, because it doubles the time spent holding the lock
+  (measured 5.16 → 10.05 ms/write). Without it, an OS-level crash can lose the most recent write
+  and leave the previous good file in place; it can never produce a torn file.
 
 ## kind — the workflow a workspace hosts
 Every workspace declares a `kind`. All three kinds ride the **same** finding model, ledger,
@@ -566,7 +576,7 @@ GET  /api/requests[?status=queued]  → [request]  (UI-triggered job queue; opti
 POST /api/requests/:id              → body { status?, note?, wsId?, phase?, needsInput? } → updated request (runner skill drives this; phase=live step, needsInput=blocked on user)
 DELETE /api/requests/:id            → 200 { id, deleted: true }; 404 if missing. Removes the request from the queue.
 GET  /api/runner[?log=1]            → { available, reason, bin, binFrom, running, action, pid, startedAt, finishedAt, exitCode, signal, logPath, actions, log? } — is a session draining the queue? `log=1` tails <data>/runner.log
-POST /api/runner                    → body { action?: "watch" | "poll" } spawns a headless `claude -p "/flowlever:<action>"` in a login shell → 202 + status. 400 unknown action · 409 one already running · 503 no `claude` binary (set FLOWLEVER_CLAUDE_BIN) · 403 if the server is bound to a non-loopback FLOWLEVER_HOST and FLOWLEVER_ALLOW_REMOTE_RUNNER≠1 (starting the runner grants ADO write access to anyone who can reach the port — see the root README's env-var table). The prompt comes from a fixed allowlist — never from the request body.
+POST /api/runner                    → body { action?: "watch" | "poll" } spawns a headless `claude -p "/flowlever:<action>"` in a login shell → 202 + status. 400 unknown action · 409 one already running · 503 no `claude` binary (set FLOWLEVER_CLAUDE_BIN) · 403 if the server is bound to a non-loopback FLOWLEVER_HOST without FLOWLEVER_ALLOW_REMOTE_WRITES=1 — on such a bind the whole API is read-only, since both starting the runner AND enqueueing work it will execute grant ADO write access to anyone who can reach the port (see the root README's env-var table). The prompt comes from a fixed allowlist — never from the request body.
 DELETE /api/runner                  → SIGTERM the running runner → 200 + status; 409 when idle
 GET  /api/report/:id                → text/markdown report
 GET  /api/version                   → { apiVersion, pid, startedAt } — the HTTP wire-contract version (src/version.js), checked first and matched before anything else so it answers even when the rest of the build is mismatched. The browser compares this against its own compiled-in expectation and tells the user to restart the cockpit instead of failing with a bare "Not found" when a plugin update lands mid-session.

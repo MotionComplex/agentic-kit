@@ -259,14 +259,23 @@ so it's shared across repositories and kept out of the plugin. Override the loca
 |---|---|---|
 | `FLOWLEVER_DATA` | Where the ledger (features/ledger/rounds/requests/config/briefs) lives. | Unset: `app/data` relative to the app directory (`src/ledger.js`'s `DATA_DIR`). Every `/flowlever:*` skill and this README explicitly set it to `~/.flowlever` before invoking the CLI, so from the cockpit/skills the effective default is `~/.flowlever`. |
 | `PORT` | HTTP port for the cockpit server / `cli.js start --port`. | `4173` |
-| `FLOWLEVER_HOST` | Bind address for the cockpit server. | `127.0.0.1` (loopback-only — the cockpit has no authentication, so anything else is reachable by anyone who can hit the port). A non-loopback value prints a startup warning and, unless paired with `FLOWLEVER_ALLOW_REMOTE_RUNNER=1`, disables the runner (`POST /api/runner` → 403). |
-| `FLOWLEVER_ALLOW_REMOTE_RUNNER` | Opt-in to let `POST /api/runner` start a Claude session (which writes to Azure DevOps) while `FLOWLEVER_HOST` is non-loopback. | Unset (runner disabled on a non-loopback bind). Set to `1` only if you accept that anyone reaching the port can trigger ADO writes. |
+| `FLOWLEVER_HOST` | Bind address for the cockpit server. | `127.0.0.1` (loopback-only — the cockpit has no authentication, so anything else is reachable by anyone who can hit the port). A non-loopback value prints a startup warning and makes the API **read-only**: every mutation answers 403 unless paired with `FLOWLEVER_ALLOW_REMOTE_WRITES=1`. |
+| `FLOWLEVER_ALLOW_REMOTE_WRITES` | Opt-in to allow **any** write — queue a job, decide a finding, start the runner — while `FLOWLEVER_HOST` is non-loopback. Guarding only the runner was not enough: the job queue is itself a write surface, so anyone reaching the port could enqueue work your next local runner would dutifully execute. | Unset (reads allowed, all mutations 403). Set to `1` only if you accept that anyone reaching the port can change your review data and trigger ADO writes. `FLOWLEVER_ALLOW_REMOTE_RUNNER=1` is still honoured as the older, narrower name. |
+| `FLOWLEVER_LOCK_WAIT_MS` | How long a write waits for a contended file lock before failing with a retryable error. | `10000`. A write costs ~5 ms, so this is a safety net rather than an expected latency — raise it only on a slow or network filesystem. |
+| `FLOWLEVER_FSYNC_DIR` | Also fsync the containing **directory** after each write, making the rename itself crash-durable. | Unset. Measured cost: 5.16 → 10.05 ms per write, and that time is spent holding a lock, so it is off by default. `tmp`+rename already guarantees a reader never sees a torn file; what this buys is not losing the *last* write in an OS-level crash (you keep the previous good file either way). |
 | `FLOWLEVER_CLAUDE_BIN` | Explicit path to the `claude` binary the runner spawns. | Unset: auto-resolve via `~/.local/bin/claude`, then `command -v claude` in a login shell. |
 | `FLOWLEVER_ADO_PROJECT` | Azure DevOps project `/flowlever:poll` scans. | Unset: derive from the current repo's git remote (skill-level behavior, `skills/poll/SKILL.md`); if neither is available, the pass stops and says so. |
 | `FLOWLEVER_REVIEWER_EMAIL` | Whose PRs/reviews `/flowlever:poll` scans. | Unset: `git config user.email`, else the authenticated ADO identity. |
 | `FLOWLEVER_POLL_CAP` | Max heavy jobs (review/re-review/respond ingests) `/flowlever:poll` enqueues per pass. | `3` — anything over the cap waits for the next pass, logged as deferred, never dropped. |
 
 ## Troubleshooting
+
+- **The cockpit hangs for a moment while the CLI or a runner is writing** — expected, and bounded.
+  The ledger is synchronous and every write takes a cross-process lock, so a request that needs a
+  file another process is mid-write on blocks the server's single thread until it clears. Real writes
+  take about 5 ms, so this is normally invisible; a long stall means something is holding a lock
+  (see the next item). `FLOWLEVER_LOCK_WAIT_MS` bounds the worst case, after which the request fails
+  with a retryable error rather than hanging indefinitely.
 
 - **`node src/cli.js` prints usage instead of doing anything** — that's correct: a bare invocation
   (or `help`) prints usage and exits 0. Run `node src/cli.js help` to see every command.
@@ -291,7 +300,7 @@ so it's shared across repositories and kept out of the plugin. Override the loca
   the fix genuinely wasn't made, run `finding cancel <ws> --fps <fp>` instead of forcing a stamp.
 - **The runner button/`/flowlever:watch` won't start ("runner is disabled…")** — the server is
   bound to a non-loopback `FLOWLEVER_HOST`. Bind loopback (the default), or explicitly set
-  `FLOWLEVER_ALLOW_REMOTE_RUNNER=1` if you understand that this grants anyone reaching the port the
+  `FLOWLEVER_ALLOW_REMOTE_WRITES=1` if you understand that this grants anyone reaching the port the
   ability to trigger writes to your Azure DevOps account.
 - **"Could not find the `claude` CLI"** — install it, or point `FLOWLEVER_CLAUDE_BIN` at its full
   path; the runner refuses to guess.
