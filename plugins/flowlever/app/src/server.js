@@ -21,8 +21,19 @@ const PORT = process.env.PORT !== undefined && process.env.PORT !== '' ? Number(
 const HOST = process.env.FLOWLEVER_HOST !== undefined && process.env.FLOWLEVER_HOST !== ''
   ? process.env.FLOWLEVER_HOST
   : '127.0.0.1';
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
-const IS_LOOPBACK = LOOPBACK_HOSTS.has(HOST);
+// The WHOLE of 127.0.0.0/8 is loopback, not just 127.0.0.1 — which matters because the documented
+// friendly-hostname recipe binds an lo0 alias like 127.94.41.73. An exact-string check called that
+// "remote" and would have turned the API read-only and refused the runner for a setup this project
+// tells you to use.
+function isLoopbackHost(host) {
+  if (host === 'localhost' || host === '::1' || host === '[::1]') return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return false;
+  const octets = m.slice(1).map(Number);
+  if (octets.some((o) => o > 255)) return false;
+  return octets[0] === 127;
+}
+const IS_LOOPBACK = isLoopbackHost(HOST);
 // Opting into a non-loopback bind must not silently hand WRITE access to anyone who can reach the
 // port. Guarding only the runner was not enough: the job queue is itself a write surface, so a LAN
 // client could enqueue work the owner's next local runner would dutifully execute, and could stop a

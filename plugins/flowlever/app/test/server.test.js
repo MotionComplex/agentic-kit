@@ -885,3 +885,23 @@ test('Z-1: every write route answers 503 on a lock timeout, not 400', async () =
   });
   assert.equal(bad.status, 400, 'a real validation error is still a bad request');
 });
+
+test('the whole of 127.0.0.0/8 counts as loopback, not just 127.0.0.1', () => {
+  // The documented friendly-hostname recipe binds an lo0 alias (FLOWLEVER_HOST=127.94.41.73). An
+  // exact-string loopback check called that "remote", which would have made the API read-only and
+  // refused the runner for a setup this project tells you to use. (Binding a 127.x alias needs
+  // `ifconfig lo0 alias` root privileges, so the predicate is asserted directly.)
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const start = src.indexOf('function isLoopbackHost');
+  const end = src.indexOf('const IS_LOOPBACK');
+  assert.ok(start > -1 && end > start, 'isLoopbackHost must exist ahead of IS_LOOPBACK');
+  // eslint-disable-next-line no-new-func
+  const isLoopbackHost = new Function(`${src.slice(start, end)}; return isLoopbackHost;`)();
+
+  for (const host of ['127.0.0.1', '127.94.41.73', '127.1.2.3', '127.255.255.254', 'localhost', '::1']) {
+    assert.equal(isLoopbackHost(host), true, `${host} is loopback`);
+  }
+  for (const host of ['0.0.0.0', '192.168.1.5', '10.0.0.1', '128.0.0.1', '27.0.0.1', '127.0.0.999', 'evil.com', '']) {
+    assert.equal(isLoopbackHost(host), false, `${host} is NOT loopback`);
+  }
+});

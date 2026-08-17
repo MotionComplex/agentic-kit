@@ -249,10 +249,9 @@ with the translation state. Fix: redirect to a dedicated loopback alias instead
 (`ifconfig lo0 alias 127.94.41.73` + `rdr … -> 127.94.41.73 port 4173`; add the ifconfig to the
 LaunchDaemon). **This alias trick DOES need a server change**, because the default loopback bind
 listens on `127.0.0.1` specifically, not every loopback address: set
-`FLOWLEVER_HOST=127.94.41.73` (matching the alias) wherever the server is started. Note that the
-startup warning for "not bound to loopback" only recognizes `127.0.0.1`/`localhost`/`::1` as
-loopback, so it will fire for this alias even though `127.94.41.73` is still loopback-range and
-just as safe — a known false positive, not a real exposure.
+`FLOWLEVER_HOST=127.94.41.73` (matching the alias) wherever the server is started. The whole of
+`127.0.0.0/8` counts as loopback, so an alias like this is treated exactly like `127.0.0.1`: no
+startup warning, and the API stays fully writable.
 
 **Keep the server up:** the cockpit dies with the session that started it. A user-level
 `KeepAlive` LaunchAgent running `node app/src/cli.js start --no-open` (with `FLOWLEVER_DATA` set)
