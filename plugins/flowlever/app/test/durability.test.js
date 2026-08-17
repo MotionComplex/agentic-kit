@@ -461,3 +461,168 @@ test('ingest counts real in-batch duplicates instead of dropping them silently',
   assert.equal(stats.new, 1);
   assert.equal(stats.duplicatesInBatch, 2, 'the drops are reported');
 });
+
+// ---------- findings from the independent review of the fixes themselves (R-1..R-8) ----------
+//
+// Each of these is a defect the FIX introduced or left behind, caught by an adversarial reviewer.
+// They are pinned here because three of them were regressions traded for the original blockers.
+
+test('R-1: one malformed feature file does not take down the whole board', () => {
+  const id = 'r1-legit';
+  ledger.createFeature({ id, title: 'Legit' });
+  // A hand-edited/truncated workspace with no `id` field. listFeatures reads the directory, so this
+  // used to produce a feature with id `undefined` and 400 the entire list — including every healthy
+  // workspace and the inbox.
+  fs.writeFileSync(path.join(tmpDir, 'features', 'r1-broken.json'), JSON.stringify({ title: 'no id here' }));
+  fs.writeFileSync(path.join(tmpDir, 'features', 'r1-garbage.json'), '{ not json');
+  fs.writeFileSync(path.join(tmpDir, 'features', 'r1-array.json'), '["not an object"]');
+  try {
+    const list = ledger.listFeatures();
+    assert.ok(list.some((f) => f.id === id), 'the healthy workspace must still be listed');
+    assert.ok(list.every((f) => typeof f.id === 'string' && f.id.length > 0), 'no feature may have an empty id');
+    assert.ok(!list.some((f) => f.id === 'r1-garbage'), 'unparseable files are skipped, not returned half-built');
+  } finally {
+    for (const f of ['r1-broken.json', 'r1-garbage.json', 'r1-array.json']) {
+      fs.rmSync(path.join(tmpDir, 'features', f), { force: true });
+    }
+  }
+});
+
+test('R-2: the filename identifies the workspace, so a stray `id` field cannot overwrite another', () => {
+  ledger.createFeature({ id: 'r2-real', title: 'Real' });
+  fs.writeFileSync(path.join(tmpDir, 'features', 'r2-impostor.json'), JSON.stringify({
+    id: 'r2-real', title: 'Impostor', kind: 'spec', status: 'draft',
+    sources: { confluence: [], ado: [], figma: [] }, specSections: [], coverage: [],
+  }));
+  ledger.setFeatureStatus('r2-impostor', 'done');
+
+  const real = ledger.getFeature('r2-real');
+  assert.equal(real.title, 'Real', 'the real workspace must be untouched');
+  assert.notEqual(real.status, 'done');
+  assert.equal(ledger.getFeature('r2-impostor').id, 'r2-impostor', 'the file is keyed by its own name');
+});
+
+test('R-3: the fix gate applies to pr-respond only, not to reviewing someone else\'s PR', () => {
+  // On a pr-review workspace YOU are the reviewer, not the author: a suggested before→after diff is
+  // a comment, not work you will commit. Demanding a sha there blocked posting the review, and with
+  // the agreement now durable there was no accidental way out — the finding stranded in "Posting…".
+  const seed = (id, kind) => {
+    ledger.createFeature({ id, title: id, kind });
+    ledger.ingestRound(id, [mkFinding({ title: 'Suggested change', locus: 'a.cs:1' })]);
+    const fp = ledger.loadLedger(id).findings[0].fp;
+    ledger.setFindingDraft(id, fp, { before: 'old', after: 'new' });
+    ledger.setFindingDecision(id, fp, 'edit');
+    return fp;
+  };
+
+  const reviewFp = seed('r3-review', 'pr-review');
+  assert.doesNotThrow(() => ledger.markPosted('r3-review', [reviewFp]),
+    'posting a pr-review comment must not demand a commit sha');
+
+  const respondFp = seed('r3-respond', 'pr-respond');
+  assert.throws(() => ledger.markPosted('r3-respond', [respondFp]), (e) => e.code === 'EUSER',
+    'pr-respond — where you ARE the author — is still gated');
+
+  const specFp = seed('r3-spec', 'spec');
+  assert.doesNotThrow(() => ledger.markPosted('r3-spec', [specFp]),
+    'a spec workspace proves delivery with appliedAt, not a sha');
+});
+
+test('R-4: clearing or neutering the draft does not disarm the gate or blind the audit', () => {
+  // Same "told it was fixed with nothing on the branch" outcome as the original blocker, reached by
+  // deleting the draft instead of by changing the status.
+  const id = 'r4-cleared';
+  ledger.createFeature({ id, title: 'Cleared', kind: 'pr-respond' });
+  ledger.ingestRound(id, [mkFinding({ title: 'Fix me', locus: 'b.cs:2' })]);
+  const fp = ledger.loadLedger(id).findings[0].fp;
+  ledger.setFindingDraft(id, fp, { before: 'old', after: 'new' });
+  ledger.setFindingDecision(id, fp, 'fix-only');
+
+  ledger.clearFindingDraft(id, fp);
+  assert.throws(() => ledger.markPosted(id, [fp]), (e) => e.code === 'EUSER',
+    'the durable agreement outlives its draft');
+  ledger.setFindingStatus(id, fp, { status: 'resolved' });
+  assert.equal(ledger.unbackedFixes(id).length, 1, 'and the audit can still see it');
+
+  // A draft edited down to a no-op is likewise still an agreed fix.
+  const id2 = 'r4-noop';
+  ledger.createFeature({ id: id2, title: 'Noop', kind: 'pr-respond' });
+  ledger.ingestRound(id2, [mkFinding({ title: 'Noop draft', locus: 'c.cs:3' })]);
+  const fp2 = ledger.loadLedger(id2).findings[0].fp;
+  ledger.setFindingDraft(id2, fp2, { before: 'same', after: 'same' });
+  ledger.setFindingDecision(id2, fp2, 'edit');
+  assert.throws(() => ledger.markPosted(id2, [fp2]), (e) => e.code === 'EUSER');
+
+  // The one legitimate retraction still works.
+  ledger.setFindingDecision(id2, fp2, null);
+  assert.doesNotThrow(() => ledger.markPosted(id2, [fp2]));
+});
+
+test('R-6a: an aged orphan lock with no owner stamp is reclaimed; a fresh one is not', () => {
+  // Rule 1 (a missing stamp is never "stale") fixed a real lost-write race but made a lock left by a
+  // process that died between mkdir and the stamp permanently unbreakable.
+  const lock = path.join(tmpDir, 'requests.json.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  const old = Date.now() - 120_000;
+  fs.utimesSync(lock, new Date(old), new Date(old));
+  assert.doesNotThrow(() => ledger.addRequest({ action: 'pr-review', prId: 'r6a' }),
+    'an aged unstamped orphan must not block writes forever');
+
+  fs.mkdirSync(lock, { recursive: true });   // fresh: could be another process mid-acquire
+  try {
+    assert.throws(() => ledger.addRequest({ action: 'pr-review', prId: 'r6a-2' }),
+      (e) => e.code === 'EUSER' && /timed out waiting for a lock/.test(e.message),
+      'a FRESH unstamped lock is still respected — deleting it is what lost a write');
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+});
+
+test('R-8d: resolvedInRound follows the same max rule as the round number', () => {
+  const id = 'r8d';
+  ledger.createFeature({ id, title: 'RIR' });
+  ledger.ingestRound(id, [mkFinding({ title: 'x', locus: 'x' })]);
+  const lp = path.join(tmpDir, 'ledger', `${id}.json`);
+  const doc = JSON.parse(fs.readFileSync(lp, 'utf8'));
+  doc.lastRound = 9;                       // a rounds write was lost after the ledger advanced
+  fs.writeFileSync(lp, JSON.stringify(doc));
+
+  const fp = ledger.loadLedger(id).findings[0].fp;
+  ledger.setFindingStatus(id, fp, { status: 'resolved' });
+  assert.equal(ledger.loadLedger(id).findings[0].resolvedInRound, 9,
+    'rounds.length alone would point at the wrong pass');
+});
+
+test('R-8e: markPosted skips closed findings instead of stamping them, and says which', () => {
+  const id = 'r8e';
+  ledger.createFeature({ id, title: 'Skip', kind: 'pr-review' });
+  ledger.ingestRound(id, [
+    mkFinding({ title: 'live', locus: 's:1' }),
+    mkFinding({ title: 'waived', locus: 's:2' }),
+  ]);
+  const [live, gone] = ledger.loadLedger(id).findings.map((f) => f.fp);
+  ledger.setFindingStatus(id, gone, { status: 'waived', reason: 'not doing it' });
+
+  const res = ledger.markPosted(id, [live, gone], { detailed: true });
+  assert.equal(res.updated.length, 1);
+  assert.deepEqual(res.skipped, [{ fp: gone, reason: 'waived' }]);
+  const after = ledger.loadLedger(id).findings.find((f) => f.fp === gone);
+  assert.ok(!after.postedAt, 'a waived finding is not awaiting an author, so it is not "posted"');
+});
+
+test('R-8c: a failed write leaves no .tmp litter next to the real data', () => {
+  const id = 'r8c';
+  ledger.createFeature({ id, title: 'Tmp' });
+  const dir = path.join(tmpDir, 'ledger');
+  // Make the target a directory so the rename fails.
+  const target = path.join(dir, `${id}.json`);
+  fs.rmSync(target, { force: true });
+  fs.mkdirSync(target, { recursive: true });
+  try {
+    assert.throws(() => ledger.ingestRound(id, [mkFinding({ title: 't', locus: 't' })]));
+    const litter = fs.readdirSync(dir).filter((f) => f.includes('.tmp'));
+    assert.deepEqual(litter, [], `left behind: ${litter.join(', ')}`);
+  } finally {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+});

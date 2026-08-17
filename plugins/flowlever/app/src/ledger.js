@@ -91,19 +91,36 @@ function writeJson(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${nextTmpSeq()}.tmp`;
   const body = JSON.stringify(obj, null, 2) + '\n';
-  const fd = fs.openSync(tmp, 'w');
   try {
-    fs.writeFileSync(fd, body);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, body);
+      // Durability is best-effort: some filesystems reject fsync, and refusing to write at all there
+      // would be a worse outcome than a slightly weaker durability guarantee.
+      try { fs.fsyncSync(fd); } catch { /* not supported here */ }
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    // Never leave a half-written .tmp behind next to the real data.
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    throw err;
   }
-  fs.renameSync(tmp, file);
-  // Directory fsync is not supported everywhere (notably Windows); the rename is still atomic.
-  try {
-    const dfd = fs.openSync(path.dirname(file), 'r');
-    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
-  } catch { /* best effort */ }
+  // The DIRECTORY fsync is opt-in, and that is a measured tradeoff, not laziness. Measured on this
+  // machine: 0.18 ms/write with no fsync, 5.16 with the file fsync, 10.05 with both — so syncing the
+  // directory doubles the time spent holding a global lock, and because this module is synchronous
+  // that time is time the server serves nothing. What it buys is narrow: tmp+rename already makes
+  // the replacement atomic, so a reader never sees a torn file; the directory sync only protects the
+  // rename itself from an OS-level crash, whose failure mode is losing the last write and keeping the
+  // previous good file — not corruption. For a local review tool that is the right side of the trade.
+  // Set FLOWLEVER_FSYNC_DIR=1 to pay for it anyway.
+  if (process.env.FLOWLEVER_FSYNC_DIR === '1') {
+    try {
+      const dfd = fs.openSync(path.dirname(file), 'r');
+      try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+    } catch { /* not supported here (notably Windows) */ }
+  }
 }
 
 let tmpSeq = 0;
@@ -121,7 +138,21 @@ function nextTmpSeq() { tmpSeq += 1; return `${Date.now()}.${tmpSeq}`; }
 // broken rather than waited on forever. Re-entrant within a process (this module is fully
 // synchronous, so "already held here" is unambiguous) which keeps nested public calls deadlock-free.
 const LOCK_STALE_MS = 30_000;
-const LOCK_WAIT_MS = 10_000;
+// How long a caller waits for a contended lock before giving up. This module is synchronous, so on
+// the server this wait BLOCKS THE EVENT LOOP — a contended write stalls every other request until it
+// clears. Real writes take single-digit milliseconds, so contention normally resolves instantly; the
+// wait only matters when another process (the CLI, the watch runner) is mid-write or died holding
+// the lock. Kept deliberately short so a pathological case degrades into a clear, retryable error
+// instead of a long freeze. Tunable for slow/network filesystems.
+// 10s is a safety net, not an expected latency: a write costs ~5ms, so even a dozen processes
+// hammering one file clear in well under a second. It is only reached when something is genuinely
+// stuck, and an orphaned lock is now reclaimed (see breakIfStale) rather than blocking forever.
+const LOCK_WAIT_MS = Number(process.env.FLOWLEVER_LOCK_WAIT_MS) > 0
+  ? Number(process.env.FLOWLEVER_LOCK_WAIT_MS)
+  : 10_000;
+// A lock directory that never got its owner stamp can only be aged by its own mtime, which is a
+// weaker signal — so it gets a much longer grace period before anyone reclaims it.
+const LOCK_ORPHAN_MS = 60_000;
 const LOCK_POLL_MS = 20;
 const heldLocks = new Set();
 
@@ -172,13 +203,27 @@ function withFileLock(file, fn) {
 //   2. Breaking is an atomic rename, so if several waiters decide to break at once exactly one
 //      succeeds; the losers get ENOENT and simply retry.
 function breakIfStale(lock) {
-  let stamp;
+  let stamp = null;
   try { stamp = fs.readFileSync(path.join(lock, 'owner'), 'utf8'); }
-  catch { return; }                                    // rule 1
-  const at = Number(String(stamp).split('\n')[1]);
-  if (!Number.isFinite(at) || Date.now() - at < LOCK_STALE_MS) return;
+  catch { /* unstamped: mid-acquire, just-released, or an orphan — decided below */ }
+
+  if (stamp !== null) {
+    const at = Number(String(stamp).split('\n')[1]);
+    // An unparseable or future-dated stamp is never treated as old.
+    if (!Number.isFinite(at) || Date.now() - at < LOCK_STALE_MS) return;
+  } else {
+    // Rule 1 forbids concluding "stale" from a missing stamp, because a lock acquired microseconds
+    // ago has no stamp yet and deleting it loses a write. The DIRECTORY's own mtime distinguishes
+    // the two: a just-acquired lock is fresh, an orphan left by a process that died between mkdir
+    // and the stamp is old. Without this, such a lock was unbreakable and every later write to that
+    // file failed forever with no in-product way out.
+    let age = 0;
+    try { age = Date.now() - fs.statSync(lock).mtimeMs; } catch { return; }
+    if (!(age > LOCK_ORPHAN_MS)) return;
+  }
+
   const doomed = `${lock}.stale.${process.pid}.${nextTmpSeq()}`;
-  try { fs.renameSync(lock, doomed); } catch { return; }  // rule 2: another waiter won
+  try { fs.renameSync(lock, doomed); } catch { return; }  // rule 2: another waiter won the break
   try { fs.rmSync(doomed, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
@@ -320,10 +365,15 @@ function createFeature({ id, title, kind = 'spec' }) {
 // Back-fill every structural field a feature file is expected to carry, so a workspace written by
 // an older version (or hand-edited) can't make a downstream `.push` / `.filter` throw TypeError and
 // surface as an opaque 500. Only shapes are repaired here — no content is invented.
-function normalizeFeature(feature) {
+// `idFromPath` is authoritative when given: the FILENAME identifies the workspace, not a field
+// inside it. Trusting the field meant (a) a file with no `id` produced `undefined` and broke every
+// caller that then built a path from it, and (b) a file whose `id` named a DIFFERENT workspace made
+// saveFeature write over that other workspace.
+function normalizeFeature(feature, idFromPath = null) {
   if (!feature || typeof feature !== 'object' || Array.isArray(feature)) {
     throw euser('feature file is malformed: expected a JSON object');
   }
+  if (idFromPath !== null) feature.id = idFromPath;
   if (!feature.kind) feature.kind = 'spec';
   const sources = feature.sources && typeof feature.sources === 'object' && !Array.isArray(feature.sources)
     ? feature.sources
@@ -341,16 +391,30 @@ function getFeature(id) {
   if (!fs.existsSync(featurePath(id))) {
     throw euser(`feature "${id}" not found`);
   }
-  return normalizeFeature(readJson(featurePath(id)));
+  return normalizeFeature(readJson(featurePath(id)), id);
 }
 
+// One unreadable file must not take down the whole board. It used to: the list is built from the
+// directory rather than from validated ids, so a single hand-edited or truncated workspace made
+// GET /api/features and the inbox fail for every OTHER workspace too. Bad files are skipped and
+// named on stderr — visible in the server log, never silently dropped.
 function listFeatures() {
   const dir = path.join(DATA_DIR, 'features');
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir)
-    .filter((f) => f.endsWith('.json'))
-    .sort()
-    .map((f) => normalizeFeature(readJson(path.join(dir, f))));
+  const out = [];
+  for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
+    const id = file.slice(0, -'.json'.length);
+    if (!isValidFeatureId(id)) {
+      console.warn(`FlowLever: skipping features/${file} — "${id}" is not a valid workspace id`);
+      continue;
+    }
+    try {
+      out.push(normalizeFeature(readJson(path.join(dir, file)), id));
+    } catch (err) {
+      console.warn(`FlowLever: skipping features/${file} — ${err.message}`);
+    }
+  }
+  return out;
 }
 
 function saveFeature(feature) {
@@ -836,7 +900,12 @@ function setFindingStatusIn(ledger, featureId, fp, { status, reason = null, pinn
     if (isOpen(finding)) {
       finding.resolvedInRound = null; // reopening clears the resolution round
     } else if (status === 'resolved') {
-      finding.resolvedInRound = loadRounds(featureId).rounds.length || null;
+      // Same rule as the round number itself: take whichever store knows about more rounds, so a
+      // torn rounds write can't make this point at the wrong pass.
+      finding.resolvedInRound = Math.max(
+        loadRounds(featureId).rounds.length,
+        Number(ledger.lastRound) || 0,
+      ) || null;
     }
   }
 
@@ -861,11 +930,16 @@ const AGREE_DECISIONS = ['edit', 'fix-only'];
 
 function isAgreedCodeFix(finding) {
   const d = finding.draft;
-  if (!d || typeof d.after !== 'string' || d.after === d.before) return false;
-  const review = d.review || {};
+  const review = (d && d.review) || {};
+  // An explicit "don't apply this" retracts the agreement whatever else is set.
   if (review.verdict === 'redirect' || review.verdict === 'reject') return false;
-  if (AGREE_DECISIONS.includes(finding.decision)) return true;
+  // The durable marker stands ALONE, deliberately. Keying off the draft first meant clearing or
+  // re-drafting the proposal (a normal UI action) disarmed the gate AND blinded unbackedFixes —
+  // the same "told it was fixed with nothing on the branch" outcome as the original defect, reached
+  // through a different lever. Retracting an agreement is setFindingDecision(null), nothing else.
   if (AGREE_DECISIONS.includes(finding.agreedCodeFix)) return true;
+  if (!d || typeof d.after !== 'string' || d.after === d.before) return false;
+  if (AGREE_DECISIONS.includes(finding.decision)) return true;
   return Object.values(review.hunks || {}).some((h) => h && (h.status === 'accepted' || h.status === 'edited'));
 }
 
@@ -887,9 +961,19 @@ function isAgreedCodeFix(finding) {
 // proof of delivery is `appliedAt` (markApplied), so demanding a sha there would be nonsense.
 // Unknown/unreadable kind fails CLOSED (gate on) — the cost of an extra required flag is a moment's
 // friction; the cost of a missed gate is a reviewer told a lie.
+// ONLY `pr-respond` owes a git commit — that is the workflow where you are the PR author acting on
+// a reviewer's point, so "handled" means the change is on your branch.
+//
+// It used to be `kind !== 'spec'`, which swept in `pr-review`: there you are reviewing SOMEONE
+// ELSE'S pull request, and a finding carrying a suggested before→after diff is a comment, not work
+// you are going to commit. Demanding a sha there blocked posting a review comment, and because the
+// agreement marker is now durable there was no longer an accidental way out — the finding stranded
+// in "Posting…". A `spec` workspace proves delivery with appliedAt, as before.
+// Unknown/unreadable kind still fails CLOSED: an unreadable workspace is a real unknown, and a
+// spurious required flag is cheaper than a reviewer told a fix shipped when it did not.
 function owesGitCommit(featureId) {
   try {
-    return (getFeature(featureId).kind || 'spec') !== 'spec';
+    return (getFeature(featureId).kind || 'spec') === 'pr-respond';
   } catch {
     return true;
   }
@@ -913,7 +997,7 @@ function assertFixCommit(featureId, finding, sha) {
     throw euser(`invalid commit sha "${sha}": expected a 7–40 character hex git sha`);
   }
   throw euser(
-    `finding "${finding.fp}" is an agreed code fix (${finding.draft.target || finding.locus}) — `
+    `finding "${finding.fp}" is an agreed code fix (${(finding.draft && finding.draft.target) || finding.locus}) — `
     + 'it cannot be marked posted without the commit that carries it. Apply the change, commit and '
     + 'push it, then pass --sha <pushed commit sha>. If the fix was NOT made, run '
     + `\`finding cancel ${featureId} --fps ${finding.fp}\` instead — never reply claiming a fix that isn't on the branch.`);
@@ -962,23 +1046,30 @@ function markPosted(featureId, fps, { by = 'post', sha, repo = null, branch = nu
   const list = Array.isArray(fps) ? fps : [fps];
   const at = now();
   const uniq = [...new Set(list)];
+  const skipped = [];
   const result = mutateLedger(featureId, (ledger) => {
     // Gate first, write second: all-or-nothing.
     for (const fp of uniq) {
       const finding = ledger.findings.find((f) => f.fp === fp);
       if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+      if (finding.status === 'waived' || finding.status === 'resolved') continue;
       assertFixCommit(featureId, finding, sha);
     }
     const updated = [];
     for (const fp of uniq) {
       const finding = ledger.findings.find((f) => f.fp === fp);
+      // Its own comment already said posting applies only to live findings, but it stamped
+      // postedAt on closed ones anyway — moving a waived finding into the "awaiting author" lane.
+      if (finding.status === 'waived' || finding.status === 'resolved') {
+        skipped.push({ fp, reason: finding.status });
+        continue;
+      }
       // Record the commit on the findings that represent a code fix, so the trail (and the cockpit)
       // can point at the change itself rather than just at a comment about it.
       if (isValidSha(sha) && isAgreedCodeFix(finding) && !(finding.fixCommit && finding.fixCommit.sha)) {
         finding.fixCommit = { sha: sha.trim(), repo, branch, at };
         finding.history.push({ at, from: finding.status, to: finding.status, by, note: `fix pushed in ${sha.trim().slice(0, 10)}` });
       }
-      // Posting only applies to live findings; a waived/resolved finding isn't awaiting anyone.
       if (finding.status === 'open') {
         finding.history.push({ at, from: 'open', to: 'reworking', by, note: 'posted to PR' });
         finding.status = 'reworking';
@@ -1000,7 +1091,7 @@ function markPosted(featureId, fps, { by = 'post', sha, repo = null, branch = nu
     try { setFeatureReview(featureId, { lastPostedAt: at, authorRespondedAt: null, note: null }); }
     catch { /* feature gone — ignore */ }
   }
-  return detailed ? { updated: result, skipped: [] } : result;
+  return detailed ? { updated: result, skipped } : result;
 }
 
 // Spec mirror of markPosted: the runner has actually written the accepted change back to

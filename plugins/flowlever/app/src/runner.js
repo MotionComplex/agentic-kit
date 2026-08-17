@@ -100,12 +100,17 @@ function inProcessRunning() {
 // clear by stopping it, versus two sessions posting the same comments twice.
 const PID_PATH = () => path.join(DATA_DIR, 'runner.pid');
 
+// "Alive" means alive AND ours to signal. EPERM says the pid exists but belongs to another user,
+// which our runner never does — it is a recycled pid belonging to someone else's process. Treating
+// that as a live runner adopted a process we could neither stop (DELETE returned EPERM and left the
+// stamp in place) nor replace (start returned EBUSY), leaving the runner permanently unusable with
+// no in-product way out. Treating it as not-ours discards the stale stamp instead.
 function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    return err.code === 'EPERM';   // exists but owned by someone else
+    return err.code !== 'ESRCH' && err.code !== 'EPERM' ? true : false;
   }
 }
 
@@ -265,6 +270,14 @@ function stop() {
   try {
     process.kill(-pid, 'SIGTERM');
   } catch (err) {
+    if (err.code === 'EPERM') {
+      // Not our process (a recycled pid). Drop the stamp so the runner is usable again rather than
+      // wedged behind something we can never signal.
+      clearPidFile();
+      return { ok: false, code: 'EKILL', error: `The recorded runner pid ${pid} belongs to another `
+        + 'user\'s process, so it was not ours to stop. The stale record has been cleared — you can '
+        + 'start a runner again.' };
+    }
     if (err.code !== 'ESRCH') {
       return { ok: false, code: 'EKILL', error: `Could not stop the runner: ${err.message}` };
     }

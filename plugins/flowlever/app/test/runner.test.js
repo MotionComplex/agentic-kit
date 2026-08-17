@@ -189,3 +189,18 @@ test('a stale pid file (dead process) does not block a start', async () => {
   assert.equal(runner.isRunning(), false, 'a dead runner must not hold the guard');
   assert.ok(!fs.existsSync(path.join(tmpDir, 'runner.pid')), 'and the stale stamp is cleaned up');
 });
+
+test('R-6b: a recycled pid owned by another user is not adopted as our runner', async () => {
+  await quiesce();
+  // pid 1 (launchd/init) is alive but not ours to signal: EPERM. Treating that as a live runner
+  // adopted a process we could neither stop (DELETE → EPERM, stamp left in place) nor replace
+  // (start → EBUSY), leaving the runner permanently unusable with no way out from the product.
+  fs.writeFileSync(path.join(tmpDir, 'runner.pid'),
+    JSON.stringify({ pid: 1, action: 'watch', startedAt: new Date().toISOString() }));
+  assert.equal(runner.isRunning(), false, 'a pid we cannot signal is not our runner');
+  assert.ok(!fs.existsSync(path.join(tmpDir, 'runner.pid')), 'and the stale record is discarded');
+
+  const started = runner.start('watch');
+  assert.equal(started.ok, true, 'so a runner can still be started');
+  runner.stop();
+});

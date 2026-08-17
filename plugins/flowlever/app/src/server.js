@@ -23,9 +23,14 @@ const HOST = process.env.FLOWLEVER_HOST !== undefined && process.env.FLOWLEVER_H
   : '127.0.0.1';
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const IS_LOOPBACK = LOOPBACK_HOSTS.has(HOST);
-// Opting into a non-loopback bind must not silently re-open the runner to anyone who can reach the
-// port: starting an agent session needs its own explicit opt-in.
-const ALLOW_REMOTE_RUNNER = process.env.FLOWLEVER_ALLOW_REMOTE_RUNNER === '1';
+// Opting into a non-loopback bind must not silently hand WRITE access to anyone who can reach the
+// port. Guarding only the runner was not enough: the job queue is itself a write surface, so a LAN
+// client could enqueue work the owner's next local runner would dutifully execute, and could stop a
+// runner mid-drain. So on a non-loopback bind, reads are allowed (that is the point of choosing to
+// expose it) and every MUTATION requires an explicit opt-in.
+const ALLOW_REMOTE_WRITES = process.env.FLOWLEVER_ALLOW_REMOTE_WRITES === '1'
+  || process.env.FLOWLEVER_ALLOW_REMOTE_RUNNER === '1';   // the older, narrower name still works
+const ALLOW_REMOTE_RUNNER = ALLOW_REMOTE_WRITES;
 // When this process started — shown next to the version so "restart the server" is verifiable.
 const SERVER_STARTED_AT = new Date().toISOString();
 const WEB_DIR = path.resolve(__dirname, '..', 'web');
@@ -571,9 +576,24 @@ function handleStatic(req, res, pathname) {
 
 async function route(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  const parts = url.pathname.split('/').filter(Boolean).map((p) => decodeURIComponent(p));
+  let parts;
+  try {
+    parts = url.pathname.split('/').filter(Boolean).map((p) => decodeURIComponent(p));
+  } catch {
+    // Malformed percent-encoding (e.g. `%c0%af`) threw here and fell through to the catch-all as a
+    // 500 with a stack in the log. It is bad input, not an internal failure.
+    return sendError(res, 400, 'Bad request path');
+  }
 
   if (parts[0] !== 'api') return handleStatic(req, res, url.pathname);
+
+  // Read-only from a non-loopback bind unless the operator explicitly opted into remote writes.
+  if (!IS_LOOPBACK && !ALLOW_REMOTE_WRITES && req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendError(res, 403, `This cockpit is bound to ${HOST} rather than loopback and has no `
+      + 'authentication, so it is read-only over the network. Run it on 127.0.0.1 (the default) to '
+      + 'make changes, or set FLOWLEVER_ALLOW_REMOTE_WRITES=1 to accept that anyone who can reach '
+      + 'this port may change your review data and post to Azure DevOps.');
+  }
 
   if (parts[1] === 'home' && parts.length === 2 && req.method === 'GET') {
     return handleHome(res);
