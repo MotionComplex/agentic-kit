@@ -86,6 +86,15 @@ Each thread → one finding:
   (`requests set <reqId> --phase "drafting replies"`)
 Then (`requests set <reqId> --phase "ingesting threads"`) ingest:
 `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" ingest <wsId> --file <findings.json> --note "PR #<id> open threads @ <iteration>"`.
+
+**Then stamp the reviewer-activity clock** — you just read every thread, so record the newest
+reviewer comment (here the counterpart is the *reviewer*, not the author):
+```
+... cli.js feature activity <wsId> --at "<ISO ts of the newest reviewer comment>" --by "<reviewer>"
+```
+The ingest is the "Reviewed <when>" side of the cockpit's stamp pair; this is the "PR updated
+<when>" side, so the workspace reads correctly right away instead of waiting for the next poll.
+
 The runner then marks the request `done --phase "threads ready" --wsId <wsId>`.
 
 ## 4. Hand to the cockpit
@@ -99,22 +108,119 @@ Open **Home → PR Respond → this workspace**. Step through each thread; the d
 When run as an `apply` request, emit phases: `--phase "posting replies (may need your approval)"
 --needs-input --note "Approve the auth prompt in your other window if asked."` before the first post,
 clear it after, then `--status done --phase "posted to PR"`.
+### ⛔ The rule this skill exists to not break
+**A code fix is not done until it is pushed. You may not say otherwise, in any channel.**
+
+This went wrong in production and must not repeat: a run applied nothing, replied "Fixed" on two
+threads, reported the job `done` with the phase *"posted to PR + fixes applied"*, and the reviewer
+re-raised both points five days later because the branch never changed. Replying is the easy half and
+it succeeded on its own, which made every downstream surface read as complete.
+
+So the order is **fix → push → verify → only then speak**, and the ledger enforces it: `finding posted`
+**refuses** to stamp any finding whose agreed response is a code change unless you pass `--sha <pushed
+commit>`. You cannot mark such an item done without a commit. Do not work around that error — it is the
+guard rail. If the fix did not happen, `finding cancel` it and let it stay in the user's queue.
+
+Which findings are gated: any with a before→after `draft` that changes something AND was signed off —
+`decision: edit` / `fix-only`, or accepted/edited hunks in `draft.review` (going straight from per-hunk
+Accept to Post never sets `decision`, so **do not** use `decision` alone to decide whether a fix is owed).
+
+### The sequence (per apply run)
 When the user asks to post: read decisions (`finding list <wsId> --json` + each `draft.review`). Then,
-**only on an explicit yes**, complete the full fix-and-reply loop — a reply saying "Fixed" with the fix
-sitting uncommitted on disk is a lie on the PR:
-1. **Apply** every accepted code fix to the working tree (Edit/Write) — in the PR's OWN repository
-   (resolve it from the PR, never assume the current repo) on its source branch. Guard rails: check out
-   the source branch if the checkout isn't on it (abort to manual mode if that would clobber local work),
-   stage ONLY the files the fixes touched, never force-push.
-2. **Verify** with the project's quick checks when they exist locally (build/affected tests); if the
-   toolchain isn't available locally (e.g. CI-only builds), say so in the run summary instead of skipping
-   silently.
-3. **Commit** in the repo's own message convention and **push** — the PR gets a new iteration and the
-   fix is real before anyone reads about it.
-4. **Reply** per thread via `repo_reply_to_comment` (edited text if present), citing the actual commit
-   (`Fixed in <short-sha>.`) for fix threads. Push-backs post the user's note as the reply. **AI disclosure line — honor the request's
-`instructions`:** the cockpit's Post toggle (default ON) arrives as `instructions` on the apply
-request; unless it says `disclosure: off`, append `🤖 AI comment posted by Claude` as the last line
-of every posted reply (blank line before it). Beyond that one line add nothing — no other
-signature/attribution/footer. After posting, set those findings → `reworking`.
+**only on an explicit yes**:
+
+1. **Resolve the repo + branch from the PR itself** — `repo_pull_request action:"get"` → `repository.name`
+   and `sourceRefName`. Never assume the session's cwd is the right checkout; PR 5751 lives in
+   `DXP-ProfileServices` while the cockpit runs from another repo entirely. If you cannot get a working
+   checkout of that repo on that branch, **stop before replying**: `finding cancel` + `requests set
+   --status error --note "no checkout for <repo>@<branch>"`.
+2. **Apply** every agreed fix to the working tree (Edit/Write) on the PR's source branch. Check the branch
+   out if needed; abort to manual mode rather than clobber unrelated local work. Stage ONLY the files the
+   fixes touched. Never force-push.
+3. **Verify the edit is really on disk** before going near git: re-read each edited file and confirm the
+   draft's `after` text is present (and its `before` gone). An Edit that silently matched nothing is
+   indistinguishable from success until you check.
+4. **Verify** with the project's quick checks when they exist locally (build / affected tests); if the
+   toolchain isn't available (CI-only builds), say so in the run summary instead of skipping silently.
+5. **Commit + push**, then **capture the sha**: `git rev-parse HEAD`. Confirm the push landed —
+   `git ls-remote origin <branch>` must return that sha (or fetch it via `repo_search_commits`). A commit
+   that exists only locally is not a fix as far as the reviewer is concerned.
+6. **Verify the fix is in the pushed commit**, not just that a commit exists:
+   `repo_file action:"get_content" path:<the draft's target path> version:<sha> versionType:"Commit"`
+   and check the `after` text is present. This is the step that would have caught the production failure,
+   and it costs one call per file.
+7. **Record the commit** — this is also what unlocks the stamp in step 9:
+   `... cli.js finding fixed <wsId> --fps <fp>[,<fp>...] --sha <sha> --repo <repo> --branch <branch>`
+8. **Only now reply** per thread via `repo_reply_to_comment` (edited text if present), citing the real
+   commit (`Fixed in <short-sha>.`) for fix threads. Push-backs post the user's note as the reply.
+   **Never write "Fixed"/"Done"/"Addressed" for a finding you have no sha for.** **AI disclosure line —
+   honor the request's `instructions`:** the cockpit's Post toggle (default ON) arrives as `instructions`
+   on the apply request; unless it says `disclosure: off`, append `🤖 AI comment posted by Claude` as the
+   last line of every posted reply (blank line before it). Beyond that one line add nothing — no other
+   signature/attribution/footer.
+9. **Stamp** each finding: `... cli.js finding posted <wsId> --fps <fp> --sha <sha>` — per finding, right
+   after its own reply/status update succeeds (never batched at the end of the run).
+
+**If any step 2–6 fails for a finding**: do not reply about it, do not stamp it. `finding cancel <wsId>
+--fps <fp> --reason "<what failed>"` so it returns to the user's queue, and report it. A finding left in
+the queue is a small annoyance; a reply claiming a fix that isn't on the branch destroys the reviewer's
+trust in every future reply.
+
+**In the run summary, state per finding: the sha its fix landed in, or why no fix went out.** "Fixes
+applied" as a bare phrase is exactly the claim that hid the failure — it is not an acceptable summary.
+
+### `decision: "fix-only"` — apply the fix and write NO reply
+A finding whose persisted `decision` is `fix-only` (the cockpit's **✎ Fix only** button; the apply
+request's `instructions` also names the fps) means the user wants the code change and **no comment
+at all**. For those threads:
+1. Run **steps 1–7 of the sequence above in full** — resolve repo/branch, apply, verify on disk, build,
+   commit, push, confirm the sha is on the remote, confirm the `after` text is in that commit, record it
+   with `finding fixed`. "Fix only" removes the *reply*, not the fix: it is the one decision where the
+   code change is the entire deliverable, so skipping any of this makes the button a lie about the only
+   thing it promised. No sha ⇒ nothing goes out: `finding cancel` it and report why.
+2. **Do not call `repo_reply_to_comment` for it.** Not a short reply, not "Fixed in <sha>", nothing.
+3. Instead close the loop silently: `repo_pull_request_thread_write action:"update_status"
+   threadId:<n> status:"Fixed"`. This is not optional bookkeeping — a thread left `Active` whose
+   newest comment is still the reviewer's gets re-detected as "awaiting your reply" by step 2 of
+   every later run, so the item would come back forever and the user would keep re-deciding it.
+4. Stamp it like any other completed item — **with the sha**: `finding posted <wsId> --fps <fp> --sha
+   <sha>`. The user's response *is* out — as a pushed commit plus a resolved thread — so it belongs in
+   the "awaiting reviewer" lane, not back in the queue. (Without `--sha` the ledger rejects this call,
+   which is the point: a silently-resolved thread with no commit behind it would be invisible to
+   everyone, including the reviewer who is no longer being asked to look.)
+Say in the run summary which threads were fixed silently, so the user can see what went out without
+a comment. If a `fix-only` finding somehow has no code draft there is nothing to push: leave it
+open, don't reply, and flag it — never quietly resolve a thread you did nothing about.
+
+**Why setting the status is right here**, when the general rule (and the standalone `/pr-respond`
+skill) is *don't auto-resolve — that's the reviewer's prerogative*: `Fixed` is specifically the
+**author's** signal in Azure DevOps ("I've addressed this"), which is exactly what a pushed fix
+asserts; the reviewer still verifies and `Closed`s it. And choosing **Fix only** IS the user
+explicitly asking for the silent path, which is the documented exception to that rule. `Closed` /
+`WontFix` / `ByDesign` remain off-limits — never set those on the user's behalf.
+
+### Stamping is not optional — you are the ONLY thing that can confirm a reply
+The cockpit's Post button sets a transient `pending: "post"` marker (the "Posting…" lane) and enqueues
+the `apply` request; it **cannot** stamp anything. `postedAt` is written exactly once — by you, after
+ADO accepted the reply. So **stamp each thread the moment its reply lands, one call per finding,
+never batched to the end of the run**:
+```
+FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding posted <wsId> --fps <fp>
+```
+Batch at the end and any interruption (dead session, 2FA timeout, failed call) leaves replies that are
+really on the PR marked "Posting…" forever.
+
+**Before replying, check the thread's latest comment.** A finding marked `pending: "post"` with no
+`postedAt` means a previous attempt was interrupted, not that the reply is missing: if the thread's
+newest comment is already yours and matches the drafted reply, **don't post again** — just stamp it.
+
+**If the apply fails or is abandoned, release what you did not post**, or those findings stay stuck
+in the "Posting…" lane with no way back:
+```
+... cli.js finding cancel <wsId> [--fps <fp>,...] --reason "post failed: <short reason>"
+... cli.js requests set <reqId> --status error --note "<short reason>"
+```
+(No `--fps` = release every still-pending finding; already-stamped ones are never touched, so it is
+safe after a partial success.)
+
 A re-run reconciles as the reviewer responds again — same loop.

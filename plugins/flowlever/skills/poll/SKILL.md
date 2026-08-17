@@ -18,6 +18,16 @@ launchd LaunchAgent, not cron (cron runs outside the GUI session, can't unlock t
 plist). Running it manually does exactly the same thing. Everything it queues lands in the same cockpit queue and workspaces
 as manual `/flowlever:pr-review` runs, so manual and scheduled work can never fork or collide.
 
+## Three ways in
+1. **Scheduled** — launchd fires `claude -p "/flowlever:poll"`. Run the whole pass below.
+2. **Manual** — the user says "/flowlever:poll". Identical.
+3. **From the cockpit's "↻ Refresh" button** — the UI enqueues a `poll` request (optionally with
+   `kind: pr-review | pr-respond` to scope it to one section) and `/flowlever:watch` dispatches it
+   here. Run steps 1–4 restricted to that `kind` (`pr-review` → set A only, `pr-respond` → set B
+   only; no `kind` → both), skip step 5 (the caller drains), and report counts back on the request
+   (`requests set <reqId> --status done --phase "2 new · 1 updated"`) — including when the answer
+   is "nothing new", so the button doesn't look broken.
+
 **Hard rule: this pass never DECIDES to post.** It reviews into draft findings in the cockpit; it
 never votes and never *enqueues* `apply` requests — only the user does that from the UI. But an
 `apply` request already sitting in the queue IS the user's explicit Post click: **drain it like
@@ -73,10 +83,17 @@ Apply in order — first match wins:
    than me — new iteration/commits pushed, or author replies on threads. If found and
    `review.authorRespondedAt` is not already handled, flag + enqueue:
    ```
-   ... cli.js feature activity <wsId> --responded --note "<e.g. 2 new replies · 1 new iteration>"
+   ... cli.js feature activity <wsId> --responded --note "<e.g. 2 new replies · 1 new iteration>" \
+         --at "<ISO ts of the NEWEST such update>" --by "<who made it>"
    ... cli.js requests add --action pr-review --prId <prId> --wsId <wsId> --dedupe \
          --title "<PR title>" --instructions "auto re-review: author responded after posted review"
    ```
+   **`--at`/`--by` are not optional decoration.** `--at` is the real ADO timestamp of the newest
+   counterpart update (`comment.publishedDate` / `lastUpdatedDate`, or the iteration's `createdDate`);
+   `--by` names who made it. The cockpit shows that pair as "PR updated <when> by <who>" next to
+   "Reviewed <when>" and compares it against the last round to light up "new since your review" —
+   i.e. this is what tells the user a re-review will actually see something. `authorRespondedAt`
+   only records when *we noticed*, which is the weaker fact.
    (Passing `--wsId` makes the adapter reuse exactly that workspace; reconciliation auto-resolves
    the findings the author addressed and surfaces only the delta.)
 5. **Skip: review in progress.** Workspace exists but nothing posted yet (`review.lastPostedAt`
@@ -90,6 +107,16 @@ Apply in order — first match wins:
 Always tag auto-enqueued requests via `--instructions "auto ..."` — that's how the cockpit (and
 you) tell scheduled runs from manual ones.
 
+**Stamp the activity clock for EVERY known workspace, whatever you decided.** You already have the
+PR in hand, so for each PR that has a workspace — including the ones you skipped as "approved",
+"awaiting your triage" or "draft" — record the newest counterpart update when it is more recent
+than the stored `review.lastActivityAt`:
+```
+... cli.js feature activity <wsId> --at "<ISO ts>" --by "<who>"      # no --responded: stamp only
+```
+This is what keeps the cockpit's "Reviewed <when> · PR updated <when>" pair truthful on every card,
+not only on the PRs that happened to trigger a re-review. It changes no decision and flags nothing.
+
 **Cap:** order candidate enqueues oldest-PR-first, enqueue at most `FLOWLEVER_POLL_CAP` heavy
 jobs per pass (re-reviews count; step-4 `feature activity` flags do NOT — always flag). Log
 "deferred to next pass: PR x, PR y".
@@ -102,6 +129,11 @@ round → enqueue (counts toward the cap):
 ```
 ... cli.js requests add --action pr-respond --prId <prId> --dedupe \
       --title "<PR title>" --instructions "auto: <n> thread(s) awaiting your reply"
+```
+Here the counterpart is the **reviewer**, so stamp the activity clock with the newest reviewer
+comment on the workspace (same rule as set A — do it even when you don't enqueue):
+```
+... cli.js feature activity <wsId> --at "<ISO ts of the newest reviewer comment>" --by "<reviewer>"
 ```
 
 ## 4. Housekeeping (auto-archive)

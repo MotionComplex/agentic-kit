@@ -35,8 +35,14 @@ const TARGET_SYSTEMS = ['ado', 'confluence'];
 //   audit                  → start a NEW spec analysis (require instructions = the spec /
 //                            work-item / Figma URLs): the runner creates the workspace,
 //                            registers the sources, and runs the audit sweep
-const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose'];
+//   poll                   → the cockpit's manual "↻ Refresh": run a discovery pass NOW
+//                            instead of waiting for the scheduled /flowlever:poll — find new
+//                            PRs and re-check known ones for counterpart updates. Optional
+//                            `kind` narrows it to one section (pr-review / pr-respond)
+const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose', 'poll'];
 const REQUEST_STATUSES = ['queued', 'running', 'done', 'error'];
+// Workspace kinds a `poll` request may be narrowed to (null = both).
+const REQUEST_KINDS = ['pr-review', 'pr-respond'];
 
 const DEFAULT_CONFIG = {
   severityWeights: { blocker: 10, major: 5, minor: 2, info: 0.5 },
@@ -165,15 +171,56 @@ function setFeatureStatus(featureId, status) {
 // workspace waits on the author; the /flowlever:watch runner checks the PR for new
 // replies/commits since `lastPostedAt` and flips `authorRespondedAt` (+ a human note) so the
 // cockpit can move from a passive "Waiting on author" state to "Author responded → Re-review".
-// `patch` merges any of { lastPostedAt, authorRespondedAt, note } (null clears a field).
+//
+// Two DIFFERENT clocks live here and must not be conflated:
+//   - `authorRespondedAt` — when the RUNNER NOTICED the activity (detection time).
+//   - `lastActivityAt`    — the real timestamp OF the newest counterpart update on the PR
+//                           (their latest comment / pushed commit), as reported by ADO, with
+//                           `lastActivityBy` naming who made it. This is what the cockpit shows
+//                           as "PR updated <when>" and compares against the last review round
+//                           to decide whether a re-review is worth running.
+// `patch` merges any of { lastPostedAt, authorRespondedAt, lastActivityAt, lastActivityBy, note }
+// (null clears a field).
+const REVIEW_FIELDS = ['lastPostedAt', 'authorRespondedAt', 'lastActivityAt', 'lastActivityBy', 'note'];
 function setFeatureReview(featureId, patch = {}) {
   const feature = getFeature(featureId);
-  const review = { lastPostedAt: null, authorRespondedAt: null, note: null, ...(feature.review || {}) };
-  for (const k of ['lastPostedAt', 'authorRespondedAt', 'note']) {
+  const review = {
+    lastPostedAt: null, authorRespondedAt: null, lastActivityAt: null, lastActivityBy: null, note: null,
+    ...(feature.review || {}),
+  };
+  for (const k of REVIEW_FIELDS) {
     if (patch[k] !== undefined) review[k] = patch[k];
   }
   feature.review = review;
   return saveFeature(feature);
+}
+
+// Is `a` strictly later than `b`? Parsed (not string-compared) so timestamps that ADO hands
+// back with a different offset/precision than our own `now()` still order correctly. An
+// unparseable or missing value is never "later".
+function isAfter(a, b) {
+  const ta = Date.parse(a);
+  if (Number.isNaN(ta)) return false;
+  const tb = Date.parse(b);
+  return Number.isNaN(tb) ? true : ta > tb;
+}
+
+// The two timestamps the cockpit reads to answer "can I re-review yet?": when WE last reviewed
+// (the last ingest round — no separate stamp needed, a round IS a review pass) and when the
+// counterpart last touched the PR. `newSinceReview` is the whole point: their update landed
+// after our last round, so a re-review would actually see something new.
+function reviewStamps(feature, lastRoundAt = null) {
+  const rv = (feature && feature.review) || {};
+  const lastReviewedAt = lastRoundAt || null;
+  const lastActivityAt = rv.lastActivityAt || null;
+  return {
+    lastReviewedAt,
+    lastActivityAt,
+    lastActivityBy: rv.lastActivityBy || null,
+    lastPostedAt: rv.lastPostedAt || null,
+    authorRespondedAt: rv.authorRespondedAt || null,
+    newSinceReview: Boolean(lastActivityAt && isAfter(lastActivityAt, lastReviewedAt)),
+  };
 }
 
 function addSource(featureId, { type, ...fields }) {
@@ -457,20 +504,116 @@ function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = '
   return finding;
 }
 
+// ---------- the fix gate: a claimed code fix must point at a real pushed commit ----------
+
+// Does this finding represent a CODE CHANGE the author agreed to make (as opposed to a comment,
+// a reply, or a suggestion handed to someone else)? True when it carries a before→after draft that
+// actually changes something AND the reviewer signed that change off — either via the finding-level
+// decision (`edit` = fix + reply, `fix-only` = fix, no reply) or by accepting/editing its hunks in
+// the diff. The hunk path matters: going straight from per-hunk Accept to Post never sets the
+// finding-level `decision`, so keying off `decision` alone would leave the commonest case ungated.
+// `redirect`/`reject` verdicts are excluded — those are explicitly "don't apply this".
+function isAgreedCodeFix(finding) {
+  const d = finding.draft;
+  if (!d || typeof d.after !== 'string' || d.after === d.before) return false;
+  const review = d.review || {};
+  if (review.verdict === 'redirect' || review.verdict === 'reject') return false;
+  if (finding.decision === 'edit' || finding.decision === 'fix-only') return true;
+  return Object.values(review.hunks || {}).some((h) => h && (h.status === 'accepted' || h.status === 'edited'));
+}
+
+// THE GATE. Marking a `pr-respond` finding done means telling the reviewer their point is handled.
+// When the agreed response is a code change, "handled" is only true if that change is actually on
+// the branch — so stamping it REQUIRES the sha of the pushed commit that carries it.
+//
+// This exists because the opposite happened: a runner replied "Fixed", reported the job done, and
+// never committed anything. The reviewer re-raised both points five days later. Prose in the skill
+// ("apply, verify, commit, push, then reply") could be skipped while the reply still succeeded, and
+// every downstream surface read the reply as completion. Now it cannot: no sha, no stamp, hard
+// error, and the finding stays in the queue where the user can see it.
+//
+// A finding with an existing fixCommit passes (idempotent re-stamp). Comment/reply-only findings
+// (no agreed code change) are unaffected — a reply IS the whole deliverable there.
+// Only PR workspaces owe a git commit. A `spec` workspace's drafts are Confluence/ADO edits whose
+// proof of delivery is `appliedAt` (markApplied), so demanding a sha there would be nonsense.
+// Unknown/unreadable kind fails CLOSED (gate on) — the cost of an extra required flag is a moment's
+// friction; the cost of a missed gate is a reviewer told a lie.
+function owesGitCommit(featureId) {
+  try {
+    return (getFeature(featureId).kind || 'spec') !== 'spec';
+  } catch {
+    return true;
+  }
+}
+
+function assertFixCommit(featureId, finding, sha) {
+  if (!isAgreedCodeFix(finding)) return;
+  if (!owesGitCommit(featureId)) return;
+  if (finding.fixCommit && finding.fixCommit.sha) return;
+  if (typeof sha === 'string' && sha.trim()) return;
+  throw euser(
+    `finding "${finding.fp}" is an agreed code fix (${finding.draft.target || finding.locus}) — `
+    + 'it cannot be marked posted without the commit that carries it. Apply the change, commit and '
+    + 'push it, then pass --sha <pushed commit sha>. If the fix was NOT made, run '
+    + `\`finding cancel ${featureId} --fps ${finding.fp}\` instead — never reply claiming a fix that isn't on the branch.`);
+}
+
+// Record the pushed commit a fix landed in. Kept separate from the posted stamp so the trail shows
+// the code went out before (or without) any comment about it.
+function setFindingFixCommit(featureId, fp, { sha, repo = null, branch = null, by = 'apply' } = {}) {
+  if (typeof sha !== 'string' || !/^[0-9a-f]{7,40}$/i.test(sha.trim())) {
+    throw euser(`invalid commit sha "${sha}": expected a 7–40 character hex git sha`);
+  }
+  const ledger = loadLedger(featureId);
+  const finding = ledger.findings.find((f) => f.fp === fp);
+  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+  const at = now();
+  finding.fixCommit = { sha: sha.trim(), repo, branch, at };
+  finding.history.push({ at, from: finding.status, to: finding.status, by, note: `fix pushed in ${sha.trim().slice(0, 10)}` });
+  finding.updatedAt = at;
+  saveLedger(ledger);
+  return finding;
+}
+
+// Findings whose agreed code fix is claimed done but points at no commit — i.e. someone said
+// "handled" without the change being on the branch. The cockpit badges these and /flowlever:watch
+// reports them; ideally always empty.
+function unbackedFixes(featureId) {
+  if (!owesGitCommit(featureId)) return [];   // spec workspaces prove delivery with appliedAt
+  return (loadLedger(featureId).findings || []).filter((f) =>
+    isAgreedCodeFix(f) && (f.postedAt || f.status === 'resolved')
+    && !(f.fixCommit && f.fixCommit.sha) && !f.appliedAt);
+}
+
 // Mark findings as posted back to the PR (their inline comment / reply has been sent).
 // A posted finding stays `reworking` — so a later re-review reconciliation auto-resolves it
 // once the author addresses it — but gains a `postedAt` stamp that moves it into the
 // "Posted — awaiting author" lane and excludes it from the readiness penalty and the
 // "to review" count. Idempotent: re-posting refreshes the stamp without duplicating history.
 // `fps` may be a single fp or an array. Returns the updated findings.
-function markPosted(featureId, fps, { by = 'post' } = {}) {
+// `sha` (+ optional repo/branch) is the pushed commit carrying the code fix. It is REQUIRED for any
+// finding whose agreed response is a code change (see assertFixCommit) and ignored for reply-only
+// ones. Validated for the whole batch BEFORE anything is written, so a mixed batch can't half-apply.
+function markPosted(featureId, fps, { by = 'post', sha, repo = null, branch = null } = {}) {
   const list = Array.isArray(fps) ? fps : [fps];
   const ledger = loadLedger(featureId);
   const at = now();
-  const updated = [];
-  for (const fp of [...new Set(list)]) {
+  const uniq = [...new Set(list)];
+  // Gate first, write second: all-or-nothing.
+  for (const fp of uniq) {
     const finding = ledger.findings.find((f) => f.fp === fp);
     if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    assertFixCommit(featureId, finding, sha);
+  }
+  const updated = [];
+  for (const fp of uniq) {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    // Record the commit on the findings that represent a code fix, so the trail (and the cockpit)
+    // can point at the change itself rather than just at a comment about it.
+    if (typeof sha === 'string' && sha.trim() && isAgreedCodeFix(finding) && !(finding.fixCommit && finding.fixCommit.sha)) {
+      finding.fixCommit = { sha: sha.trim(), repo, branch, at };
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: `fix pushed in ${sha.trim().slice(0, 10)}` });
+    }
     // Posting only applies to live findings; a waived/resolved finding isn't awaiting anyone.
     if (finding.status === 'open') {
       finding.history.push({ at, from: 'open', to: 'reworking', by, note: 'posted to PR' });
@@ -555,13 +698,54 @@ function setFindingPending(featureId, fps, kind, { by = 'user' } = {}) {
   return updated;
 }
 
+// Undo setFindingPending: drop the transient "Posting…/Applying…" marker WITHOUT claiming the
+// write happened. Needed because a pending marker is otherwise a dead end — if the runner never
+// picks the job up, dies mid-flight, or fails, the finding is stranded in the in-flight lane
+// forever (excluded from the review queue AND never stamped posted/applied).
+// Two callers: the cockpit's "Cancel post" on a stuck job, and the runner's error path.
+// The finding returns to `reworking` with its triage intact, so it lands back in the post queue.
+// Findings already stamped postedAt/appliedAt are left alone — that write really did happen.
+// `fps` may be a single fp or an array; unknown fps throw. Returns the findings it changed.
+function clearFindingPending(featureId, fps, { by = 'user', reason = '' } = {}) {
+  const list = Array.isArray(fps) ? fps : [fps];
+  const ledger = loadLedger(featureId);
+  const at = now();
+  const updated = [];
+  for (const fp of [...new Set(list)]) {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    if (!finding.pending) continue;                     // nothing in flight — no-op
+    if (finding.postedAt || finding.appliedAt) { delete finding.pending; updated.push(finding); continue; }
+    const kind = finding.pending;
+    delete finding.pending;
+    finding.history.push({ at, from: finding.status, to: finding.status, by, note: reason || `cancelled queued ${kind}` });
+    finding.updatedAt = at;
+    updated.push(finding);
+  }
+  if (updated.length) saveLedger(ledger);
+  return updated;
+}
+
+// Every finding of a workspace currently sitting in the in-flight lane — what a "cancel the
+// stuck post/apply" action operates on when the caller doesn't name specific fps.
+function pendingFindings(featureId) {
+  return (loadLedger(featureId).findings || []).filter(isPending);
+}
+
 // The reviewer's triage decision on a PR comment that hasn't been posted yet:
 // `approve` / `edit` mean "will post on the next Post" (the finding stays open/reworking);
 // a dismiss is modelled by the `waived` status instead, not here. Persisting the decision
 // (rather than holding it only in the browser's review flow) is what keeps the board, the
 // stepper and the Post screen in sync and makes a decision survive a page refresh.
+//
+// `fix-only` (pr-respond) = **apply the code fix and post NO reply.** The runner commits and
+// pushes the fix, then resolves the reviewer's thread by setting its ADO status to `Fixed`
+// rather than writing a comment. Resolving matters: a thread left Active whose newest comment
+// is still the reviewer's would be re-detected as "awaiting your reply" on every later sweep,
+// so the item would come back forever. It's a distinct decision, not a flavour of `edit`,
+// because the runner must know NOT to reply.
 // Pass null to clear the decision (undo). Returns the finding.
-const FINDING_DECISIONS = ['approve', 'edit'];
+const FINDING_DECISIONS = ['approve', 'edit', 'fix-only'];
 function setFindingDecision(featureId, fp, decision, { by = 'user' } = {}) {
   if (decision !== null && !FINDING_DECISIONS.includes(decision)) {
     throw euser(`invalid decision "${decision}": must be one of ${FINDING_DECISIONS.join(', ')} or null`);
@@ -834,9 +1018,13 @@ function saveRequests(doc) { writeJson(requestsPath(), doc); }
 // posts the reviewed output of an existing workspace (require wsId). Optional
 // title is a human label shown on the queued card; optional `instructions` is
 // free-text scope/focus for THAT run (e.g. "front-end only") the runner honors.
-function addRequest({ action, prId, wsId, title, instructions } = {}) {
+// `kind` narrows a `poll` (manual refresh) to one section; ignored for other actions.
+function addRequest({ action, prId, wsId, title, instructions, kind } = {}) {
   if (!REQUEST_ACTIONS.includes(action)) {
     throw euser(`invalid action "${action}": must be one of ${REQUEST_ACTIONS.join(', ')}`);
+  }
+  if (kind !== undefined && kind !== null && String(kind).trim() !== '' && !REQUEST_KINDS.includes(kind)) {
+    throw euser(`invalid kind "${kind}": must be one of ${REQUEST_KINDS.join(', ')}`);
   }
   if ((action === 'pr-review' || action === 'pr-respond') && (prId === undefined || prId === null || String(prId).trim() === '')) {
     throw euser(`${action} requires "prId"`);
@@ -862,6 +1050,8 @@ function addRequest({ action, prId, wsId, title, instructions } = {}) {
     action,
     prId: prId === undefined || prId === null || String(prId).trim() === '' ? null : String(prId).trim(),
     wsId: wsId === undefined || wsId === null || String(wsId).trim() === '' ? null : String(wsId).trim(),
+    // Section scope for a manual-refresh (`poll`) job; null = every PR kind.
+    kind: kind === undefined || kind === null || String(kind).trim() === '' ? null : String(kind).trim(),
     title: typeof title === 'string' && title.trim() ? title.trim() : null,
     // Per-run scope/focus the runner honors (e.g. "front-end only"); null when omitted.
     instructions: typeof instructions === 'string' && instructions.trim() ? instructions.trim() : null,
@@ -954,6 +1144,7 @@ module.exports = {
   FEATURE_STATUSES,
   REQUEST_ACTIONS,
   REQUEST_STATUSES,
+  REQUEST_KINDS,
   initDataDir,
   loadConfig,
   createFeature,
@@ -963,6 +1154,7 @@ module.exports = {
   addSource,
   setFeatureStatus,
   setFeatureReview,
+  reviewStamps,
   loadLedger,
   loadRounds,
   fingerprint,
@@ -971,6 +1163,11 @@ module.exports = {
   markPosted,
   markApplied,
   setFindingPending,
+  clearFindingPending,
+  pendingFindings,
+  isAgreedCodeFix,
+  setFindingFixCommit,
+  unbackedFixes,
   isPosted,
   isApplied,
   isPending,

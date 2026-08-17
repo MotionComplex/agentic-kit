@@ -157,6 +157,173 @@ test('POST /features/:id/activity flips authorResponded; summaries carry it', as
   assert.equal((await cleared.json()).review.authorRespondedAt, null);
 });
 
+test('POST /features/:id/activity records the real PR-update time; summaries expose both clocks', async () => {
+  // A future-dated activity stamp is guaranteed to be newer than the seeded round, which is
+  // exactly the "the PR moved since we reviewed it" case the cockpit flags.
+  const at = new Date(Date.now() + 60_000).toISOString();
+  const resp = await fetch(`${base}/api/features/flow-feat/activity`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lastActivityAt: at, lastActivityBy: 'Oriol Puig' }),
+  });
+  assert.equal(resp.status, 200);
+  const feat = await resp.json();
+  assert.equal(feat.review.lastActivityAt, at);
+  assert.equal(feat.review.lastActivityBy, 'Oriol Puig');
+
+  const row = (await (await fetch(`${base}/api/features`)).json()).find((r) => r.id === 'flow-feat');
+  assert.ok(row.stamps, 'feature summaries carry the stamps block');
+  assert.equal(row.stamps.lastActivityAt, at);
+  assert.equal(row.stamps.lastActivityBy, 'Oriol Puig');
+  assert.equal(row.stamps.lastReviewedAt, row.lastRoundAt, 'lastReviewedAt is the last round');
+  assert.equal(row.stamps.newSinceReview, true, 'their update is newer than our last round');
+
+  const hrow = (await (await fetch(`${base}/api/home`)).json()).find((r) => r.id === 'flow-feat');
+  assert.equal(hrow.stamps.newSinceReview, true, 'home rows carry the stamps too');
+
+  // an unparseable timestamp is a client error, not a silently stored string
+  const bad = await fetch(`${base}/api/features/flow-feat/activity`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lastActivityAt: 'yesterday-ish' }),
+  });
+  assert.equal(bad.status, 400);
+});
+
+test('POST /review/cancel releases stranded in-flight findings and drops the dead job', async () => {
+  ledger.createFeature({ id: 'srv-stuck', title: 'Stuck', kind: 'pr-review' });
+  ledger.ingestRound('srv-stuck', [
+    mkFinding({ title: 'SS1', locus: 'pr:7:a.ts:L1' }),
+    mkFinding({ title: 'SS2', locus: 'pr:7:b.ts:L2' }),
+  ]);
+  const fps = ledger.loadLedger('srv-stuck').findings.map((f) => f.fp);
+  const job = ledger.addRequest({ action: 'apply', wsId: 'srv-stuck' });
+
+  // The UI's Post: mark in flight, then the runner never shows up.
+  await fetch(`${base}/api/features/srv-stuck/review/apply`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps, status: 'pending-post' }),
+  });
+  assert.equal(ledger.pendingFindings('srv-stuck').length, 2);
+
+  const res = await fetch(`${base}/api/features/srv-stuck/review/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId: job.id, reason: 'never ran' }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.cancelled, 2, 'both pending findings released');
+  assert.equal(body.requestDeleted, true, 'the dead job is gone');
+  assert.equal(ledger.pendingFindings('srv-stuck').length, 0);
+  // Crucially: released, NOT posted.
+  for (const f of ledger.loadLedger('srv-stuck').findings) {
+    assert.equal(f.postedAt, undefined, 'cancelling must never stamp postedAt');
+  }
+  assert.ok(!ledger.listRequests().some((r) => r.id === job.id));
+
+  // Idempotent, and tolerant of an already-deleted request.
+  const again = await fetch(`${base}/api/features/srv-stuck/review/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId: job.id }),
+  });
+  assert.equal(again.status, 200);
+  const body2 = await again.json();
+  assert.equal(body2.cancelled, 0);
+  assert.equal(body2.requestDeleted, false);
+});
+
+test('POST /review/cancel rejects unknown fps and 404s an unknown workspace', async () => {
+  const bad = await fetch(`${base}/api/features/srv-stuck/review/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: ['nope'] }),
+  });
+  assert.equal(bad.status, 400);
+
+  const missing = await fetch(`${base}/api/features/no-such-ws/review/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: ['abc'] }),
+  });
+  assert.equal(missing.status, 400, 'unknown workspace has no such finding');
+});
+
+test('GET /api/version lets the UI detect a server older than the page it serves', async () => {
+  const res = await fetch(`${base}/api/version`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.apiVersion, require('../src/version').API_VERSION);
+  assert.ok(body.startedAt, 'exposes when this process started, so "restart it" is verifiable');
+  // The web UI compiles the expected version in; drift between the two is the bug this catches.
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const m = ui.match(/EXPECTED_API_VERSION\s*=\s*'([^']+)'/);
+  assert.ok(m, 'web/app.js must declare EXPECTED_API_VERSION');
+  assert.equal(m[1], body.apiVersion,
+    'web/app.js EXPECTED_API_VERSION and src/version.js API_VERSION must be bumped together');
+});
+
+test('GET /api/runner reports whether the queue is being drained', async () => {
+  const res = await fetch(`${base}/api/runner`);
+  assert.equal(res.status, 200);
+  const s = await res.json();
+  assert.equal(s.running, false, 'no runner in a fresh test server');
+  assert.deepEqual(Object.keys(s.actions).sort(), ['poll', 'watch'], 'only the two fixed prompts');
+  assert.ok('available' in s && 'logPath' in s);
+});
+
+test('POST /api/runner refuses anything outside the fixed prompt allowlist', async () => {
+  // The whole point: no request body can ever become part of the spawned command.
+  for (const action of ['rm -rf /', 'watch; curl evil.example', '', 'audit']) {
+    const res = await fetch(`${base}/api/runner`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    assert.equal(res.status, 400, `action ${JSON.stringify(action)} must be rejected`);
+  }
+  const nonString = await fetch(`${base}/api/runner`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: { toString: 'nope' } }),
+  });
+  assert.equal(nonString.status, 400);
+});
+
+test('DELETE /api/runner is a 409 when nothing is running', async () => {
+  const res = await fetch(`${base}/api/runner`, { method: 'DELETE' });
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /no runner/i);
+});
+
+test('POST /api/requests creates a poll (refresh) job and dedupes it', async () => {
+  const first = await fetch(`${base}/api/requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'poll', kind: 'pr-review', title: 'Refresh PR Review' }),
+  });
+  assert.equal(first.status, 201);
+  const job = await first.json();
+  assert.equal(job.action, 'poll');
+  assert.equal(job.kind, 'pr-review');
+
+  // same scope while it's still queued → the existing job, not a second one
+  const again = await fetch(`${base}/api/requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'poll', kind: 'pr-review', dedupe: true }),
+  });
+  assert.equal(again.status, 200);
+  const dup = await again.json();
+  assert.equal(dup.id, job.id);
+  assert.equal(dup.deduped, true);
+
+  // a different scope is a different job
+  const other = await fetch(`${base}/api/requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'poll', kind: 'pr-respond', dedupe: true }),
+  });
+  assert.equal(other.status, 201);
+  assert.notEqual((await other.json()).id, job.id);
+
+  const bad = await fetch(`${base}/api/requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'poll', kind: 'spec' }),
+  });
+  assert.equal(bad.status, 400);
+});
+
 test('POST /features/:id/status marks done / reopens; home carries status', async () => {
   const done = await fetch(`${base}/api/features/flow-feat/status`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

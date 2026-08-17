@@ -79,12 +79,19 @@ const state = {
   // review API, this just records which path the reviewer chose.
   flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null },
   section: { kind: null, features: [] },   // cached cards for the open PR section, re-bound to live jobs each poll
+  runner: null,            // last GET /api/runner — is a session draining the queue right now?
 };
 const current = { view: null, id: null, tab: null };
 let routeSeq = 0;
 
 /* Footer appended to AI-drafted PR comments/replies when the post toggle is on (the default). */
 const DISCLOSURE_LINE = '🤖 AI comment posted by Claude';
+
+/* The API contract this build of the UI expects — must match src/version.js. A browser reload always
+ * gets the newest app.js, but src/server.js is only read when the cockpit process starts, so an
+ * updated plugin + a long-running server means the page calls routes the server has never heard of.
+ * That used to surface as a bare "Not found"; now it says which half is stale. */
+const EXPECTED_API_VERSION = '3';
 
 /* ============================== tiny DOM lib ============================== */
 
@@ -135,7 +142,91 @@ function fmtDateTime(iso) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
     d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
+/* Compact relative age — "just now", "12m ago", "3h ago", "2d ago", then an absolute date.
+ * Used for the review/activity stamps, where "how long ago" is the question being asked;
+ * the absolute time always rides along in the element's title attribute. */
+function fmtAgo(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const secs = Math.round((Date.now() - t) / 1000);
+  if (secs < 0) return fmtDateTime(iso);         // clock skew / future stamp — show it plainly
+  if (secs < 60) return 'just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return fmtDate(iso);
+}
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+
+/* ============================== review / activity stamps ============================== */
+
+/* The two timestamps that answer "can I re-review yet?":
+ *   lastReviewedAt — when WE last reviewed (the last ingest round; a round IS a review pass)
+ *   lastActivityAt — when the OTHER side last touched the PR (their newest comment/commit),
+ *                    recorded by the runner from ADO, with lastActivityBy naming who.
+ * `newSinceReview` = their update landed after our last round, so a re-review would see
+ * something new. Works off either shape: an API summary row (which carries `stamps`) or a
+ * full detail payload ({ feature, rounds }). */
+function reviewStampsOf(source) {
+  if (source && source.stamps) return source.stamps;
+  const feature = (source && source.feature) || source || {};
+  const rv = feature.review || {};
+  const rounds = (source && source.rounds && source.rounds.rounds) || [];
+  const lastReviewedAt = rounds.length ? rounds[rounds.length - 1].at : (source && source.lastRoundAt) || null;
+  const lastActivityAt = rv.lastActivityAt || null;
+  const newer = lastActivityAt
+    && !Number.isNaN(Date.parse(lastActivityAt))
+    && (!lastReviewedAt || Number.isNaN(Date.parse(lastReviewedAt))
+        || Date.parse(lastActivityAt) > Date.parse(lastReviewedAt));
+  return {
+    lastReviewedAt,
+    lastActivityAt,
+    lastActivityBy: rv.lastActivityBy || null,
+    lastPostedAt: rv.lastPostedAt || null,
+    authorRespondedAt: rv.authorRespondedAt || null,
+    newSinceReview: Boolean(newer),
+  };
+}
+
+/* One stamp: "<label> <relative> [by <who>]", with the exact timestamp in the tooltip. */
+function stampEl(label, iso, extraClass = '', who = '') {
+  const rel = fmtAgo(iso);
+  if (!rel) return null;
+  return h('span', {
+    class: `stamp ${extraClass}`.trim(),
+    title: `${label}: ${fmtDateTime(iso) || iso}${who ? ` by ${who}` : ''}`,
+  },
+  h('span', { class: 'stamp-label' }, label),
+  h('span', { class: 'stamp-val' }, rel),
+  who ? h('span', { class: 'stamp-who' }, `by ${who}`) : null);
+}
+
+/* The stamps line for a PR workspace: when we reviewed, when the PR was last updated by the
+ * other side (and by whom), and — when their update is newer than our review — a "new since
+ * your review" marker, which is exactly the "you can re-review now" signal. `compact` drops
+ * the posted stamp (used on cards, where space is tight). */
+function reviewStampsRow(source, kind, { compact = false, cls = 'review-stamps' } = {}) {
+  if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
+  const s = reviewStampsOf(source);
+  if (!s.lastReviewedAt && !s.lastActivityAt && !s.lastPostedAt) return null;
+  const bits = [
+    stampEl('Reviewed', s.lastReviewedAt),
+    !compact ? stampEl('Posted', s.lastPostedAt) : null,
+    stampEl('PR updated', s.lastActivityAt, s.newSinceReview ? 'stamp-new' : '', s.lastActivityBy || ''),
+  ].filter(Boolean);
+  if (!bits.length) return null;
+  if (s.newSinceReview) {
+    bits.push(h('span', {
+      class: 'stamp-flag',
+      title: 'The PR changed after our last review round — a re-review will pick up the delta.',
+    }, '● new since your review'));
+  }
+  return h('div', { class: cls }, bits);
+}
 
 /* ============================== round helpers ============================== */
 
@@ -393,8 +484,12 @@ function renderGuide() {
             h('h3', {}, h('code', {}, '/flowlever:pr-respond'), ' — answer feedback on your PR'),
             h('p', {},
               'Pulls the reviewer threads awaiting your reply → each becomes a finding with a proposed reply/fix → you decide ',
-              h('strong', {}, 'per thread'), ' (apply fix · reply · push back · waive) → ',
-              h('strong', {}, '“Post replies”'), ' posts the replies and applies the code fixes — only on your action.')))),
+              h('strong', {}, 'per thread'), ' (reply · fix + reply · ', h('strong', {}, 'fix only'),
+              ' · push back · skip) → ', h('strong', {}, '“Post replies”'),
+              ' posts the replies and applies the code fixes — only on your action. ',
+              h('strong', {}, 'Fix only'), ' is the quiet path: it pushes the commit and marks the thread ',
+              h('em', {}, 'Fixed'), ' without writing any comment — for when you want the change in but ',
+              'would rather answer the reviewer yourself, or not at all.')))),
 
       // Job lifecycle & statuses
       h('section', { class: 'guide-card' },
@@ -409,7 +504,50 @@ function renderGuide() {
             ', most often to approve a 2FA / auth prompt in another window. An amber banner spells out what to do; ',
             'approve it and the job continues on its own.'),
           h('li', {}, h('strong', {}, '✓ Done'), ' — finished; the workspace is ready and linked from the row.'),
-          h('li', {}, h('strong', {}, '✗ Error'), ' — failed; the row shows why.')),
+          h('li', {}, h('strong', {}, '✗ Error'), ' — failed; the row shows why.'),
+          h('li', {}, h('strong', { class: 'guide-ni' }, '⏸ Not running'), ' — queued (or claiming to run) for ',
+            'minutes with ', h('strong', {}, 'no runner going'), '. Nothing has been posted. Hit ',
+            h('strong', {}, '▶ Run it now'), ', or cancel the job to put its items back in the review queue.')),
+        h('h3', {}, 'Running jobs from here — ▶ Run N jobs'),
+        h('p', {},
+          'Queued jobs only move when a Claude Code session runs ', h('code', {}, '/flowlever:watch'), '. ',
+          'The cockpit server is a local process, so it can start that session for you: ',
+          h('strong', {}, '▶ Run N jobs'), ' (on Home, the PR sections, and in the stalled banner) launches it ',
+          'headlessly and the job rows then move queued → running → done in front of you. While it works ',
+          'the control reads ', h('strong', {}, 'Runner working… ■ Stop'), '. Because this one ',
+          h('em', {}, 'writes'), ' to Azure DevOps it confirms once before starting, only ever runs one session ',
+          'at a time, and logs to ', h('code', {}, '~/.flowlever/runner.log'), ' so a headless failure ',
+          '(expired auth, missing MCP) is visible instead of silent. If the ', h('code', {}, 'claude'),
+          ' CLI can\'t be found the button says so — set ', h('code', {}, 'FLOWLEVER_CLAUDE_BIN'), '.'),
+        h('h3', {}, 'Why a Post can never silently look done'),
+        h('p', {},
+          'Clicking Post does ', h('em', {}, 'not'), ' write anything — the browser can\'t reach Azure DevOps. It marks the ',
+          'items ', h('strong', {}, '“Posting…”'), ' and queues a job; only the runner can confirm a comment landed, ',
+          'by stamping it ', h('strong', {}, 'Posted — awaiting author'), '. So if the runner never arrives, dies ',
+          'mid-way, or finishes without stamping, the cockpit says exactly that ("no runner picked this up", ',
+          '"finished but N items not confirmed as posted") instead of implying success — and offers ',
+          h('strong', {}, '↩ Back to the review queue'), ' to release the items so you can Post again. ',
+          'Each ', h('code', {}, '/flowlever:watch'), ' pass also heals strays: it checks the PR and either stamps ',
+          'items whose comment is already there, or releases the ones that never made it.'),
+        h('h3', {}, 'The two review clocks — when can I re-review?'),
+        h('p', {},
+          'Every PR workspace carries two timestamps, shown together on its card, its Home row and its header: ',
+          h('strong', {}, 'Reviewed'), ' (when we last reviewed it — its last ingest round) and ',
+          h('strong', {}, 'PR updated'), ' (when the ', h('em', {}, 'other'),
+          ' side last touched the PR: the author on a PR review, the reviewer on a PR respond). ',
+          'When their update is newer than our review, the stamp turns blue with a ',
+          h('strong', {}, '● new since your review'), ' badge and the prominent ',
+          h('strong', {}, '↻ Re-review'), ' action appears — a re-review will actually see something. ',
+          'Hover a stamp for the exact time.'),
+        h('h3', {}, 'The ↻ Refresh button'),
+        h('p', {},
+          'The scheduled ', h('code', {}, '/flowlever:poll'), ' pass runs every couple of hours. When you already ',
+          h('em', {}, 'know'), ' a new PR landed or a reviewer just commented, hit ', h('strong', {}, '↻ Refresh'),
+          ' on Home or on either PR section: it queues a discovery pass your ', h('code', {}, '/flowlever:watch'),
+          ' session runs right away — finding PRs with no workspace yet and re-checking the known ones for updates. ',
+          'The button is its own progress indicator (queued → live phase → done, or the failure reason with a retry), ',
+          'it de-dupes so a double-click can’t start two passes, and like the scheduled pass it ',
+          h('strong', {}, 'never posts anything'), '.'),
         h('p', { class: 'meta-dim' },
           'The runner is the ', h('code', {}, '/flowlever:watch'), ' loop in your Claude Code session — that’s why a job can pause for your 2FA: ',
           'the session, not the browser, holds your Confluence / ADO access.')),
@@ -501,7 +639,11 @@ function reviewWait(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
   if (reviewableFindings(findings).length) return null;   // still stuff to triage/post
   if (!postedFindings(findings).length) return null;       // nothing posted → not waiting
-  return data.feature.review && data.feature.review.authorRespondedAt ? 'responded' : 'waiting';
+  // Either the runner explicitly flagged a response, or the recorded PR-activity timestamp is
+  // newer than our last review round — both mean the same thing: there's a delta to reconcile.
+  const stamps = reviewStampsOf(data);
+  const responded = (data.feature.review && data.feature.review.authorRespondedAt) || stamps.newSinceReview;
+  return responded ? 'responded' : 'waiting';
 }
 
 /* Build the review-flow decision map from PERSISTED finding state, so a decision taken on
@@ -514,6 +656,7 @@ function hydrateDecisions(findings) {
     if (f.status === 'waived') d[f.fp] = { kind: 'waive', reason: f.statusReason || '' };
     else if (f.decision === 'approve') d[f.fp] = { kind: 'accept' };
     else if (f.decision === 'edit') d[f.fp] = { kind: 'edit' };
+    else if (f.decision === 'fix-only') d[f.fp] = { kind: 'fix-only' };
     else {
       // No finding-level decision stored — derive one from the persisted draft review,
       // so accepting a proposal hunk-by-hunk counts as deciding the finding (otherwise
@@ -695,11 +838,18 @@ function decisionActions(kind) {
   if (kind === 'pr-respond') {
     return {
       label: 'Decision',
-      helper: 'Replies and fixes are sent only when you click Post — nothing is sent until then.',
-      tagLabels: { accept: 'Will reply', edit: 'Fix + reply', redirect: 'Push back', skip: 'Skipped', undecided: 'Undecided' },
+      helper: 'Replies and fixes are sent only when you click Post — nothing is sent until then. '
+        + '“Fix only” pushes the fix and resolves the thread without writing a reply.',
+      tagLabels: {
+        accept: 'Will reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply',
+        redirect: 'Push back', skip: 'Skipped', undecided: 'Undecided',
+      },
       buttons: [
         { kind: 'accept', label: '↩ Reply', cls: 'dec-accept' },
-        { kind: 'edit', label: '✎ Apply fix', cls: 'dec-edit' },
+        // Named for what it actually does: this one commits the fix AND answers the thread.
+        { kind: 'edit', label: '✎ Fix + reply', cls: 'dec-edit' },
+        // Fix, push, resolve the thread — no comment written.
+        { kind: 'fix-only', label: '✎ Fix only', cls: 'dec-fixonly' },
         { kind: 'redirect', label: '⤺ Push back', cls: 'dec-redirect' },
         { kind: 'skip', label: '⏭ Skip', cls: 'dec-skip' },
       ],
@@ -717,8 +867,8 @@ function decisionActions(kind) {
   };
 }
 
-const DEC_LABEL = { accept: 'Apply', edit: 'With edits', redirect: 'Redirect', waive: 'Waive', skip: 'Skip' };
-const RAIL_MARK = { accept: '✓', edit: '✎', redirect: '⤳', waive: '⊘', skip: '–' };
+const DEC_LABEL = { accept: 'Apply', edit: 'With edits', 'fix-only': 'Fix, no reply', redirect: 'Redirect', waive: 'Waive', skip: 'Skip' };
+const RAIL_MARK = { accept: '✓', edit: '✎', 'fix-only': '✎', redirect: '⤳', waive: '⊘', skip: '–' };
 
 async function renderReviewFlow(id, finish) {
   current.view = 'review-flow'; current.id = id; current.tab = 'review';
@@ -1192,6 +1342,19 @@ async function decide(data, f, kind) {
     await persistDecisionField(fp, 'approve');   // persist the approve so every surface agrees
     await acceptAll(f);
     next();
+  } else if (kind === 'fix-only') {
+    // Apply the fix exactly as drafted, and post NO reply: accept the hunks (so the runner knows
+    // what to write to the working tree) and persist `fix-only`, which is what tells the runner to
+    // resolve the thread instead of answering it. A thread-only item with no code draft has no fix
+    // to apply, so this decision would be a no-op — refuse it rather than silently swallow it.
+    if (!f.draft) {
+      toast('Nothing to fix here — this thread has no proposed code change. Use Reply or Push back.');
+      return;
+    }
+    setFlowDecision(fp, 'fix-only');
+    await persistDecisionField(fp, 'fix-only');
+    await acceptAll(f);
+    next();
   } else if (kind === 'edit') {
     setFlowDecision(fp, 'edit');
     // Suggestion-only finding (no code-diff draft): there are no per-hunk controls to reveal, so
@@ -1311,13 +1474,14 @@ const FINISH_TALLIES = {
     ['accept', 'Approved'], ['edit', 'Edited'], ['waive', 'Dismissed'], ['skip', 'Undecided'],
   ],
   'pr-respond': [
-    ['accept', 'Reply'], ['edit', 'Fix + reply'], ['redirect', 'Push back'], ['skip', 'Skipped'],
+    ['accept', 'Reply'], ['edit', 'Fix + reply'], ['fix-only', 'Fix, no reply'],
+    ['redirect', 'Push back'], ['skip', 'Skipped'],
   ],
 };
 const DEC_PILL = {
   spec: DEC_LABEL,
   'pr-review': { accept: 'Approved', edit: 'Edited', redirect: 'Redirect', waive: 'Dismissed', skip: 'Undecided' },
-  'pr-respond': { accept: 'Reply', edit: 'Fix + reply', redirect: 'Push back', waive: 'Dismissed', skip: 'Skipped' },
+  'pr-respond': { accept: 'Reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply', redirect: 'Push back', waive: 'Dismissed', skip: 'Skipped' },
 };
 
 /* The PR number for a pr-review/pr-respond workspace, read off the title (#482)
@@ -1370,7 +1534,10 @@ function finishView(data) {
         h('span', { class: `dec-pill dec-${dk}` }, pillMap[dk] || dk));
     }))));
 
-  const applyKinds = (fp) => ['accept', 'edit', 'redirect'].includes(flowDecisionKind(fp));
+  // `fix-only` belongs here too: it's the decision with the MOST to hand a coding agent (a code
+  // change and no reply to soften it). Omitting it made the work order claim "no applicable changes"
+  // on a screen showing two agreed fixes.
+  const applyKinds = (fp) => ['accept', 'edit', 'fix-only', 'redirect'].includes(flowDecisionKind(fp));
   const reworkFps = state.flow.items.filter(applyKinds);
   const waiveItems = state.flow.items
     .filter((fp) => flowDecisionKind(fp) === 'waive')
@@ -1513,50 +1680,90 @@ function postActionEl(data) {
   const kind = data.feature && data.feature.kind;
   if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
   const noun = kind === 'pr-review' ? ['comment', 'comments'] : ['reply', 'replies'];
-  // Only approved/edited (and, for respond, pushed-back) items post; dismissed +
+  // Only approved/edited (and, for respond, pushed-back or fix-only) items post; dismissed +
   // undecided do not — the Post button counts exactly what will be sent.
-  const postable = kind === 'pr-review' ? ['accept', 'edit'] : ['accept', 'edit', 'redirect'];
-  const postN = state.flow.items.filter((fp) => postable.includes(flowDecisionKind(fp))).length;
+  const postable = kind === 'pr-review' ? ['accept', 'edit'] : ['accept', 'edit', 'fix-only', 'redirect'];
+  const decided = state.flow.items.map(flowDecisionKind);
+  const postN = decided.filter((k) => postable.includes(k)).length;
+  // A fix-only item writes code and resolves its thread but posts NO reply, so it must not be
+  // counted as one — "Post 3 replies" when only 2 are replies is exactly the kind of quiet
+  // inaccuracy that makes the cockpit disagree with the PR.
+  const fixOnlyN = decided.filter((k) => k === 'fix-only').length;
+  const replyN = postN - fixOnlyN;
   const prNum = prNumber(data.feature);
   const target = prNum ? `PR #${prNum}` : 'the PR';
-  const verb = kind === 'pr-review' ? 'Post comments' : 'Post replies';
+  const verb = kind === 'pr-review' ? 'Post comments' : (replyN === 0 && fixOnlyN > 0 ? 'Push fixes' : 'Post replies');
 
   const reqs = (state.flow.applyReqs || []).slice()
     .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
   const latest = reqs[reqs.length - 1];
-  const active = !!latest && (latest.status === 'queued' || latest.status === 'running');
-  const posted = !!latest && latest.status === 'done';
+  const stalled = !!latest && isStaleJob(latest);
+  // A stalled job is NOT active: keep the button live so the user can retry instead of staring
+  // at a disabled "Queued…" that will never advance.
+  const active = !!latest && (latest.status === 'queued' || latest.status === 'running') && !stalled;
   const errored = !!latest && latest.status === 'error';
+  // "Posted" is only true when the runner actually STAMPED the findings (postedAt). A request that
+  // merely reached `done` while items sit in the in-flight lane means the write wasn't confirmed —
+  // claiming success there is what makes the cockpit disagree with the real PR.
+  const pendingLeft = ((data.ledger && data.ledger.findings) || []).filter(isPending).length;
+  const posted = !!latest && latest.status === 'done' && pendingLeft === 0;
+  const unconfirmed = !!latest && latest.status === 'done' && pendingLeft > 0;
   const meta = latest ? (REQ_STATUS[latest.status] || REQ_STATUS.queued) : null;
 
   const statusLine = latest
-    ? h('span', { class: `post-status req-state-${cssSafe(latest.status)}` },
-        h('span', { class: `req-glyph req-glyph-${cssSafe(latest.status)} ${meta.spin ? 'req-spin' : ''}`.trim() }, meta.glyph),
-        ' ', posted ? `Posted to ${target}` : meta.label,
-        errored && latest.note ? h('span', { class: 'meta-dim' }, ` — ${latest.note}`) : null)
+    ? h('span', { class: `post-status req-state-${cssSafe(stalled ? 'stalled' : latest.status)}` },
+        h('span', { class: `req-glyph req-glyph-${cssSafe(stalled ? 'stalled' : latest.status)} ${meta.spin && !stalled ? 'req-spin' : ''}`.trim() },
+          stalled ? '⏸' : meta.glyph),
+        ' ',
+        stalled ? `Not running — ${latest.status} ${fmtAge(jobAgeMs(latest))} ago, nothing posted`
+          : posted ? `Posted to ${target}`
+          : unconfirmed ? `Finished, but ${plural(pendingLeft, 'item', 'items')} not confirmed as posted`
+          : meta.label,
+        errored && latest.note ? h('span', { class: 'meta-dim' }, ` — ${latest.note}`) : null,
+        stalled ? h('span', { class: 'meta-dim' }, ' — start /flowlever:watch, then retry') : null)
     : null;
 
-  const postLabel = `${verb.split(' ')[0]} ${postN} ${postN === 1 ? noun[0] : noun[1]} to ${target}`;
+  // Retrying after a job that never confirmed must first RELEASE the stranded in-flight markers —
+  // otherwise the items are excluded from the post set and the retry silently posts nothing.
+  const needsRelease = pendingLeft > 0 && (stalled || unconfirmed || errored);
+  // Spell out the mix so the button never over-promises: "Post 2 replies + 1 fix to PR #5751".
+  const parts = [];
+  if (replyN) parts.push(`${replyN} ${replyN === 1 ? noun[0] : noun[1]}`);
+  if (fixOnlyN) parts.push(`${fixOnlyN} ${fixOnlyN === 1 ? 'fix' : 'fixes'} (no reply)`);
+  const postLabel = parts.length
+    ? `${verb.split(' ')[0]} ${parts.join(' + ')} to ${target}`
+    : `${verb.split(' ')[0]} ${postN} ${postN === 1 ? noun[0] : noun[1]} to ${target}`;
   const btn = h('button', {
-    class: 'btn btn-accent btn-post', type: 'button', disabled: active || (postN === 0 && !posted && !errored),
-    onclick: () => postBack(data, kind, verb),
-  }, active ? 'Queued…' : posted ? `${verb} again` : errored ? 'Retry post' : postLabel);
+    class: 'btn btn-accent btn-post', type: 'button',
+    disabled: active || (postN === 0 && !posted && !errored && !stalled && !unconfirmed),
+    onclick: () => (needsRelease ? retryPost(data, kind, verb) : postBack(data, kind, verb)),
+  }, active ? 'Queued…'
+    : stalled || unconfirmed || errored ? 'Retry post'
+    : posted ? `${verb} again`
+    : postLabel);
 
   // AI-disclosure toggle: on by default; the choice rides the apply request's
   // `instructions`, so the runner needs no other channel to know it.
   if (state.flow.disclosure === undefined) state.flow.disclosure = true;
-  const disclosureToggle = h('label', { class: 'post-disclosure meta-dim', title: `When on, each posted ${noun[0]} ends with "${DISCLOSURE_LINE}".` },
-    h('input', {
-      type: 'checkbox', checked: state.flow.disclosure ? 'checked' : undefined, disabled: active ? 'disabled' : undefined,
-      onchange: (e) => { state.flow.disclosure = e.target.checked; },
-    }),
-    ` ${DISCLOSURE_LINE}`);
+  // The footer only lands on text that gets written, so it's meaningless when every decision is
+  // fix-only — don't offer a toggle that changes nothing.
+  const disclosureToggle = replyN === 0 && fixOnlyN > 0 ? null
+    : h('label', { class: 'post-disclosure meta-dim', title: `When on, each posted ${noun[0]} ends with "${DISCLOSURE_LINE}".` },
+      h('input', {
+        type: 'checkbox', checked: state.flow.disclosure ? 'checked' : undefined, disabled: active ? 'disabled' : undefined,
+        onchange: (e) => { state.flow.disclosure = e.target.checked; },
+      }),
+      ` ${DISCLOSURE_LINE}`);
 
+  // If a job is waiting and nothing is draining the queue, put the run control right next to the
+  // status line — this is the screen the user is staring at while wondering why nothing happens.
+  const needsRunner = !!latest && (latest.status === 'queued' || latest.status === 'running') && !runnerBusy();
   return h('div', { class: 'finish-post' },
     h('div', { class: 'step-section-label' }, `${verb} — nothing is sent until you click this`),
     h('div', { class: 'finish-post-row' },
       btn,
       statusLine,
+      needsRunner ? runnerZone(1, '▶ Run it now') : null,
       h('span', { class: 'meta-dim post-flow' }, 'queued → running → posted')),
     disclosureToggle);
 }
@@ -1567,6 +1774,30 @@ function postActionEl(data) {
 async function postBack(data, kind, verb) {
   await persistTriage(data);
   await enqueueApply(verb, kind);
+}
+
+/* Retry a Post whose previous attempt never confirmed (job stalled, errored, or finished without
+ * stamping). Releases the stranded in-flight markers first, then rebuilds the post set from the
+ * findings' persisted decisions — so the retry actually carries the items, instead of enqueueing
+ * an apply over an empty set because the pending ones were filtered out. */
+async function retryPost(data, kind, verb) {
+  const fid = current.id;
+  try {
+    await api(`/api/features/${encodeURIComponent(fid)}/review/cancel`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'retrying the post — previous attempt never confirmed' }),
+    });
+    await loadDetail(fid, true);
+  } catch (e) {
+    toast(`Could not reset the previous attempt: ${e.message}`);
+    return;
+  }
+  // Rebuild the snapshot from the released findings (their approve/edit decisions survived).
+  state.flow.items = null;
+  initFlow(state.detail);
+  state.flow.finish = true;
+  await postBack(state.detail, kind, verb);
+  renderFlowInto();
 }
 
 async function persistTriage(data) {
@@ -1701,15 +1932,34 @@ async function enqueueApply(label, kind) {
     const isPr = kind === 'pr-review' || kind === 'pr-respond';
     // For PR posts, spell the disclosure choice out on the request so the runner
     // never has to guess (checkbox in postActionEl; default on).
-    const instructions = !isPr ? undefined
-      : (state.flow.disclosure !== false
-          ? `disclosure: append "${DISCLOSURE_LINE}" as the last line of every posted ${kind === 'pr-review' ? 'comment' : 'reply'}`
-          : 'disclosure: off — post the reviewed text verbatim, no AI footer');
+    const disclosure = state.flow.disclosure !== false
+      ? `disclosure: append "${DISCLOSURE_LINE}" as the last line of every posted ${kind === 'pr-review' ? 'comment' : 'reply'}`
+      : 'disclosure: off — post the reviewed text verbatim, no AI footer';
+    // Call out fix-only items explicitly. The runner can read `decision: "fix-only"` off the
+    // ledger, but a reply posted where the user asked for silence is not a recoverable mistake —
+    // so it gets said twice.
+    const fixOnly = state.flow.items.filter((fp) => flowDecisionKind(fp) === 'fix-only');
+    const fixNote = fixOnly.length
+      ? ` · fix-only (do NOT reply — push the fix, then set the thread status to Fixed): ${fixOnly.join(', ')}`
+      : '';
+    const instructions = !isPr ? undefined : `${disclosure}${fixNote}`;
     await api('/api/requests', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'apply', wsId: current.id, instructions }),
     });
-    toast(`${label} queued`, 'success');
+    // Clicking Post/Apply IS the go-ahead to write. Queueing a job nobody is running turns that
+    // into a silent no-op until the user happens to notice — so start the runner right here. Its
+    // progress then shows on this very screen (queued → running → posted). No runner available
+    // (no `claude` CLI) → say plainly that it's queued and needs a session.
+    const r = await refreshRunner();
+    if (r && r.available && !r.running) {
+      await startRunner('watch', { silent: true });
+      toast(`${label} — running now`, 'success');
+    } else if (r && r.running) {
+      toast(`${label} queued — the running session will pick it up`, 'success');
+    } else {
+      toast(`${label} queued — run /flowlever:watch in Claude Code to execute it`, 'success');
+    }
     ensureApplyPolling();
     pollRequestsNow();
   } catch (e) {
@@ -1817,7 +2067,10 @@ function inboxRow(r) {
           ? h('span', { class: 'ir-clear' }, '✓ Review complete')
           : bits.length
             ? bits.map((b) => h('span', { class: 'ir-bit' }, b))
-            : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you'))),
+            : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you')),
+      // PR rows carry the reviewed-vs-updated stamps, so the inbox shows at a glance which
+      // PRs have moved since we last looked at them.
+      done ? null : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
     h('span', { class: 'ir-arrow', 'aria-hidden': 'true' }, '→'));
 
   const label = r.title || r.id;
@@ -1893,6 +2146,7 @@ async function renderHome() {
   if (rows.length === 0) {
     app.replaceChildren(
       h('div', { class: 'view-head' }, h('h1', {}, 'Home')),
+      h('div', { class: 'section-actions' }, refreshZone(null), runnerZone(0)),
       requestsStripEl([]),
       h('div', { class: 'empty' },
         h('div', { class: 'empty-glyphs' },
@@ -1922,6 +2176,7 @@ async function renderHome() {
       h('p', { class: 'view-sub' }, actionable
         ? `${plural(actionable, 'workspace', 'workspaces')} need you · ${plural(rows.length, 'workspace', 'workspaces')} total`
         : `All caught up · ${plural(rows.length, 'workspace', 'workspaces')} under watch`)),
+    h('div', { class: 'section-actions' }, refreshZone(null), runnerZone(0)),
     requestsStripEl([]),
     h('div', { class: 'section-lists' }, ...lists),
   );
@@ -1937,6 +2192,10 @@ function startHomeRequestsPoll() {
     if (current.view !== 'home') return;
     const active = reqs.filter((r) => r.status !== 'done');
     populateRequestsStrip($('#requests-strip'), active, null);
+    // Home's Refresh button covers both PR sections, so any live poll job drives it.
+    renderRefreshZone($('#refresh-zone'), null, pickPollJob(reqs, null));
+    // Home's Run button offers to drain everything that's waiting, whatever section it belongs to.
+    renderRunnerZone($('.runner-zone'), queuedJobs(reqs).length);
     const doneIds = new Set(reqs.filter((r) => r.status === 'done').map((r) => r.id));
     let newlyDone = false;
     doneIds.forEach((id) => { if (!lastDone.has(id)) newlyDone = true; });
@@ -2013,7 +2272,11 @@ async function renderSection(kind) {
 
   app.replaceChildren(...[
     sectionHead(kind, features.length || null),
-    isPr ? newRequestZone(kind) : (kind === 'spec' ? newAuditZone() : null),
+    // PR sections get the manual refresh next to "+ New …": queue a discovery pass now
+    // instead of waiting for the scheduled poller.
+    isPr
+      ? h('div', { class: 'section-actions' }, newRequestZone(kind), refreshZone(kind), runnerZone(0))
+      : (kind === 'spec' ? newAuditZone() : null),
     gridZone,
   ].filter(Boolean));
 
@@ -2063,7 +2326,15 @@ function startSectionRequestsPoll(kind) {
     // Jobs relevant to this section: same-kind reviews + apply jobs targeting its workspaces.
     const wsIds = new Set(state.section.features.map((f) => f.id));
     const rel = reqs.filter((r) => r.action === kind || (r.action === 'apply' && r.wsId && wsIds.has(r.wsId)));
-    const doneIds = new Set(rel.filter((r) => r.status === 'done').map((r) => r.id));
+    // The manual-refresh pass has no workspace of its own — it drives the Refresh button
+    // instead of a card. An unscoped (`kind: null`) poll covers every PR section.
+    renderRefreshZone($('#refresh-zone'), kind, pickPollJob(reqs, kind));
+    // Count everything queued, not just this section's: the runner drains the whole queue, so
+    // promising "run 1 job" while three others go along for the ride would be a lie.
+    renderRunnerZone($('.section-actions .runner-zone'), queuedJobs(reqs).length);
+    // A finished refresh may have created workspaces or updated activity stamps → refetch.
+    const tracked = [...rel, ...reqs.filter((r) => r.action === 'poll' && (!r.kind || r.kind === kind))];
+    const doneIds = new Set(tracked.filter((r) => r.status === 'done').map((r) => r.id));
     let newlyDone = false;
     doneIds.forEach((id) => { if (!lastDone.has(id)) newlyDone = true; });
     lastDone = doneIds;
@@ -2119,12 +2390,18 @@ function featureCard(f, job) {
     if (src) metaBits.push(h('span', {}, src));
   }
   const lr = lastRoundDate(f);
-  metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
+  const isPrKind = kind === 'pr-review' || kind === 'pr-respond';
+  // On PR cards the "Reviewed <ago>" stamp below already carries the last-round time — don't
+  // print it twice; the "no rounds yet" case still needs saying.
+  if (!(isPrKind && lr)) metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
 
   // A re-run on a workspace that already has findings reads as "re-reviewing".
   const hasFindings = (r.openBySeverity && Object.values(r.openBySeverity).some(Boolean))
     || (f.lastRoundAt || (f.rounds && f.rounds.length));
-  const busyClass = job ? ` fc-busy fc-busy-${cssSafe(job.needsInput && job.status !== 'error' ? 'needs' : job.status)}` : '';
+  const busyState = job
+    ? (job.needsInput && job.status !== 'error' ? 'needs' : (isStaleJob(job) ? 'stale' : job.status))
+    : null;
+  const busyClass = job ? ` fc-busy fc-busy-${cssSafe(busyState)}` : '';
 
   const card = h('a', { class: `card feature-card ${f.status === 'done' ? 'fc-done' : ''}${busyClass}`.trim(), href: `#/feature/${encodeURIComponent(f.id)}` },
     h('div', { class: 'fc-top' },
@@ -2135,8 +2412,10 @@ function featureCard(f, job) {
       dialEl(r.score, r.gate, 64, 'dial-sm'),
     ),
     job ? cardJobRow(job, hasFindings) : (f.awaitingAuthor ? cardReviewRow(f) : null),
+    // Reviewed-vs-updated stamps: on a PR card this is what tells you a re-review is due.
+    reviewStampsRow(f, kind, { compact: true, cls: 'review-stamps fc-stamps' }),
     sevCountsRow(r.openBySeverity),
-    h('div', { class: 'fc-meta' }, metaBits),
+    metaBits.length ? h('div', { class: 'fc-meta' }, metaBits) : null,
   );
 
   const label = f.title || f.id;
@@ -2187,7 +2466,7 @@ const REQ_STATUS = {
   done:    { glyph: '✓', label: 'Done' },
   error:   { glyph: '✗', label: 'Error' },
 };
-const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis' };
+const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis', poll: 'Refresh' };
 
 /* ---- live job ↔ card binding ----------------------------------------------
  * Instead of a separate "jobs" strip duplicating the cards, the active request
@@ -2199,10 +2478,41 @@ const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond',
 function isLiveJob(r) {
   return r.status === 'queued' || r.status === 'running' || r.status === 'error' || !!r.needsInput;
 }
+
+/* A queued job only moves when a /flowlever:watch runner is draining the queue. With no session
+ * running, "· queued" is technically true but reads as "in progress" forever — which is the exact
+ * trap that makes a Post look like it happened. Past this age we say what's really going on:
+ * nobody is running it. Generous enough that a normal ~4s pickup never trips it. */
+const JOB_STALE_MS = 3 * 60 * 1000;
+
+function jobAgeMs(r) {
+  const t = Date.parse(r.updatedAt || r.createdAt);
+  return Number.isNaN(t) ? 0 : Date.now() - t;
+}
+/* Stale = waiting (or claiming to work) for longer than any real pickup takes, and not blocked on
+ * the user (needsInput has its own, clearer banner). A `running` job that goes quiet this long has
+ * almost certainly lost its session mid-flight.
+ * A live runner clears the whole condition: the job isn't abandoned, it's waiting its turn in a
+ * queue that is actively being drained — calling that "not running" would be the opposite lie. */
+function isStaleJob(r) {
+  if (r.needsInput) return false;
+  if (r.status !== 'queued' && r.status !== 'running') return false;
+  if (runnerBusy()) return false;
+  return jobAgeMs(r) > JOB_STALE_MS;
+}
+/* Compact age for the stale note: "4m", "2h", "3d". */
+function fmtAge(ms) {
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return `${Math.max(1, mins)}m`;
+  const hours = Math.floor(mins / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
 // Higher = more urgent, so a card shows the most important job when several match.
+// A stalled job outranks a live one: it's the one that needs a human to unstick it.
 function jobRank(r) {
   if (r.needsInput && r.status !== 'done' && r.status !== 'error') return 4;
   if (r.status === 'error') return 3;
+  if (isStaleJob(r)) return 3;
   if (r.status === 'running') return 2;
   return 1; // queued
 }
@@ -2219,6 +2529,7 @@ function jobForFeature(f, jobs) {
 // that already has findings (re-review) rather than a first pass.
 function jobVerb(job, existing) {
   if (job.action === 'apply') return 'Posting to PR';
+  if (job.action === 'poll') return 'Checking for updates';
   if (job.action === 'pr-review') return existing ? 'Re-reviewing' : 'Reviewing';
   if (job.action === 'pr-respond') return existing ? 'Re-checking threads' : 'Responding';
   return REQ_ACTION_LABEL[job.action] || job.action;
@@ -2229,44 +2540,99 @@ function jobVerb(job, existing) {
 function cardJobRow(job, existing) {
   const meta = REQ_STATUS[job.status] || REQ_STATUS.queued;
   const needsInput = !!job.needsInput && job.status !== 'done' && job.status !== 'error';
+  const stale = isStaleJob(job);
   const verb = jobVerb(job, existing);
   const phase = job.status === 'running' && job.phase ? ` · ${job.phase}` : '';
-  const stateClass = needsInput ? 'needs' : job.status;
+  const stateClass = needsInput ? 'needs' : (stale ? 'stale' : job.status);
+  // A stale job must not keep spinning — a spinner on something nobody is running is the lie.
+  const spin = (meta.spin || needsInput) && !stale;
   const rows = [
     h('div', { class: 'fc-job-line' },
-      h('span', { class: `req-glyph req-glyph-${cssSafe(needsInput ? 'running' : job.status)} ${meta.spin || needsInput ? 'req-spin' : ''}`.trim() },
-        needsInput ? REQ_STATUS.running.glyph : meta.glyph),
-      h('span', { class: 'fc-job-verb' }, needsInput ? verb : verb + (job.status === 'queued' ? ' · queued' : phase))),
+      h('span', { class: `req-glyph req-glyph-${cssSafe(needsInput ? 'running' : (stale ? 'stalled' : job.status))} ${spin ? 'req-spin' : ''}`.trim() },
+        stale ? '⏸' : (needsInput ? REQ_STATUS.running.glyph : meta.glyph)),
+      h('span', { class: 'fc-job-verb' },
+        needsInput || stale ? verb : verb + (job.status === 'queued' ? ' · queued' : phase))),
   ];
   if (needsInput) {
     rows.push(h('div', { class: 'fc-job-needs', role: 'alert' },
       h('span', { 'aria-hidden': 'true' }, '⚠ '), job.note || 'Waiting on you to continue.'));
+  } else if (stale) {
+    // Say the true thing: this is not in progress, it is waiting for a runner that isn't there.
+    rows.push(h('div', { class: 'fc-job-stale' },
+      `Not running — ${job.status === 'queued' ? 'queued' : 'started'} ${fmtAge(jobAgeMs(job))} ago with no runner picking it up. `,
+      h('strong', {}, 'Nothing has been posted.'),
+      ' Start ', h('code', {}, '/flowlever:watch'), ' in Claude Code, or cancel below.'));
   } else if (job.status === 'error' && job.note) {
     rows.push(h('div', { class: 'fc-job-err' }, job.note));
   }
-  // Only a failed job is dismissible from the card (a running one can't be cancelled here).
-  const dismiss = job.status === 'error'
-    ? h('button', { class: 'btn-icon fc-job-dismiss', type: 'button', title: 'Dismiss this failed job',
-        'aria-label': 'Dismiss failed job',
-        onclick: async (e) => {
-          e.preventDefault(); e.stopPropagation();
-          try { await api(`/api/requests/${encodeURIComponent(job.id)}`, { method: 'DELETE' }); pollRequestsNow(); }
-          catch (err) { toast(`Dismiss failed: ${err.message}`); }
-        } }, '×')
-    : null;
-  return h('div', { class: `fc-job fc-job-${cssSafe(stateClass)}` }, h('div', { class: 'fc-job-body' }, rows), dismiss);
+  // A failed job is dismissible; a stale one is cancellable (which also releases the findings it
+  // stranded in the Posting…/Applying… lane). A genuinely-running job stays untouched.
+  let action = null;
+  if (stale) {
+    action = h('button', {
+      class: 'btn-icon fc-job-dismiss', type: 'button',
+      title: 'Cancel this job and put its findings back in the review queue',
+      'aria-label': 'Cancel stalled job',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); cancelStalledJob(job); },
+    }, '×');
+  } else if (job.status === 'error') {
+    action = h('button', {
+      class: 'btn-icon fc-job-dismiss', type: 'button', title: 'Dismiss this failed job',
+      'aria-label': 'Dismiss failed job',
+      onclick: async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        // A failed apply leaves findings stranded in the in-flight lane too — release them.
+        cancelStalledJob(job);
+      } }, '×');
+  }
+  return h('div', { class: `fc-job fc-job-${cssSafe(stateClass)}` }, h('div', { class: 'fc-job-body' }, rows), action);
+}
+
+/* Drop a job that will never finish and release whatever it stranded. For a post/apply that means
+ * clearing the findings' in-flight markers so they return to the review queue — otherwise the
+ * workspace is stuck reading "Posting…" with nothing on the PR. Nothing is claimed as posted. */
+async function cancelStalledJob(job) {
+  const isWrite = job.action === 'apply';
+  try {
+    if (isWrite && job.wsId) {
+      const res = await api(`/api/features/${encodeURIComponent(job.wsId)}/review/cancel`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId: job.id, reason: 'cancelled from the cockpit — job never ran' }),
+      });
+      toast(res.cancelled
+        ? `Cancelled — ${plural(res.cancelled, 'item', 'items')} back in the review queue. Nothing was posted.`
+        : 'Job cancelled. Nothing was posted.', 'success');
+    } else {
+      await api(`/api/requests/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
+      toast('Job cancelled', 'success');
+    }
+    if (current.view === 'detail' && current.id === job.wsId) {
+      await loadDetail(current.id, true);
+      rerenderDetail();
+    }
+    pollRequestsNow();
+  } catch (e) {
+    toast(`Could not cancel: ${e.message}`);
+  }
 }
 
 // The post-posting wait state on a settled card (no job running): a passive "Waiting on
 // author" line, or a highlighted "Author responded" once the runner detected a reply/commit.
 function cardReviewRow(f) {
-  if (f.authorResponded) {
+  const s = reviewStampsOf(f);
+  if (f.authorResponded || s.newSinceReview) {
+    // Name WHEN they responded (their real update time), not when we happened to notice.
+    const when = fmtAgo(s.lastActivityAt);
     return h('div', { class: 'fc-review fc-review-responded' },
       h('span', { class: 'fc-review-dot' }, '●'),
-      h('span', {}, 'Author responded', f.reviewNote ? h('span', { class: 'meta-dim' }, ` — ${f.reviewNote}`) : null,
+      h('span', {},
+        when ? `Author responded ${when}` : 'Author responded',
+        f.reviewNote ? h('span', { class: 'meta-dim' }, ` — ${f.reviewNote}`) : null,
         ' · re-review'));
   }
-  return h('div', { class: 'fc-review fc-review-waiting' }, '⏳ Waiting on author');
+  const since = fmtAgo(s.lastPostedAt);
+  return h('div', { class: 'fc-review fc-review-waiting' },
+    since ? `⏳ Waiting on author — posted ${since}` : '⏳ Waiting on author');
 }
 
 // A workspace doesn't exist yet (a first review still running): show a placeholder
@@ -2307,7 +2673,12 @@ function startPolling(scope, fn) {
     let reqs;
     try { reqs = await api('/api/requests'); } catch { return; /* transient — keep last view */ }
     if (token !== poller.token || !poller.fn) return;
+    // The runner's liveness rides the same tick: every surface that shows a job also wants to know
+    // whether anything is draining it, and one extra tiny GET beats a second interval.
+    await refreshRunner();
+    if (token !== poller.token || !poller.fn) return;
     poller.fn(Array.isArray(reqs) ? reqs : []);
+    renderRunnerZones();
   };
   tick();
   poller.timer = setInterval(tick, 4000);
@@ -2326,6 +2697,8 @@ function pollRequestsNow() {
 function requestTarget(r) {
   if (r.prId) return `PR ${r.prId}`;
   if (r.wsId) return r.wsId;
+  // A refresh (`poll`) has no single target — name the section it covers, or "all PRs".
+  if (r.action === 'poll') return r.kind ? kindMeta(r.kind).label : 'all PRs';
   return '';
 }
 
@@ -2339,6 +2712,7 @@ function requestRow(r) {
   const target = requestTarget(r);
   const linkable = r.status === 'done' && r.wsId;
   const needsInput = !!r.needsInput && (r.status === 'queued' || r.status === 'running');
+  const stale = isStaleJob(r);
   // While running, show the live phase next to the state, e.g. "Running · reviewing changes".
   const phaseText = r.status === 'running' && r.phase ? ` · ${r.phase}` : '';
   // The note doubles as the needs-input instruction; when the banner shows it, don't
@@ -2351,7 +2725,8 @@ function requestRow(r) {
       target ? h('span', { class: 'req-target num-line' }, target) : null,
       r.title ? h('span', { class: 'req-title' }, r.title) : null),
     h('div', { class: 'req-sub meta-dim' },
-      h('span', { class: `req-statetext req-state-${cssSafe(r.status)}` }, meta.label + phaseText),
+      h('span', { class: `req-statetext req-state-${cssSafe(stale ? 'stalled' : r.status)}` },
+        stale ? `Not running · ${meta.label.toLowerCase()} ${fmtAge(jobAgeMs(r))} ago` : meta.label + phaseText),
       showSubNote ? h('span', { class: 'req-note' }, ` — ${r.note}`) : null,
       linkable ? h('a', { class: 'req-open', href: `#/feature/${encodeURIComponent(r.wsId)}` }, 'open workspace →') : null),
     // The per-run scope/focus the runner will honor, shown as a small muted line.
@@ -2362,15 +2737,31 @@ function requestRow(r) {
           h('div', { class: 'req-ni-body' },
             h('span', { class: 'req-ni-label' }, 'Needs your input'),
             h('span', { class: 'req-ni-note' }, r.note || 'Waiting on you to continue.')))
+      : null,
+    // No runner is draining the queue — say so, rather than spinning indefinitely.
+    stale
+      ? h('div', { class: 'req-stalled' },
+          h('span', { class: 'req-stalled-icon', 'aria-hidden': 'true' }, '⏸'),
+          h('div', { class: 'req-stalled-body' },
+            h('span', { class: 'req-stalled-label' }, 'No runner picked this up'),
+            h('span', { class: 'req-stalled-note' },
+              r.action === 'apply'
+                ? 'Nothing has been posted. Start /flowlever:watch in Claude Code, or dismiss to put the items back in the review queue.'
+                : 'Start /flowlever:watch in Claude Code to run it, or dismiss it.')))
       : null);
-  const row = h('div', { class: `req-row req-${cssSafe(r.status)} ${needsInput ? 'req-needs' : ''}`.trim() },
-    h('span', { class: `req-glyph req-glyph-${cssSafe(r.status)} ${meta.spin ? 'req-spin' : ''}`.trim(),
-      'aria-label': meta.label }, meta.glyph),
+  const row = h('div', { class: `req-row req-${cssSafe(r.status)} ${needsInput ? 'req-needs' : ''} ${stale ? 'req-stale' : ''}`.trim() },
+    h('span', { class: `req-glyph req-glyph-${cssSafe(stale ? 'stalled' : r.status)} ${meta.spin && !stale ? 'req-spin' : ''}`.trim(),
+      'aria-label': stale ? 'not running' : meta.label }, stale ? '⏸' : meta.glyph),
     main,
     h('button', {
       class: 'btn-icon req-dismiss', type: 'button',
-      'aria-label': 'Dismiss job', title: 'Dismiss this job',
+      'aria-label': 'Dismiss job', title: stale || r.status === 'error'
+        ? 'Dismiss this job (its items go back to the review queue)'
+        : 'Dismiss this job',
       onclick: async () => {
+        // Dismissing a post/apply must also release the findings it stranded in the in-flight
+        // lane, or the workspace keeps reading "Posting…" with no job behind it.
+        if (r.action === 'apply' && r.wsId) { await cancelStalledJob(r); return; }
         try {
           await api(`/api/requests/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
           row.remove();
@@ -2399,7 +2790,11 @@ function requestsLegend() {
       h('span', { class: 'reqleg-item' },
         h('span', { class: 'reqleg-glyph reqleg-ni' }, '⚠'),
         h('span', { class: 'reqleg-label' }, 'Needs your input'),
-        h('span', { class: 'reqleg-desc' }, 'blocked on you — e.g. approve a 2FA/auth prompt'))));
+        h('span', { class: 'reqleg-desc' }, 'blocked on you — e.g. approve a 2FA/auth prompt')),
+      h('span', { class: 'reqleg-item' },
+        h('span', { class: 'reqleg-glyph req-glyph-stalled' }, '⏸'),
+        h('span', { class: 'reqleg-label' }, 'Not running'),
+        h('span', { class: 'reqleg-desc' }, 'queued but no runner picked it up — start /flowlever:watch'))));
 }
 
 function requestsStripEl(requests, emptyText) {
@@ -2422,6 +2817,203 @@ function populateRequestsStrip(strip, requests, emptyText) {
       h('span', { class: 'f-suglabel' }, plural(requests.length, 'job', 'jobs')),
       requestsLegend()),
     h('div', { class: 'requests-list' }, ordered.map(requestRow)));
+}
+
+/* ---- runner control (the "▶ Run queued jobs" button) ------------------------
+ * A queued job only moves when a Claude Code session runs /flowlever:watch. The cockpit server is
+ * a local process, so it can start that session for us — which is the difference between "your
+ * Post is queued forever" and "your Post happens now". `state.runner` is the last known status;
+ * the shared requests poller refreshes it, so every surface agrees. */
+function runnerStatus() { return state.runner || null; }
+function runnerBusy() { const r = runnerStatus(); return !!r && r.running; }
+
+async function refreshRunner(withLog = false) {
+  try {
+    state.runner = await api(`/api/runner${withLog ? '?log=1' : ''}`);
+  } catch { /* server hiccup — keep the last known status */ }
+  return state.runner;
+}
+
+/* Jobs the runner would actually pick up right now. Drives the button's count + whether it shows:
+ * offering "run 0 jobs" is noise, and hiding it while work is stuck is the bug we're fixing. */
+function queuedJobs(reqs) {
+  return (reqs || []).filter((r) => r.status === 'queued' || r.status === 'running');
+}
+
+/* Start the runner. `action` is 'watch' (drain what's queued) or 'poll' (discover, then drain). */
+async function startRunner(action = 'watch', { silent = false } = {}) {
+  try {
+    state.runner = await api('/api/runner', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!silent) {
+      toast(action === 'poll'
+        ? 'Runner started — discovering PRs, then draining the queue'
+        : 'Runner started — working through the queued jobs now', 'success');
+    }
+    pollRequestsNow();
+    renderRunnerZones();
+  } catch (e) {
+    // 503 = no `claude` binary; 409 = already going. Both are worth saying plainly.
+    toast(`Could not start the runner: ${e.message}`);
+    await refreshRunner();
+    renderRunnerZones();
+  }
+}
+
+async function stopRunner() {
+  try {
+    state.runner = await api('/api/runner', { method: 'DELETE' });
+    toast('Runner stopped', 'success');
+  } catch (e) {
+    toast(`Could not stop the runner: ${e.message}`);
+  }
+  renderRunnerZones();
+}
+
+/* Re-render every runner control currently on the page (there may be one in the section header and
+ * one inside a stalled banner). Cheap: they're tiny and keyed by class. */
+function renderRunnerZones() {
+  document.querySelectorAll('.runner-zone').forEach((zone) => {
+    renderRunnerZone(zone, Number(zone.dataset.queued || 0), zone.dataset.label || '');
+  });
+}
+
+/* `label` overrides the "Run N jobs" wording — used where the count would mislead (the stalled
+ * banner talks about one job, but the runner always drains the whole queue). */
+function runnerZone(queuedCount, label = '') {
+  const zone = h('div', { class: 'runner-zone', dataset: { queued: String(queuedCount || 0), label } });
+  renderRunnerZone(zone, queuedCount, label);
+  return zone;
+}
+
+/* The button, in four honest states: running (with a stop), idle-with-work ("Run N jobs"),
+ * unavailable (say why — a missing CLI must not look like a broken button), idle-with-nothing
+ * (render nothing at all). */
+function renderRunnerZone(zone, queuedCount, label = '') {
+  if (!zone) return;
+  const r = runnerStatus();
+  zone.dataset.queued = String(queuedCount || 0);
+  if (label) zone.dataset.label = label;
+  if (!r) { zone.replaceChildren(); return; }
+
+  if (r.running) {
+    zone.replaceChildren(
+      h('span', { class: 'runner-live', title: `Started ${fmtDateTime(r.startedAt) || 'just now'} · pid ${r.pid}` },
+        h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+        'Runner working…'),
+      h('button', {
+        class: 'btn btn-runner-stop', type: 'button',
+        title: 'Stop the runner (it finishes the write it is in the middle of)',
+        onclick: stopRunner,
+      }, '■ Stop'));
+    return;
+  }
+  if (!queuedCount) { zone.replaceChildren(); return; }
+  if (!r.available) {
+    zone.replaceChildren(h('span', { class: 'runner-unavailable', title: r.reason || '' },
+      '⚠ Can’t start the runner from here — ', h('code', {}, '/flowlever:watch'), ' in Claude Code instead'));
+    return;
+  }
+  // Two-click confirm: this posts to real pull requests. The user already approved the content when
+  // they clicked Post; this confirms they want it to go out NOW.
+  const showConfirm = () => zone.replaceChildren(
+    h('span', { class: 'runner-confirm-msg' },
+      'Run the queued jobs now? Approved comments get posted to Azure DevOps.'),
+    h('button', { class: 'btn btn-accent', type: 'button', onclick: () => startRunner('watch') }, '▶ Run now'),
+    h('button', { class: 'btn', type: 'button', onclick: () => renderRunnerZone(zone, queuedCount, label) }, 'Cancel'));
+  zone.replaceChildren(h('button', {
+    class: 'btn btn-runner', type: 'button',
+    title: 'Start a headless /flowlever:watch session that works through the queued jobs now',
+    onclick: showConfirm,
+  }, label
+    ? label
+    : ['▶ Run ', h('span', { class: 'runner-n' }, String(queuedCount)), queuedCount === 1 ? ' job' : ' jobs']));
+}
+
+/* ---- manual refresh (the "↻ Refresh" button) --------------------------------
+ * The scheduled /flowlever:poll pass runs every couple of hours. When you already KNOW a new
+ * PR landed or a reviewer just commented, this enqueues a `poll` request so the runner does a
+ * discovery pass NOW: find PRs you haven't got a workspace for, and re-check the known ones for
+ * counterpart updates (which is what stamps `review.lastActivityAt`). Read-only — like the
+ * scheduled pass it never posts to a PR. */
+/* `kind` null = refresh BOTH PR sections (used on Home); otherwise scoped to one. */
+function refreshZone(kind) {
+  const zone = h('div', { class: 'refresh-zone', id: 'refresh-zone' });
+  renderRefreshZone(zone, kind, null);
+  return zone;
+}
+
+function refreshScopeLabel(kind) {
+  return kind ? kindMeta(kind).label : 'PR review + PR respond';
+}
+
+/* Reflects the live `poll` job so the button itself is the progress indicator:
+ * idle → "↻ Refresh", queued/running → spinner + live phase, error → the reason + retry. */
+function renderRefreshZone(zone, kind, job) {
+  if (!zone) return;
+  const label = refreshScopeLabel(kind);
+  const busy = !!job && (job.status === 'queued' || job.status === 'running');
+  const failed = !!job && job.status === 'error';
+  const btn = h('button', {
+    class: `btn btn-refresh ${busy ? 'is-busy' : ''} ${failed ? 'is-error' : ''}`.trim(),
+    type: 'button',
+    disabled: busy || undefined,
+    title: busy
+      ? 'A refresh pass is already in flight'
+      : `Check Azure DevOps now for new ${label} PRs and updated comments — instead of waiting for the scheduled poll`,
+    onclick: () => enqueueRefresh(kind),
+  }, busy
+    ? [h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+       job.status === 'queued' ? 'Refresh queued…' : (job.phase || 'Checking…')]
+    : (failed ? '↻ Retry refresh' : '↻ Refresh'));
+  const kids = [btn];
+  if (busy && job.needsInput) {
+    kids.push(h('span', { class: 'refresh-note refresh-needs', role: 'alert' },
+      '⚠ ', job.note || 'Waiting on you — approve the auth prompt in your other window.'));
+  } else if (failed && job.note) {
+    kids.push(h('span', { class: 'refresh-note refresh-err' }, job.note));
+  }
+  zone.replaceChildren(...kids);
+}
+
+/* Which `poll` job the Refresh button reflects. In-flight beats failed on purpose: after a retry
+ * the button must read "queued…", not keep showing the old error (which is what ranking by
+ * urgency would do). Newest wins within each group. */
+function pickPollJob(reqs, kind) {
+  const mine = (reqs || []).filter((r) => r.action === 'poll' && (!r.kind || r.kind === kind || !kind));
+  const newest = (list) => list.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] || null;
+  return newest(mine.filter((r) => r.status === 'queued' || r.status === 'running'))
+      || newest(mine.filter((r) => r.status === 'error'));
+}
+
+async function enqueueRefresh(kind) {
+  const label = refreshScopeLabel(kind);
+  try {
+    const res = await api('/api/requests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // dedupe: a double-click (or a pass already in flight for this scope) must not fan out
+      // two runs. `kind: null` is an explicit "both sections" scope, not "any scope".
+      body: JSON.stringify({ action: 'poll', kind: kind || null, dedupe: true, title: `Refresh ${label}` }),
+    });
+    // A refresh only does something once a runner picks it up. If none is going, start one right
+    // away instead of quietly queueing work nobody will do — the button says "Refresh", so refresh.
+    const r = await refreshRunner();
+    if (r && r.available && !r.running) {
+      await startRunner('poll', { silent: true });
+      toast('Refreshing — the runner is checking ADO for new and updated PRs', 'success');
+    } else {
+      toast(res && res.deduped
+        ? 'A refresh is already in flight'
+        : (r && r.running
+          ? 'Refresh queued — the running session will pick it up'
+          : 'Refresh queued — run /flowlever:watch in Claude Code to execute it'), 'success');
+    }
+    pollRequestsNow();
+  } catch (e) {
+    toast(`Could not queue the refresh: ${e.message}`);
+  }
 }
 
 /* The "+ New PR review/respond" entry: a button that swaps in an inline form
@@ -2603,7 +3195,11 @@ function ensureFeatureJobPolling(id) {
     const mine = (reqs || []).filter((r) => (r.action === 'propose' || r.action === 'apply') && r.wsId === id);
     const latest = mine.length
       ? [...mine].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] : null;
-    const sig = latest ? `${latest.id}:${latest.status}:${latest.phase || ''}:${latest.needsInput ? 1 : 0}` : '';
+    // Staleness rides in the signature: it flips with the passage of time, not with a server
+    // change, so without it the banner would keep claiming "queued…" long after the job died.
+    const sig = latest
+      ? `${latest.id}:${latest.status}:${latest.phase || ''}:${latest.needsInput ? 1 : 0}:${isStaleJob(latest) ? 1 : 0}`
+      : '';
     if (sig === (state.featureJobSig || '')) return;        // nothing changed
     const prev = state.featureJob;
     state.featureJob = latest; state.featureJobSig = sig;
@@ -2614,40 +3210,125 @@ function ensureFeatureJobPolling(id) {
   });
 }
 
-/* The live banner above the board: what the runner is doing for this workspace right now. */
+/* The live banner above the board: what the runner is doing for this workspace right now — and,
+ * just as important, when it is NOT doing anything. Wording is kind-aware ("Posting" for a PR,
+ * "Applying" for a spec) because the verb is what the user checks against the real PR. */
 function specJobBanner(data) {
-  const j = state.featureJob;
   const fid = data.feature && data.feature.id;
-  if (!j || j.wsId !== fid) return null;
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  const isPr = kind === 'pr-review' || kind === 'pr-respond';
+  const writeVerb = isPr ? 'Posting' : 'Applying';
+  const j = state.featureJob && state.featureJob.wsId === fid ? state.featureJob : null;
+  const pending = ((data.ledger && data.ledger.findings) || []).filter(isPending);
+
+  // No job for this workspace, yet findings still sit in the in-flight lane: the job was dropped
+  // (or never existed) and nothing will ever stamp them. This is the state that silently reads as
+  // "Posting…" forever, so it gets the loudest, most explicit treatment.
+  if (!j && pending.length) {
+    return h('div', { class: 'apply-status apply-stalled feat-job' },
+      h('span', { class: 'apply-dot' }, '⏸'),
+      h('div', { class: 'apply-stalled-body' },
+        h('span', {}, `${plural(pending.length, 'item', 'items')} marked “${writeVerb}…” but no job is running — `,
+          h('strong', {}, isPr ? 'nothing has been posted' : 'nothing has been written'), '.'),
+        h('span', { class: 'meta-dim' },
+          'Put them back in the review queue, then Post again with ', h('code', {}, '/flowlever:watch'), ' running.')),
+      h('button', {
+        class: 'btn btn-cancel-pending', type: 'button',
+        onclick: () => cancelPendingHere(fid, isPr),
+      }, '↩ Back to the review queue'));
+  }
+  if (!j) return null;
+
   const isPropose = j.action === 'propose';
   if (j.needsInput) {
     return h('div', { class: 'apply-status apply-needs-input feat-job' },
       h('span', { class: 'apply-dot' }, '⚠'),
       h('span', {}, j.note || 'Waiting on you — approve the auth prompt in your other window.'));
   }
+  // Queued/running but untouched for too long: no runner is draining the queue. Never keep
+  // spinning here — a spinner on a job nobody is running is exactly what made a Post look done.
+  if (isStaleJob(j)) {
+    // This is where the user actually notices the problem, so put the fix right here: one click to
+    // run the job now, or one to take the items back.
+    return h('div', { class: 'apply-status apply-stalled feat-job' },
+      h('span', { class: 'apply-dot' }, '⏸'),
+      h('div', { class: 'apply-stalled-body' },
+        h('span', {}, `${isPropose ? 'Drafting proposals' : writeVerb} — ${j.status} ${fmtAge(jobAgeMs(j))} ago and no runner picked it up. `,
+          h('strong', {}, isPr ? 'Nothing has been posted' : 'Nothing has been written'), '.'),
+        h('span', { class: 'meta-dim' },
+          'Run it now, or cancel to put the items back in the review queue.')),
+      h('div', { class: 'apply-stalled-actions' },
+        runnerZone(1, '▶ Run it now'),
+        h('button', {
+          class: 'btn btn-cancel-pending', type: 'button',
+          onclick: () => cancelStalledJob(j),
+        }, '✕ Cancel job')));
+  }
   if (j.status === 'queued') {
+    // Queued with a live runner = genuinely waiting its turn. Queued with nothing running = it needs
+    // one click, offered right here rather than making the user wait out the staleness timeout.
+    const idle = !runnerBusy();
     return h('div', { class: 'apply-status apply-running feat-job' },
-      h('span', { class: 'spinner', 'aria-hidden': 'true' }),
-      h('span', {}, isPropose ? 'Drafting proposals — queued for the runner…' : 'Applying — queued for the runner…'));
+      idle ? h('span', { class: 'apply-dot' }, '⏳') : h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, isPropose
+        ? `Drafting proposals — queued${idle ? ', nothing running it yet' : ' for the runner…'}`
+        : `${writeVerb} — queued${idle ? ', nothing running it yet' : ' for the runner…'}`),
+      idle ? runnerZone(1, '▶ Run it now') : null);
   }
   if (j.status === 'running') {
     return h('div', { class: 'apply-status apply-running feat-job' },
       h('span', { class: 'spinner', 'aria-hidden': 'true' }),
-      h('span', {}, isPropose ? `Drafting proposals${j.phase ? ` — ${j.phase}` : '…'}` : `Applying${j.phase ? ` — ${j.phase}` : '…'}`));
+      h('span', {}, isPropose ? `Drafting proposals${j.phase ? ` — ${j.phase}` : '…'}` : `${writeVerb}${j.phase ? ` — ${j.phase}` : '…'}`));
   }
   if (j.status === 'done') {
+    // "done" is the runner's word, not proof of a stamp: if items are still pending after the job
+    // finished, the write did not complete for them — say that instead of implying success.
+    if (!isPropose && pending.length) {
+      return h('div', { class: 'apply-status apply-error feat-job' },
+        h('span', { class: 'apply-dot' }, '⚠'),
+        h('div', { class: 'apply-stalled-body' },
+          h('span', {}, `The job finished but ${plural(pending.length, 'item is', 'items are')} still marked “${writeVerb}…” — `,
+            h('strong', {}, isPr ? 'those comments were not confirmed as posted' : 'those edits were not confirmed as written'), '.'),
+          h('span', { class: 'meta-dim' }, 'Check the PR, then put them back in the queue and retry if they are missing.')),
+        h('button', {
+          class: 'btn btn-cancel-pending', type: 'button',
+          onclick: () => cancelPendingHere(fid, isPr),
+        }, '↩ Back to the review queue'));
+    }
     return h('div', { class: 'apply-status apply-done feat-job' },
       h('span', { class: 'apply-dot' }, '✓'),
       h('span', {}, isPropose
         ? 'Proposals ready — open a finding with a ± to review the red/green diff, then Apply.'
-        : 'Applied — re-audit (↻) to confirm the changes landed.'));
+        : (isPr ? 'Posted — the comments are on the PR.' : 'Applied — re-audit (↻) to confirm the changes landed.')));
   }
   if (j.status === 'error') {
     return h('div', { class: 'apply-status apply-error feat-job' },
       h('span', { class: 'apply-dot' }, '⚠'),
-      h('span', {}, `${isPropose ? 'Drafting' : 'Apply'} failed: ${j.note || 'see the Claude session'}`));
+      h('div', { class: 'apply-stalled-body' },
+        h('span', {}, `${isPropose ? 'Drafting' : writeVerb} failed: ${j.note || 'see the Claude session'}`),
+        pending.length ? h('span', { class: 'meta-dim' },
+          `${plural(pending.length, 'item is', 'items are')} still marked “${writeVerb}…” — put them back in the queue to retry.`) : null),
+      pending.length ? h('button', {
+        class: 'btn btn-cancel-pending', type: 'button',
+        onclick: () => cancelPendingHere(fid, isPr),
+      }, '↩ Back to the review queue') : null);
   }
   return null;
+}
+
+/* Release this workspace's in-flight markers (no job to drop — just the stranded findings). */
+async function cancelPendingHere(wsId, isPr) {
+  try {
+    const res = await api(`/api/features/${encodeURIComponent(wsId)}/review/cancel`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'released from the cockpit — write never confirmed' }),
+    });
+    toast(`${plural(res.cancelled, 'item', 'items')} back in the review queue — ${isPr ? 'nothing was posted' : 'nothing was written'}.`, 'success');
+    await loadDetail(wsId, true);
+    rerenderDetail();
+  } catch (e) {
+    toast(`Could not release: ${e.message}`);
+  }
 }
 
 function detailSkeleton() {
@@ -2740,6 +3421,9 @@ function detailView(data, tab) {
       ),
     ),
     loopStrip(data, reviewCta(data)),
+    // When we reviewed vs. when the PR last changed — the re-review decision, in one line.
+    reviewStampsRow(data, kind),
+    unbackedFixBanner(data),
     specJobBanner(data),
     reviewScopeNote(feature),
     sourcesStrip(feature),
@@ -2760,6 +3444,48 @@ function tabContent(data, tab) {
     case 'timeline': return timelineView(data);
     case 'report':   return reportView();
     default:         return findingsView(data);
+  }
+}
+
+/* Loud, unmissable banner for the one state that must never pass silently: a finding closed as
+ * handled whose agreed code change has no commit behind it. That means the reviewer was told their
+ * point was addressed while the branch never changed — they will re-raise it, and rightly. Offers to
+ * reopen them all so the fix can actually be made. */
+function unbackedFixBanner(data) {
+  const findings = (data.ledger && data.ledger.findings) || [];
+  const bad = findings.filter((f) => isAgreedCodeFix(f) && !(f.fixCommit && f.fixCommit.sha)
+    && (isPosted(f) || f.status === 'resolved'));
+  if (!bad.length) return null;
+  return h('div', { class: 'apply-status unbacked-fix' },
+    h('span', { class: 'apply-dot' }, '⚠'),
+    h('div', { class: 'apply-stalled-body' },
+      h('span', {},
+        `${plural(bad.length, 'agreed code fix is', 'agreed code fixes are')} closed as handled but `,
+        h('strong', {}, 'no commit carries the change'), ' — the branch does not contain them.'),
+      h('span', { class: 'meta-dim' },
+        'The reviewer was told this was addressed. Reopen to make the fix for real: ',
+        bad.map((f) => f.draft && f.draft.target).filter(Boolean).join(' · ') || bad.map((f) => f.locus).join(' · ')),
+    ),
+    h('button', {
+      class: 'btn btn-cancel-pending', type: 'button',
+      title: 'Set these back to open so the fix can actually be applied and pushed',
+      onclick: () => reopenUnbackedFixes(bad.map((f) => f.fp)),
+    }, `↩ Reopen ${bad.length}`));
+}
+
+async function reopenUnbackedFixes(fps) {
+  try {
+    for (const fp of fps) {
+      await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'open', reason: 'reopened — closed as fixed but no commit carries the change' }),
+      });
+    }
+    await loadDetail(current.id, true);
+    rerenderDetail();
+    toast(`${plural(fps.length, 'finding', 'findings')} reopened — the fix still needs to be pushed`, 'success');
+  } catch (e) {
+    toast(`Could not reopen: ${e.message}`);
   }
 }
 
@@ -3827,6 +4553,7 @@ function findingCard(f) {
         ? h('span', { class: 'f-review-chip', title: 'A proposed change is ready — open to review' }, '± review')
         : (f.draft ? h('span', { class: 'f-draft-chip', title: 'Has a proposed change' }, '±') : null),
       decisionChip(f),
+      fixCommitChip(f),
       verdictChip(f),
       f.locus ? h('code', { class: 'f-locus' }, f.locus) : null,
     ),
@@ -3856,6 +4583,40 @@ function decisionChip(f) {
   if (isPosted(f) || f.status === 'waived') return null;
   if (f.decision === 'approve') return h('span', { class: 'f-dec-chip dec-accept', title: 'Approved — will post' }, 'Will post');
   if (f.decision === 'edit') return h('span', { class: 'f-dec-chip dec-edit', title: 'Edited — will post' }, 'Edited');
+  if (f.decision === 'fix-only') return h('span', { class: 'f-dec-chip dec-fixonly', title: 'Fix will be pushed; no reply will be posted' }, 'Fix, no reply');
+  return null;
+}
+
+/* Does this finding owe a code change? Mirrors ledger.isAgreedCodeFix — a before→after draft that
+ * actually changes something and was signed off, either finding-level or hunk-by-hunk. */
+function isAgreedCodeFix(f) {
+  const d = f.draft;
+  if (!d || typeof d.after !== 'string' || d.after === d.before) return false;
+  const rv = d.review || {};
+  if (rv.verdict === 'redirect' || rv.verdict === 'reject') return false;
+  if (f.decision === 'edit' || f.decision === 'fix-only') return true;
+  return Object.values(rv.hunks || {}).some((h) => h && (h.status === 'accepted' || h.status === 'edited'));
+}
+
+/* The proof, or the absence of it. A fix that landed shows its commit; a fix claimed done with NO
+ * commit behind it gets a loud red chip — that combination means the reviewer was told their point
+ * was handled while the branch never changed, which is the failure this whole gate exists to stop.
+ * Legacy findings stamped before the gate existed surface here too, which is intended. */
+function fixCommitChip(f) {
+  const owed = isAgreedCodeFix(f);
+  const sha = f.fixCommit && f.fixCommit.sha;
+  if (sha) {
+    return h('span', {
+      class: 'f-fix-chip',
+      title: `Fix pushed in ${sha}${f.fixCommit.branch ? ` on ${f.fixCommit.branch}` : ''}${f.fixCommit.repo ? ` (${f.fixCommit.repo})` : ''}`,
+    }, `✔ fix ${sha.slice(0, 8)}`);
+  }
+  if (owed && (isPosted(f) || f.status === 'resolved')) {
+    return h('span', {
+      class: 'f-fix-chip f-fix-missing',
+      title: 'This was closed as handled but no commit carries the change — the branch does not contain the fix. Reopen it and redo the fix.',
+    }, '⚠ fix not pushed');
+  }
   return null;
 }
 
@@ -4390,5 +5151,45 @@ document.addEventListener('keydown', (e) => {
 
 /* ============================== boot ============================== */
 
+/* Compare the running server's API version against what this page was built for, and say so loudly
+ * if they differ. A 404 on /api/version means the server predates the check entirely — which is
+ * itself conclusive evidence it's stale. */
+async function checkServerVersion() {
+  let got = null;
+  try {
+    const res = await fetch('/api/version');
+    if (res.ok) {
+      const body = await res.json();
+      got = body && body.apiVersion;
+      if (String(got) === EXPECTED_API_VERSION) return;   // in sync — nothing to say
+    } else if (res.status !== 404) {
+      return;   // some other transient failure; don't cry wolf
+    }
+  } catch {
+    return;     // server down / offline — the views surface that on their own
+  }
+  showStaleServerBanner(got);
+}
+
+function showStaleServerBanner(got) {
+  if ($('#stale-server')) return;
+  const bar = h('div', { class: 'stale-server', id: 'stale-server', role: 'alert' },
+    h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
+    h('div', { class: 'stale-server-body' },
+      h('strong', {}, 'The cockpit server is running an older build than this page.'),
+      h('span', {}, ' Actions can fail with a bare “Not found” because the server has never heard of ',
+        'the routes this page calls. Restart it: ', h('code', {}, 'node src/cli.js start'),
+        got ? ` (server API v${got}, page expects v${EXPECTED_API_VERSION})` : ' (server predates the version check)')),
+    h('button', {
+      class: 'btn-icon stale-server-dismiss', type: 'button', 'aria-label': 'Dismiss',
+      title: 'Dismiss (the mismatch remains)', onclick: () => bar.remove(),
+    }, '×'));
+  document.body.prepend(bar);
+}
+
 window.addEventListener('hashchange', route);
+// Know whether a runner is going before the first paint settles, so the Run button doesn't pop in
+// a tick later (the shared poller keeps it fresh from then on).
+refreshRunner().then(renderRunnerZones).catch(() => {});
+checkServerVersion();
 route();

@@ -7,9 +7,13 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const ledger = require('./ledger');
+const runner = require('./runner');
+const { API_VERSION } = require('./version');
 const { generateReport } = require('./report');
 
 const PORT = process.env.PORT !== undefined && process.env.PORT !== '' ? Number(process.env.PORT) : 4173;
+// When this process started — shown next to the version so "restart the server" is verifiable.
+const SERVER_STARTED_AT = new Date().toISOString();
 const WEB_DIR = path.resolve(__dirname, '..', 'web');
 const BODY_LIMIT = 2 * 1024 * 1024; // 2MB
 const CONTENT_TYPES = {
@@ -120,6 +124,9 @@ function handleFeatureList(res, kindFilter) {
       awaitingAuthor,                                          // has posted, unaddressed comments
       authorResponded: !!(f.review && f.review.authorRespondedAt),
       reviewNote: (f.review && f.review.note) || null,
+      // When we last reviewed vs. when the PR was last touched by the other side — so a card
+      // can say "reviewed 3h ago · PR updated 20m ago" and flag that a re-review is worthwhile.
+      stamps: ledger.reviewStamps(f, lastRoundAt),
     };
   });
   sendJson(res, 200, summaries);
@@ -146,9 +153,16 @@ function handleHome(res) {
       const r = ledger.readiness(f.id);
       readiness = { score: r.score, gate: r.gate };
     } catch { /* feature without ledger yet */ }
+    let lastRoundAt = null;
+    try {
+      const rounds = (ledger.loadRounds(f.id).rounds) || [];
+      if (rounds.length) lastRoundAt = rounds[rounds.length - 1].at;
+    } catch { /* no rounds yet */ }
     return {
       id: f.id, title: f.title, kind: f.kind || 'spec', status: f.status, readiness, counts,
       authorResponded: !!(f.review && f.review.authorRespondedAt),
+      lastRoundAt,
+      stamps: ledger.reviewStamps(f, lastRoundAt),
     };
   });
   rows.sort((a, b) =>
@@ -186,6 +200,8 @@ async function handleFeatureStatus(req, res, id) {
 
 // The "waiting on author" tracker. The /flowlever:watch runner POSTs here when it detects new
 // author activity on the PR (authorResponded:true + a note), or the UI clears it on re-review.
+// `lastActivityAt`/`lastActivityBy` carry the REAL time (and author) of the newest counterpart
+// update on the PR, as opposed to `at`/authorRespondedAt which is when we noticed it.
 async function handleFeatureActivity(req, res, id) {
   const body = await readJsonBody(req);
   const patch = {};
@@ -195,8 +211,15 @@ async function handleFeatureActivity(req, res, id) {
   }
   if (body.note !== undefined) patch.note = body.note;
   if (body.lastPostedAt !== undefined) patch.lastPostedAt = body.lastPostedAt;
+  if (body.lastActivityAt !== undefined) {
+    if (body.lastActivityAt !== null && Number.isNaN(Date.parse(body.lastActivityAt))) {
+      return sendError(res, 400, 'lastActivityAt must be an ISO-8601 timestamp or null');
+    }
+    patch.lastActivityAt = body.lastActivityAt;
+  }
+  if (body.lastActivityBy !== undefined) patch.lastActivityBy = body.lastActivityBy;
   if (Object.keys(patch).length === 0) {
-    return sendError(res, 400, 'Body must include authorResponded, note and/or lastPostedAt');
+    return sendError(res, 400, 'Body must include authorResponded, note, lastPostedAt, lastActivityAt and/or lastActivityBy');
   }
   try {
     const feature = ledger.setFeatureReview(id, patch);
@@ -214,7 +237,7 @@ async function handleFindingUpdate(req, res, id, fp) {
   if (body.suggestion !== undefined) {
     finding = ledger.setFindingDetails(id, fp, { suggestion: body.suggestion, by: 'user' });
   }
-  // The reviewer's triage decision (approve/edit, or null to undo) — persisted so the board,
+  // The reviewer's triage decision (approve/edit/fix-only, or null to undo) — persisted so the board,
   // stepper and Post screen agree and survive a refresh. A status change (below) clears it.
   if (body.decision !== undefined) {
     finding = ledger.setFindingDecision(id, fp, body.decision, { by: 'user' });
@@ -319,11 +342,48 @@ async function handleReviewApply(req, res, id) {
 
   const uniq = [...new Set(fps)];
   let findings;
-  if (status === 'posted') findings = ledger.markPosted(id, uniq, { by: 'user' });
+  // `posted` carries the fix gate: for a finding whose agreed response is a code change the ledger
+  // refuses the stamp without the pushed commit's sha (→ EUSER → 400). The browser never sends this
+  // status for code fixes (it sends `pending-post` and lets the runner do the real work), so a 400
+  // here means something tried to claim a fix it did not push.
+  if (status === 'posted') findings = ledger.markPosted(id, uniq, { by: 'user', sha: body.sha, repo: body.repo, branch: body.branch });
   else if (status === 'pending-post') findings = ledger.setFindingPending(id, uniq, 'post', { by: 'user' });
   else if (status === 'pending-apply') findings = ledger.setFindingPending(id, uniq, 'apply', { by: 'user' });
   else findings = uniq.map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user' }));
   sendJson(res, 200, { updated: findings.length, status, findings });
+}
+
+// Cancel a stuck Post/Apply: clear the in-flight markers so the findings return to the review
+// queue, and (optionally) drop the dead request that never ran. This is the escape hatch for the
+// one state the cockpit couldn't previously leave — the runner never picked the job up (or died
+// mid-flight), so the findings sat in "Posting…/Applying…" forever, out of the review queue and
+// never stamped. Body: { fps?: [...] (default: every pending finding), requestId?: <req to drop> }.
+// NOT a claim that anything was written — findings already stamped postedAt/appliedAt are untouched.
+async function handleReviewCancel(req, res, id) {
+  const body = await readJsonBody(req);
+  const existing = ledger.loadLedger(id).findings || [];
+  let fps;
+  if (body.fps === undefined) {
+    fps = ledger.pendingFindings(id).map((f) => f.fp);
+  } else {
+    if (!Array.isArray(body.fps) || !body.fps.every((x) => typeof x === 'string' && x.trim())) {
+      return sendError(res, 400, 'fps must be an array of finding ids when provided');
+    }
+    const known = new Set(existing.map((f) => f.fp));
+    const missing = [...new Set(body.fps)].filter((fp) => !known.has(fp));
+    if (missing.length) return sendError(res, 400, `unknown finding(s): ${missing.join(', ')}`);
+    fps = body.fps;
+  }
+  const findings = fps.length
+    ? ledger.clearFindingPending(id, fps, { by: 'user', reason: body.reason })
+    : [];
+  // Dropping the request is best-effort: an already-deleted job must not fail the cancel, since
+  // clearing the markers is the part that unsticks the workspace.
+  let requestDeleted = false;
+  if (typeof body.requestId === 'string' && body.requestId.trim()) {
+    try { ledger.deleteRequest(body.requestId.trim()); requestDeleted = true; } catch { /* already gone */ }
+  }
+  sendJson(res, 200, { cancelled: findings.length, requestDeleted, findings });
 }
 
 async function handleIngest(req, res, id) {
@@ -345,12 +405,24 @@ async function handleIngest(req, res, id) {
 
 // ---------- requests (UI-triggered job queue) ----------
 
+// `dedupe` (used by the manual "↻ Refresh") reports the already queued/running job for the same
+// action + target instead of stacking a second one — a double-click can't fan out two passes.
 async function handleRequestCreate(req, res) {
   const body = await readJsonBody(req);
+  if (body.dedupe) {
+    const existing = ledger.listRequests({}).find((r) =>
+      (r.status === 'queued' || r.status === 'running')
+      && r.action === body.action
+      && (body.prId === undefined || String(r.prId) === String(body.prId))
+      && (body.wsId === undefined || String(r.wsId) === String(body.wsId))
+      && (body.kind === undefined || (r.kind || null) === (body.kind || null)));
+    if (existing) return sendJson(res, 200, { ...existing, deduped: true });
+  }
   const request = ledger.addRequest({
     action: body.action,
     prId: body.prId,
     wsId: body.wsId,
+    kind: body.kind,
     title: body.title,
     instructions: body.instructions,
   });
@@ -376,6 +448,35 @@ async function handleRequestUpdate(req, res, id) {
   }
   const request = ledger.setRequestStatus(id, change);
   sendJson(res, 200, request);
+}
+
+// ---------- runner control (start the session that drains the queue) ----------
+
+// The queue only moves when a Claude Code session runs /flowlever:watch. These let the cockpit
+// launch that session itself, so a queued Post isn't stuck waiting for the user to remember.
+// The runner posts to Azure DevOps — which is why it only ever runs one of the fixed prompts in
+// runner.ACTIONS, never anything derived from the request body.
+function handleRunnerGet(res, wantLog) {
+  const body = runner.status();
+  if (wantLog) body.log = runner.tailLog();
+  sendJson(res, 200, body);
+}
+
+const RUNNER_ERROR_STATUS = { EACTION: 400, EBUSY: 409, ENOBIN: 503, ESPAWN: 500, EIDLE: 409, EKILL: 500 };
+
+async function handleRunnerStart(req, res) {
+  const body = await readJsonBody(req);
+  const action = body.action === undefined ? 'watch' : body.action;
+  if (typeof action !== 'string') return sendError(res, 400, 'action must be a string');
+  const result = runner.start(action);
+  if (!result.ok) return sendJson(res, RUNNER_ERROR_STATUS[result.code] || 500, { error: result.error, status: result.status });
+  sendJson(res, 202, result.status);
+}
+
+function handleRunnerStop(res) {
+  const result = runner.stop();
+  if (!result.ok) return sendJson(res, RUNNER_ERROR_STATUS[result.code] || 500, { error: result.error });
+  sendJson(res, 200, result.status);
 }
 
 function handleFeatureDelete(res, id) {
@@ -452,6 +553,9 @@ async function route(req, res) {
     if (parts.length === 5 && parts[3] === 'review' && parts[4] === 'apply' && req.method === 'POST') {
       return handleReviewApply(req, res, parts[2]);
     }
+    if (parts.length === 5 && parts[3] === 'review' && parts[4] === 'cancel' && req.method === 'POST') {
+      return handleReviewCancel(req, res, parts[2]);
+    }
     if (parts.length === 4 && parts[3] === 'status' && req.method === 'POST') {
       return handleFeatureStatus(req, res, parts[2]);
     }
@@ -466,6 +570,17 @@ async function route(req, res) {
     }
     if (parts.length === 3 && req.method === 'POST') return handleRequestUpdate(req, res, parts[2]);
     if (parts.length === 3 && req.method === 'DELETE') return handleRequestDelete(res, parts[2]);
+  }
+  // Let the browser tell "this route doesn't exist" apart from "this SERVER is older than this page".
+  // Deliberately the cheapest possible handler and matched first — it must answer even when
+  // everything else about the build is mismatched.
+  if (parts[1] === 'version' && parts.length === 2 && req.method === 'GET') {
+    return sendJson(res, 200, { apiVersion: API_VERSION, pid: process.pid, startedAt: SERVER_STARTED_AT });
+  }
+  if (parts[1] === 'runner' && parts.length === 2) {
+    if (req.method === 'GET') return handleRunnerGet(res, url.searchParams.get('log') === '1');
+    if (req.method === 'POST') return handleRunnerStart(req, res);
+    if (req.method === 'DELETE') return handleRunnerStop(res);
   }
   if (parts[1] === 'ingest' && parts.length === 3 && req.method === 'POST') {
     return handleIngest(req, res, parts[2]);

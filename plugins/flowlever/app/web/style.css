@@ -254,6 +254,9 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .fc-job-verb { font-weight: 600; color: var(--fg); }
 .fc-job-needs { color: var(--major); font-weight: 540; }
 .fc-job-err { color: var(--del-fg); }
+/* Queued/running but nothing is actually running it — say so instead of spinning forever. */
+.fc-job-stale { color: var(--fg-dim); line-height: 1.45; }
+.fc-job-stale strong { color: var(--major); }
 .fc-job-dismiss { flex: none; }
 /* tint the card border by job state so a glance reads "busy / blocked / failed" */
 .fc-busy { border-color: var(--accent-line); }
@@ -263,6 +266,10 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .feature-card.fc-busy-needs:hover { border-color: var(--major); }
 .fc-busy-needs .fc-job { border-color: var(--major-line); background: var(--major-soft); }
 .fc-busy-error .fc-job { border-color: var(--notready-line); background: var(--notready-soft); }
+/* Stalled: amber like needs-input (it needs you), but the card border stays calm — the point is
+   "nothing is happening here", not "emergency". */
+.fc-busy-stale { border-color: var(--major-line); }
+.fc-busy-stale .fc-job { border-color: var(--major-line); background: var(--major-soft); }
 /* placeholder card for a review whose workspace doesn't exist yet */
 .fc-pending { border-style: dashed; cursor: default; }
 .fc-pending:hover { border-color: var(--accent-line); box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight); }
@@ -494,6 +501,109 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .fc-review { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
 .fc-review-waiting { color: var(--fg-mute); }
 .fc-review-responded { color: var(--kind-review); font-weight: 560; }
+
+/* ============================== review / activity stamps ============================== */
+
+/* "Reviewed 3h ago · PR updated 20m ago · ● new since your review" — the pair of clocks that
+ * answers "is a re-review worth running?". Muted by default; the PR-updated stamp goes blue
+ * (the review tint) once it is newer than our last round. */
+/* No "·" separators here on purpose: these lines wrap on narrow cards, and a dangling
+ * separator at the start of a wrapped line reads as a typo. The dimmed labels + the wide
+ * column gap do the separating. */
+.review-stamps {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+  font-size: 11.5px; color: var(--fg-mute);
+}
+.detail .review-stamps { margin: -4px 0 14px; padding: 0 2px; }
+.fc-stamps { grid-column: 1 / -1; }
+.ir-stamps { margin-top: 3px; }
+.stamp { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.stamp-label { color: var(--fg-mute); }
+.stamp-val { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.stamp-new .stamp-label, .stamp-new .stamp-val { color: var(--kind-review); font-weight: 600; }
+.stamp-who { color: var(--fg-mute); font-style: italic; margin-left: 1px; }
+.stamp-flag {
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  padding: 1px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 620;
+  color: var(--kind-review); background: var(--kind-review-soft); border: 1px solid var(--kind-review-line);
+}
+
+/* ============================== manual refresh ============================== */
+
+/* The section/home action row: "+ New …" and the manual "↻ Refresh" side by side. */
+.section-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; margin: 0 0 16px; }
+.section-actions .new-request-zone { margin: 0; }
+.section-actions .nr-form { min-width: min(520px, 100%); }
+.refresh-zone { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn-refresh { display: inline-flex; align-items: center; }
+.btn-refresh:hover:not(:disabled) {
+  color: var(--kind-review); border-color: var(--kind-review-line); background: var(--kind-review-soft);
+}
+.btn-refresh:disabled { cursor: progress; }
+.btn-refresh.is-error { color: var(--del-fg); border-color: var(--notready-line); }
+.refresh-note { font-size: 11.5px; }
+.refresh-needs { color: var(--major); font-weight: 540; }
+.refresh-err { color: var(--del-fg); }
+
+/* ============================== runner control ============================== */
+
+/* "▶ Run N jobs" — starts the headless /flowlever:watch session that drains the queue. Green,
+   because unlike Refresh this one writes to Azure DevOps. */
+.runner-zone { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn-runner { color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft); font-weight: 620; }
+.btn-runner:hover { border-color: var(--ready); color: var(--ready); background: var(--ready-soft); }
+.runner-n { font-family: var(--mono); font-weight: 800; }
+.runner-confirm-msg { font-size: 12px; color: var(--fg-dim); }
+.runner-live {
+  display: inline-flex; align-items: center; font-size: 12px; font-weight: 560;
+  color: var(--add-fg); padding: 6px 11px; border-radius: var(--radius-sm);
+  border: 1px solid var(--ready-line); background: var(--ready-soft);
+}
+.btn-runner-stop:hover { border-color: var(--blocker); color: var(--del-fg); background: var(--blocker-soft); }
+.runner-unavailable { font-size: 11.5px; color: var(--major); }
+.runner-unavailable code { font-family: var(--mono); background: var(--panel-3); border-radius: 5px; padding: 0 5px; }
+/* Stalled banner: the fix sits right where the problem is reported. */
+.apply-stalled-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex: none; }
+
+/* ============================== fix-commit proof ============================== */
+
+/* A code fix that landed shows the commit carrying it. */
+.f-fix-chip {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 620;
+  padding: 1px 7px; border-radius: 999px;
+  color: var(--add-fg); background: var(--ready-soft); border: 1px solid var(--ready-line);
+}
+/* …and one claimed done with no commit behind it is a defect, not a detail: red, never subtle. */
+.f-fix-chip.f-fix-missing {
+  color: var(--del-fg); background: var(--blocker-soft); border-color: var(--blocker);
+  font-family: inherit;
+}
+.unbacked-fix {
+  align-items: flex-start; flex-wrap: wrap;
+  border-color: var(--blocker); background: var(--blocker-soft); color: var(--fg);
+}
+.unbacked-fix .apply-dot { color: var(--del-fg); }
+.unbacked-fix strong { color: var(--del-fg); }
+
+/* ============================== stale-server warning ============================== */
+
+/* Page-wide bar: the served UI is newer than the running server process, so actions can fail with a
+   bare "Not found". Sits above everything because it explains failures anywhere in the app. */
+.stale-server {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 18px;
+  background: var(--major-soft); border-bottom: 1px solid var(--major-line);
+  font-size: 12.5px; line-height: 1.45; color: var(--fg-dim);
+}
+.stale-server-icon { color: var(--major); font-size: 14px; line-height: 1.3; flex: none; }
+.stale-server-body { flex: 1; min-width: 0; }
+.stale-server-body strong { color: var(--major); }
+.stale-server code {
+  font-family: var(--mono); font-size: 11.5px; background: var(--panel-3);
+  border-radius: 5px; padding: 1px 6px;
+}
+.stale-server-dismiss { flex: none; }
 
 /* ============================== review scope note ============================== */
 
@@ -945,6 +1055,7 @@ body.modal-open { overflow: hidden; }
 .rail-item.decided.dec-skip .rail-mark { background: var(--fg-mute); }
 .rail-item.decided.dec-waive .rail-mark { background: var(--major); }
 .rail-item.decided.dec-redirect .rail-mark { background: var(--major); }
+.rail-item.decided.dec-fixonly .rail-mark, .rail-item.decided.dec-fix-only .rail-mark { background: var(--ready); }
 .rail-sev { flex: none; font-size: 11px; }
 .rail-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -984,6 +1095,9 @@ body.modal-open { overflow: hidden; }
 .dec-btn.on.dec-accept { background: var(--ready-soft); border-color: var(--ready); color: var(--add-fg); }
 .dec-btn.on.dec-edit { background: var(--major-soft); border-color: var(--major); color: var(--edit-fg); }
 .dec-btn.on.dec-redirect { background: var(--major-soft); border-color: var(--major); color: var(--edit-fg); }
+/* Fix only — code goes out, no reply is written. Same green as an applied change (it IS a real
+   code change) but distinguishable from the reply actions. */
+.dec-btn.on.dec-fixonly, .dec-btn.on.dec-fix-only { background: var(--ready-soft); border-color: var(--ready); color: var(--add-fg); }
 .dec-btn.on.dec-waive { background: var(--blocker-soft); border-color: var(--blocker); color: var(--del-fg); }
 .dec-btn.on.dec-skip { background: var(--panel-2); border-color: var(--fg-mute); color: var(--fg); }
 
@@ -1082,6 +1196,7 @@ body.modal-open { overflow: hidden; }
 }
 .dec-pill.dec-accept { color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft); }
 .dec-pill.dec-edit, .dec-pill.dec-redirect { color: var(--edit-fg); border-color: var(--major-line); background: var(--major-soft); }
+.dec-pill.dec-fixonly, .dec-pill.dec-fix-only, .f-dec-chip.dec-fixonly, .f-dec-chip.dec-fix-only { color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft); }
 .dec-pill.dec-waive { color: var(--del-fg); border-color: var(--blocker-line); background: var(--blocker-soft); }
 .dec-pill.dec-skip { color: var(--fg-mute); }
 
@@ -1356,6 +1471,7 @@ a.backlink:focus-visible {
 .req-glyph-running { color: var(--accent-text); }
 .req-glyph-done    { color: var(--ready); }
 .req-glyph-error   { color: var(--del-fg); }
+.req-glyph-stalled { color: var(--major); }
 .req-spin { display: inline-block; animation: req-spin 1s steps(8) infinite; }
 @keyframes req-spin { to { transform: rotate(360deg); } }
 .req-main { flex: 1; min-width: 0; }
@@ -1391,6 +1507,22 @@ a.backlink:focus-visible {
   color: oklch(0.86 0.14 62);
 }
 .req-ni-note { font-size: 12.5px; color: var(--fg-dim); }
+
+/* "No runner picked this up" — same amber alert family as needs-input, since both need the user,
+   but with a paused glyph and no animation. */
+.req-row.req-stale { border-color: var(--major-line); box-shadow: inset 2px 0 0 var(--major); }
+.req-state-stalled { color: var(--major); }
+.req-stalled {
+  display: flex; gap: 9px; align-items: flex-start; margin-top: 9px;
+  padding: 9px 11px; border-radius: var(--radius-sm);
+  background: var(--major-soft); border: 1px solid var(--major-line);
+}
+.req-stalled-icon { font-size: 14px; line-height: 1.4; flex: none; color: var(--major); }
+.req-stalled-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.req-stalled-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--major);
+}
+.req-stalled-note { font-size: 12.5px; color: var(--fg-dim); }
 
 /* Status legend — a collapsible "?" explainer above the requests strip. */
 .requests-legend { margin-top: 6px; font-size: 12px; }
@@ -1554,6 +1686,21 @@ a.backlink:focus-visible {
 .apply-error .apply-dot { color: var(--del-fg); }
 .apply-needs-input { border-color: var(--major-line); background: var(--major-soft); color: var(--fg); }
 .apply-needs-input .apply-dot { color: var(--major); }
+/* "Nothing is running this" — a queued/running job no runner has touched, or findings stranded in
+   the in-flight lane with no job at all. Amber like needs-input (it needs the user to act) but
+   never animated: a spinner here would be the very lie this state exists to correct. */
+.apply-stalled {
+  align-items: flex-start; flex-wrap: wrap;
+  border-color: var(--major-line); background: var(--major-soft); color: var(--fg);
+}
+.apply-stalled .apply-dot { color: var(--major); }
+.apply-stalled-body { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 3px; }
+.apply-stalled-body code, .fc-job-stale code, .req-stalled-note code {
+  font-family: var(--mono); font-size: 11.5px; background: var(--panel-3);
+  border-radius: 5px; padding: 0 5px;
+}
+.btn-cancel-pending { flex: none; align-self: center; }
+.btn-cancel-pending:hover { border-color: var(--major); color: var(--major); background: var(--major-soft); }
 
 /* Reviewer note (their objection / answer) — distinct from the audit suggestion. */
 .f-note { border-left: 3px solid var(--kind-review-line); background: var(--kind-review-soft); }

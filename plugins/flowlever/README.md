@@ -47,6 +47,89 @@ or pushed *after* your posted review (`review.lastPostedAt`) · skip while inges
 your triage · otherwise **new review**. Re-reviews reuse the PR's workspace, so reconciliation
 auto-resolves what the author fixed and only the delta surfaces.
 
+**Two review clocks, so you can see when a re-review is due.** Every PR workspace shows the pair
+side by side — on its card, its inbox row and its detail header:
+
+| Stamp | Where it comes from |
+|---|---|
+| **Reviewed** `3h ago` | the workspace's last ingest round (a round *is* a review pass, so it can't drift) |
+| **PR updated** `20m ago by Oriol` | `review.lastActivityAt` / `lastActivityBy` — the real Azure DevOps timestamp of the newest update by the *other* side (the author on a `pr-review`, the reviewer on `pr-respond`), recorded by the poll/watch runner |
+
+When the second is newer than the first, the stamp turns blue with a **● new since your review**
+badge and the workspace surfaces the prominent **↻ Re-review** action — that's the "you can
+re-review now, and it will actually see something" signal. Hover any stamp for the exact time.
+(`review.authorRespondedAt` still exists, but it only records when the runner *noticed*; the
+activity stamp is the fact worth reading.)
+
+**Don't want to wait for the next pass?** The cockpit has a **↻ Refresh** button on Home and on
+both PR sections. It enqueues a `poll` job (scoped to that section) that your `/flowlever:watch`
+session picks up and runs immediately: find PRs you have no workspace for, and re-check the known
+ones for updates. The button itself is the progress indicator — queued → the live phase → done,
+or the reason it failed with a retry. It de-dupes, so a double-click can't fan out two passes, and
+like the scheduled pass it never posts anything.
+
+### Running jobs straight from the UI — **▶ Run N jobs**
+
+The queue only moves when a Claude Code session runs `/flowlever:watch`. The cockpit server is a local
+process, so it can start that session for you: **▶ Run N jobs** (Home, both PR sections, and inside the
+stalled banner on a workspace) spawns exactly the invocation the launchd schedule uses —
+`claude -p "/flowlever:watch" --dangerously-skip-permissions` in a login shell — and the existing job
+rows then animate queued → running (live phase) → done as it works. While it runs the control becomes
+**Runner working… ■ Stop**.
+
+Because this one *writes* to Azure DevOps (unlike Refresh), it asks once — "Run the queued jobs now?
+Approved comments get posted" — before starting. Clicking Post was your approval of the *content*; this
+confirms you want it to go out now. Details:
+
+- **One at a time.** A second start is refused (409), so a double-click can't fork two sessions posting
+  the same comments.
+- **Fixed prompts only.** The action must be `watch` or `poll`; the command is built from constants and
+  a resolved absolute binary path, never from request data.
+- **Binary resolution:** `FLOWLEVER_CLAUDE_BIN` → `~/.local/bin/claude` → `command -v claude` in a login
+  shell (a login shell is required — the OAuth token lives in the macOS Keychain). If none is found the
+  button says so instead of failing silently.
+- **Output** is appended to `~/.flowlever/runner.log` and tailable via `GET /api/runner?log=1`, so a
+  headless failure (expired auth, missing MCP) is visible rather than mysterious.
+- **↻ Refresh** now also starts a runner when none is going — otherwise it would just queue work nobody
+  would do.
+
+### A claimed fix must point at a real commit
+
+**Fix + reply** and **Fix only** promise a code change, so the ledger refuses to mark such an item done
+without the sha of the pushed commit carrying it. `finding posted` hard-errors; the runner is told to
+either supply `--sha` or `finding cancel` the item. There is no path where a reply says "Fixed" and the
+branch doesn't contain the change.
+
+This is a regression guard, not a precaution. It happened: a run replied "Fixed" on two threads of
+PR 5751, reported `done` with the phase *"posted to PR + fixes applied"*, and committed nothing — the
+reviewer re-raised both points five days later. Replying is the easy half, it succeeded on its own, and
+every surface downstream read the reply as completion.
+
+- The runner's apply step is now **fix → push → verify → then speak**: verify the edit is on disk, that
+  the sha is on the remote, and that the anchor file *at that sha* contains the change — only then reply
+  or resolve the thread, then stamp with `--sha`.
+- A landed fix shows a green **`✔ fix <sha>`** chip. One closed as handled with no commit shows a red
+  **`⚠ fix not pushed`** chip plus a workspace banner offering to reopen it.
+- `node src/cli.js finding unbacked` audits the whole ledger for them; `/flowlever:watch` runs it every
+  pass, checks each against the branch, and reopens the ones that genuinely never landed.
+- Spec workspaces are exempt (their proof of delivery is `appliedAt`, not a git sha).
+
+**A Post can never silently look done.** Clicking Post in the cockpit writes nothing — the browser can't
+reach Azure DevOps. It marks the items **“Posting…”** and queues an `apply` job; only the runner can
+confirm a comment landed, by stamping it **Posted — awaiting author**. That means the runner has to be
+running, so the cockpit is explicit whenever it isn't:
+
+- a job queued (or claiming to run) for over 3 minutes with **no runner going** reads **⏸ Not running —
+  nothing has been posted**, never a spinner, and offers **▶ Run it now**. (With a runner live the same
+  job correctly reads "queued for the runner" — it's waiting its turn, not abandoned.)
+- a job that reached `done` while items are still “Posting…” reads **finished, but N items not confirmed
+  as posted** — a runner's own "done" is not treated as proof;
+- both offer **↩ Back to the review queue**, which releases the items (keeping your Approve/Edit
+  decisions) so you can Post again. It never pretends anything was written.
+
+Each `/flowlever:watch` pass also heals strays: for any item stuck “Posting…” with no live job it checks
+the PR and either stamps it (the comment is there — only the stamp was lost) or releases it.
+
 **Safety:** the pass is ingest-only — it never posts comments, replies, or votes. Posting always
 stays behind your explicit **Apply** in the cockpit. Auto-enqueued jobs are tagged
 `instructions: "auto ..."` so you can tell them from manual runs.

@@ -19,17 +19,33 @@ Usage: node src/cli.js <command> [args]
   feature list [--json]                  List features (with readiness)
   feature show <id> [--json]             Show one feature in detail
   feature delete <id>                    Delete a workspace (features + ledger + rounds)
-  feature activity <id> --responded [--note "..."] | --clear   Mark/clear "author responded" on a posted PR review (runner)
+  feature activity <id> [--responded] [--note "..."] [--at <iso>] [--by "<name>"] | --clear
+                                         Mark/clear "author responded" on a posted PR review (runner).
+                                         --at/--by record WHEN the counterpart last updated the PR and
+                                         who — shown in the cockpit next to when we last reviewed it.
   source add <featureId> --type confluence|ado|figma --id <id> [--title "..."] [--url <url>]
   ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]
                                          Ingest an audit round + reconcile ledger
   finding list <featureId> [--status open] [--dimension x] [--severity y] [--json]
   finding edit <featureId> <fp> [--detail "..."] [--suggestion "..."] [--severity blocker|major|minor|info] [--note "..."]
                                          Refine a finding's text/severity (fingerprint stays stable)
-  finding posted <featureId> --fps <fp>[,<fp>...]   Mark PR comment(s)/repl(ies) as posted back
-                                         (stays reworking + stamped "awaiting author"; re-review auto-resolves)
+  finding posted <featureId> --fps <fp>[,<fp>...] [--sha <commit>] [--repo <r>] [--branch <b>]
+                                         Mark PR comment(s)/repl(ies) as posted back (stays reworking +
+                                         stamped "awaiting author"; re-review auto-resolves).
+                                         --sha is REQUIRED for any finding whose agreed response is a
+                                         code fix: no pushed commit, no stamp (hard error). Use
+                                         'finding cancel' if the fix was not actually made.
+  finding fixed <featureId> --fps <fp>[,<fp>...] --sha <commit> [--repo <r>] [--branch <b>]
+                                         Record the pushed commit a code fix landed in
+  finding unbacked [<featureId>] [--json]  Audit: agreed code fixes claimed done with NO commit behind
+                                         them (i.e. the reviewer was told "fixed" but the branch isn't)
   finding applied <featureId> --fps <fp>[,<fp>...]  Mark spec change(s) as written back to Confluence/ADO
                                          (stays reworking + stamped "awaiting re-audit"; re-audit auto-resolves)
+  finding cancel <featureId> [--fps <fp>[,<fp>...]] [--reason "..."]
+                                         Undo an in-flight "Posting…/Applying…" marker (default: all of
+                                         them) so the findings go back to the review queue. Call this
+                                         whenever an apply fails or is abandoned — a stranded pending
+                                         marker is otherwise permanent. Claims nothing was written.
   finding set <featureId> <fp> --status open|reworking|resolved|waived
                                [--reason "..."] [--pin|--unpin]
   finding draft <featureId> <fp> --before "..." --after "..." [--target "..."]
@@ -48,11 +64,13 @@ Usage: node src/cli.js <command> [args]
   report <featureId> [--out report.md]   Generate markdown report
   coverage set <featureId> --file coverage.json
   requests list [--status queued|running|done|error] [--json]   List UI-triggered job requests
-  requests add --action pr-review|pr-respond|audit|apply|re-audit|propose
-                               [--prId <id>] [--wsId <id>] [--title "..."]
-                               [--instructions "..."] [--dedupe] [--json]
+  requests add --action pr-review|pr-respond|audit|apply|re-audit|propose|poll
+                               [--prId <id>] [--wsId <id>] [--kind pr-review|pr-respond]
+                               [--title "..."] [--instructions "..."] [--dedupe] [--json]
                                          Enqueue a job (same queue the web UI feeds); --dedupe
-                                         no-ops when an identical queued/running request exists
+                                         no-ops when an identical queued/running request exists.
+                                         poll = a discovery/refresh pass now (--kind narrows it
+                                         to one section); the cockpit's "↻ Refresh" button
   requests delete <id>                   Remove a request from the queue
   requests set <id> --status running|done|error [--note "..."] [--wsId <id>]
                                [--phase "..."] [--needs-input|--no-needs-input]
@@ -348,30 +366,112 @@ function cmdFindingSet({ pos, flags }) {
   console.log(`${glyph(finding.severity)} ${finding.fp}  ${finding.status}${finding.pinned ? ' 📌' : ''}  ${finding.title}`);
 }
 
+// `--responded` stamps DETECTION time (now). `--at` records the real timestamp of the
+// counterpart's newest update on the PR (from ADO) and `--by` who made it — that pair is what
+// the cockpit shows as "PR updated <when> by <who>" beside "reviewed <when>". Runners should
+// pass both whenever they know them; `--responded` alone still works.
 function cmdFeatureActivity({ pos, flags }) {
   const featureId = need(pos[0], '<featureId>');
   const patch = {};
   if (flags.responded) patch.authorRespondedAt = new Date().toISOString();
   if (flags['no-responded'] || flags['clear']) { patch.authorRespondedAt = null; patch.note = null; }
   if (flags.note !== undefined) patch.note = String(flags.note);
+  if (flags.at !== undefined) {
+    if (Number.isNaN(Date.parse(flags.at))) {
+      throw userError(`--at must be an ISO-8601 timestamp (got '${flags.at}')`);
+    }
+    patch.lastActivityAt = String(flags.at);
+  }
+  if (flags.by !== undefined) patch.lastActivityBy = String(flags.by);
   if (Object.keys(patch).length === 0) {
-    throw userError('Nothing to set: pass --responded [--note "..."], or --clear');
+    throw userError('Nothing to set: pass --responded [--note "..."] [--at <iso> --by "<name>"], or --clear');
   }
   const feature = ledger.setFeatureReview(featureId, patch);
   const r = feature.review || {};
-  console.log(`${feature.id}  author ${r.authorRespondedAt ? 'responded' : 'not responded'}${r.note ? `  — ${r.note}` : ''}`);
+  const activity = r.lastActivityAt ? `  PR updated ${r.lastActivityAt}${r.lastActivityBy ? ` by ${r.lastActivityBy}` : ''}` : '';
+  console.log(`${feature.id}  author ${r.authorRespondedAt ? 'responded' : 'not responded'}${r.note ? `  — ${r.note}` : ''}${activity}`);
 }
 
+// `--sha` is REQUIRED for any finding whose agreed response is a code change — the ledger refuses
+// the stamp otherwise (see assertFixCommit). This is deliberate: a reply saying "Fixed" with no
+// commit behind it is the one failure this tool must never produce again.
 function cmdFindingPosted({ pos, flags }) {
   const featureId = need(pos[0], '<featureId>');
   const raw = flags.fps !== undefined ? String(flags.fps) : pos.slice(1).join(',');
   const fps = raw.split(',').map((s) => s.trim()).filter(Boolean);
   if (!fps.length) throw userError('Pass the posted finding ids: --fps <fp>[,<fp>...] (or as positional args)');
-  const updated = ledger.markPosted(featureId, fps, { by: 'post' });
+  if (flags.sha !== undefined && !/^[0-9a-f]{7,40}$/i.test(String(flags.sha).trim())) {
+    throw userError(`--sha must be a 7–40 character hex git sha (got '${flags.sha}')`);
+  }
+  const updated = ledger.markPosted(featureId, fps, {
+    by: 'post',
+    sha: flags.sha,
+    repo: flags.repo !== undefined ? String(flags.repo) : null,
+    branch: flags.branch !== undefined ? String(flags.branch) : null,
+  });
   for (const f of updated) {
-    console.log(`${glyph(f.severity)} ${f.fp}  posted (awaiting author)  ${f.title}`);
+    const fix = f.fixCommit && f.fixCommit.sha ? `  fix in ${f.fixCommit.sha.slice(0, 10)}` : '';
+    console.log(`${glyph(f.severity)} ${f.fp}  posted (awaiting author)${fix}  ${f.title}`);
   }
   console.log(`\n${updated.length} finding(s) marked posted`);
+}
+
+// Record the pushed commit for a fix without (or before) posting anything about it.
+function cmdFindingFixed({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const raw = flags.fps !== undefined ? String(flags.fps) : pos.slice(1).join(',');
+  const fps = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!fps.length) throw userError('Pass the fixed finding ids: --fps <fp>[,<fp>...]');
+  const sha = need(flags.sha, '--sha <pushed commit sha>');
+  for (const fp of fps) {
+    const f = ledger.setFindingFixCommit(featureId, fp, {
+      sha,
+      repo: flags.repo !== undefined ? String(flags.repo) : null,
+      branch: flags.branch !== undefined ? String(flags.branch) : null,
+    });
+    console.log(`${glyph(f.severity)} ${f.fp}  fix recorded in ${f.fixCommit.sha.slice(0, 10)}  ${f.title}`);
+  }
+}
+
+// Audit: agreed code fixes that are claimed done with no commit behind them. Should print nothing.
+function cmdFindingUnbacked({ pos, flags }) {
+  const ids = pos[0] ? [pos[0]] : ledger.listFeatures().map((f) => f.id);
+  const rows = [];
+  for (const id of ids) {
+    for (const f of ledger.unbackedFixes(id)) {
+      rows.push({ workspace: id, fp: f.fp, status: f.status, target: (f.draft && f.draft.target) || f.locus, title: f.title });
+    }
+  }
+  if (flags.json) return printJson(rows);
+  if (!rows.length) {
+    console.log('No unbacked fixes — every claimed code fix points at a commit.');
+    return;
+  }
+  console.log(table([['WORKSPACE', 'FP', 'STATUS', 'TARGET', 'TITLE'],
+    ...rows.map((r) => [r.workspace, r.fp, r.status, r.target, r.title.slice(0, 60)])]));
+  console.log(`\n⚠ ${rows.length} finding(s) claim a code fix with NO commit behind them — the reviewer was told`);
+  console.log('  it was handled but the branch does not contain the change. Reopen them (finding set <ws> <fp>');
+  console.log('  --status open) and redo the fix, or record the real commit (finding fixed <ws> --fps <fp> --sha <sha>).');
+}
+
+// Undo an in-flight Post/Apply marker. The runner MUST call this whenever an apply fails or is
+// abandoned — otherwise the findings stay in the "Posting…/Applying…" lane forever: out of the
+// review queue, never stamped, with no way back. With no --fps it clears every pending finding
+// in the workspace. Findings already stamped posted/applied are left as they are.
+function cmdFindingCancel({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const raw = flags.fps !== undefined ? String(flags.fps) : pos.slice(1).join(',');
+  const fps = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  const targets = fps.length ? fps : ledger.pendingFindings(featureId).map((f) => f.fp);
+  if (!targets.length) {
+    console.log(`${featureId}: nothing in flight — no pending post/apply to cancel`);
+    return;
+  }
+  const updated = ledger.clearFindingPending(featureId, targets, { by: 'user', reason: flags.reason });
+  for (const f of updated) {
+    console.log(`${glyph(f.severity)} ${f.fp}  back in the review queue (${f.status})  ${f.title}`);
+  }
+  console.log(`\n${updated.length} finding(s) taken out of the in-flight lane — nothing was posted`);
 }
 
 // Spec mirror of `finding posted`: the runner calls this after actually writing an accepted
@@ -509,7 +609,8 @@ function cmdRequestsList({ flags }) {
   }
   const rows = [['ID', 'ACTION', 'STATUS', 'TARGET', 'TITLE', 'INSTRUCTIONS', 'NOTE']];
   for (const r of requests) {
-    const target = r.prId ? `PR ${r.prId}` : (r.wsId ? r.wsId : '—');
+    // A `poll` (refresh) job has no id target — name the scope it covers instead.
+    const target = r.prId ? `PR ${r.prId}` : (r.wsId || (r.action === 'poll' ? (r.kind || 'all PRs') : '—'));
     rows.push([r.id, r.action, r.status, target, r.title || '', r.instructions || '', r.note || '']);
   }
   console.log(table(rows));
@@ -519,17 +620,19 @@ function cmdRequestsList({ flags }) {
 // Enqueue a job from the CLI — the same queue the web UI feeds via POST /api/requests, so
 // automation (e.g. the /flowlever:poll scheduled pass) can enqueue without the server running.
 // --dedupe makes the call idempotent: if a queued/running request already targets the same
-// action + prId/wsId, report that one instead of stacking a duplicate.
+// action + prId/wsId/kind, report that one instead of stacking a duplicate.
 function cmdRequestsAdd({ flags }) {
   const action = need(flags.action, '--action');
   if (flags.dedupe) {
     const existing = ledger.listRequests({}).find((r) => (r.status === 'queued' || r.status === 'running')
       && r.action === action
       && (flags.prId === undefined || r.prId === String(flags.prId))
-      && (flags.wsId === undefined || r.wsId === String(flags.wsId)));
+      && (flags.wsId === undefined || r.wsId === String(flags.wsId))
+      && (flags.kind === undefined || (r.kind || null) === String(flags.kind)));
     if (existing) {
       if (flags.json) return printJson({ ...existing, deduped: true });
-      console.log(`Already ${existing.status}: ${existing.id}  ${existing.action}  ${existing.prId ? `PR ${existing.prId}` : existing.wsId || '—'} (no duplicate queued)`);
+      const what = existing.prId ? `PR ${existing.prId}` : (existing.wsId || existing.kind || '—');
+      console.log(`Already ${existing.status}: ${existing.id}  ${existing.action}  ${what} (no duplicate queued)`);
       return;
     }
   }
@@ -537,11 +640,12 @@ function cmdRequestsAdd({ flags }) {
     action,
     prId: flags.prId,
     wsId: flags.wsId,
+    kind: flags.kind,
     title: flags.title,
     instructions: flags.instructions,
   });
   if (flags.json) return printJson(request);
-  const target = request.prId ? `PR ${request.prId}` : (request.wsId || '—');
+  const target = request.prId ? `PR ${request.prId}` : (request.wsId || request.kind || '—');
   console.log(`Queued ${request.id}  ${request.action}  ${target}${request.title ? ` — ${request.title}` : ''}`);
 }
 
@@ -638,6 +742,9 @@ async function run(argv) {
     case 'finding list': return cmdFindingList(rest);
     case 'finding set': return cmdFindingSet(rest);
     case 'finding posted': return cmdFindingPosted(rest);
+    case 'finding fixed': return cmdFindingFixed(rest);
+    case 'finding unbacked': return cmdFindingUnbacked(rest);
+    case 'finding cancel': return cmdFindingCancel(rest);
     case 'finding applied': return cmdFindingApplied(rest);
     case 'finding edit': return cmdFindingEdit(rest);
     case 'finding draft': return cmdFindingDraft(rest);

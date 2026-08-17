@@ -119,6 +119,17 @@ Where you have a concrete code change, attach a **draft** so it shows as a red/g
 (via a small node script using `require("${CLAUDE_PLUGIN_ROOT}/app/src/ledger.js")`, or a future CLI cmd).
 Dedup near-duplicates, then (`requests set <reqId> --phase "ingesting findings"`) ingest:
 `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" ingest <wsId> --file <findings.json> --note "PR #<id> review @ <commit/iteration>"`.
+
+**Then stamp the PR's activity clock** — you just read the PR, so you know when the author last
+touched it. Record the newest author comment / pushed iteration:
+```
+... cli.js feature activity <wsId> --at "<ISO ts of the author's newest update>" --by "<author>"
+```
+The ingest itself is the "Reviewed <when>" side of the cockpit's stamp pair (a round IS a review
+pass); this is the "PR updated <when>" side. Stamping it here means the workspace reads correctly
+the moment the review lands, instead of waiting for the next poll pass. Omit it only if the PR
+genuinely has no author activity to point at.
+
 The runner then marks the request `done --phase "review ready" --wsId <wsId>`.
 
 ## 4. Hand to the cockpit
@@ -162,12 +173,43 @@ call it discusses). For each finding:
    body, or post it as a file-level thread (`filePath` only, no line) if there's no sensible line.
 4. After posting, sanity-check the returned thread's `rightFileStart.line` matches your intended line;
    surface any that fell back to file-level so the user knows.
-After posting, mark exactly the findings you posted as **posted** (idempotent — the cockpit's Post
-button already stamps them, this confirms it for direct runs):
-`FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding posted <wsId> --fps <fp>[,<fp>...]`.
+### Stamping is not optional — you are the ONLY thing that can confirm a post
+**The cockpit cannot stamp a post; only you can.** When the user clicks Post, the UI sets a transient
+`pending: "post"` marker (the "Posting…" lane) and enqueues the `apply` request — nothing more. The
+`postedAt` stamp exists exactly once: when *you* record it after ADO accepted the comment. So:
+
+**Stamp each finding the moment its comment lands — one call per finding, immediately after the
+`repo_create_pull_request_thread` for it succeeds. Never batch this to the end of the run.**
+```
+FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" finding posted <wsId> --fps <fp>
+```
+Batching is what strands work: if the session dies, 2FA times out, or an ADO call fails halfway, every
+comment you already posted is left marked "Posting…" forever — the cockpit shows in-flight work that
+will never resolve while the comments are actually sitting on the PR. Per-finding stamping makes any
+interruption leave a truthful partial state instead.
+
 A posted finding stays `reworking` but is stamped `postedAt` → it moves to the cockpit's **"Posted —
 awaiting author"** lane, stops being re-counted as "to review", and no longer drags the readiness score
 down. Do **not** set posted comments to `resolved` — that would hide them from the re-review reconcile.
+
+**Before posting anything, check what is already there (resume-safe / no double posts).** A finding
+marked `pending: "post"` with no `postedAt` means a previous attempt was interrupted — it does NOT tell
+you whether the comment made it. List the PR's threads first
+(`repo_pull_request_thread action:list`) and compare against the findings you are about to post:
+- a thread whose body already matches the finding's comment (same anchor + text, authored by you) →
+  **do not post again**; just stamp it (`finding posted <wsId> --fps <fp>`) — the write did happen,
+  only the stamp was lost.
+- no matching thread → post it normally, then stamp.
+Skipping this check is how a retried apply ends up posting the same comment twice.
+
+**If the apply fails or you abandon it, release what you did NOT post** — otherwise those findings stay
+stuck in the "Posting…" lane with no way back:
+```
+... cli.js finding cancel <wsId> --fps <fp>[,<fp>...] --reason "post failed: <short reason>"
+... cli.js requests set <reqId> --status error --note "<short reason>"
+```
+(`finding cancel` with no `--fps` releases every still-pending finding in the workspace. It never
+touches ones already stamped `postedAt`, so it is safe to run after a partial success.)
 
 ## 6. Re-review (after the author responds) — same reconcile loop as specs
 When the author has replied or pushed new commits, **re-run this exact skill against the SAME `<wsId>`**

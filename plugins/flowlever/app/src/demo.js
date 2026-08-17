@@ -467,6 +467,18 @@ function seed() {
   return { id: FEATURE_ID, feature: L.getFeature(FEATURE_ID) };
 }
 
+// Record when the counterpart last touched the PR, so the demo shows the cockpit's stamp pair
+// ("Reviewed <when> · PR updated <when> by <who>"). Backdated: the demo's review round is
+// stamped at seed time, so real activity is necessarily older than it — which is why the demo
+// deliberately does NOT light the "new since your review" badge (that needs the PR to move
+// AFTER a review, which only happens in real use).
+function stampDemoActivity(wsId, minutesAgo, who) {
+  L.setFeatureReview(wsId, {
+    lastActivityAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+    lastActivityBy: who,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // pr-review — reviewing someone else's PR. Findings model review comments anchored
 // to a file:line; a couple carry before→after code drafts so they're reviewable in
@@ -567,6 +579,9 @@ function seedPrReview() {
         '}',
       ].join('\n'),
     });
+
+  // On a pr-review workspace the counterpart is the PR's author.
+  stampDemoActivity(PR_REVIEW_ID, 95, 'Lena Fischer');
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +672,9 @@ function seedPrRespond() {
         '});',
       ].join('\n'),
     });
+
+  // On a pr-respond workspace the counterpart is the reviewer who left the threads.
+  stampDemoActivity(PR_RESPOND_ID, 20, 'Oriol Puig');
 }
 
 module.exports = { seed, seedPrReview, seedPrRespond, FEATURE_ID, PR_REVIEW_ID, PR_RESPOND_ID, DEMO_IDS };

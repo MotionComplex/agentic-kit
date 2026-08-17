@@ -340,6 +340,233 @@ test('markPosted anchors review.lastPostedAt; setFeatureReview flips/clears auth
   assert.equal(rev.note, null);
 });
 
+// ---------------------------------------------------------------------------
+// The fix gate. A finding whose agreed response is a code change cannot be marked done without the
+// commit that carries it. Regression cover for a real production failure: a run replied "Fixed" on
+// two threads, reported done, never committed, and the reviewer re-raised both points days later.
+// ---------------------------------------------------------------------------
+
+function mkFixWorkspace(id) {
+  ledger.createFeature({ id, title: id, kind: 'pr-respond' });
+  ledger.ingestRound(id, [
+    mkFinding({ dimension: 'consistency', title: 'Raise the log level', locus: `pr:9:thread:1` }),
+    mkFinding({ dimension: 'completeness', title: 'Reply-only question', locus: `pr:9:thread:2` }),
+  ]);
+  const [fix, reply] = ledger.loadLedger(id).findings.map((f) => f.fp);
+  ledger.setFindingDraft(id, fix, { target: 'src/A.cs:L10', before: 'LogInformation(x);', after: 'LogWarning(x);' });
+  return { fix, reply };
+}
+
+test('markPosted REFUSES an agreed code fix with no commit behind it', () => {
+  const id = 'gate-hunk';
+  const { fix } = mkFixWorkspace(id);
+  // Signed off hunk-by-hunk — the commonest path, and the one that leaves `decision` empty. Keying
+  // the gate off `decision` alone would let exactly this case through.
+  ledger.setDraftReview(id, fix, { hunk: 0, status: 'accepted' });
+  assert.equal(ledger.loadLedger(id).findings.find((f) => f.fp === fix).decision, undefined,
+    'per-hunk accept intentionally leaves the finding-level decision unset');
+  assert.equal(ledger.isAgreedCodeFix(ledger.loadLedger(id).findings.find((f) => f.fp === fix)), true);
+
+  assert.throws(() => ledger.markPosted(id, [fix]), (e) => e.code === 'EUSER' && /cannot be marked posted without the commit/.test(e.message));
+  // Nothing was written: the finding must not be half-stamped.
+  const after = ledger.loadLedger(id).findings.find((f) => f.fp === fix);
+  assert.equal(after.postedAt, undefined);
+  assert.equal(after.status, 'open');
+});
+
+test('markPosted accepts the fix once a pushed commit is supplied, and records it', () => {
+  const id = 'gate-sha';
+  const { fix } = mkFixWorkspace(id);
+  ledger.setFindingDecision(id, fix, 'fix-only');
+
+  const [f] = ledger.markPosted(id, [fix], { sha: 'a1b2c3d4e5f6', repo: 'DXP-ProfileServices', branch: 'feature/x' });
+  assert.ok(f.postedAt);
+  assert.equal(f.fixCommit.sha, 'a1b2c3d4e5f6');
+  assert.equal(f.fixCommit.repo, 'DXP-ProfileServices');
+  assert.equal(f.fixCommit.branch, 'feature/x');
+  assert.ok(f.history.some((h) => /fix pushed in a1b2c3d4e5/.test(h.note)));
+  // Idempotent: a re-stamp needs no sha now that one is on record.
+  assert.doesNotThrow(() => ledger.markPosted(id, [fix]));
+});
+
+test('the gate leaves reply-only findings alone — a reply IS the deliverable there', () => {
+  const id = 'gate-reply';
+  const { reply } = mkFixWorkspace(id);
+  ledger.setFindingDecision(id, reply, 'approve');
+  const [f] = ledger.markPosted(id, [reply]);
+  assert.ok(f.postedAt, 'no draft ⇒ no fix owed ⇒ no sha required');
+  assert.equal(f.fixCommit, undefined);
+});
+
+test('the gate ignores redirect/reject drafts (explicitly "do not apply this")', () => {
+  const id = 'gate-redirect';
+  const { fix } = mkFixWorkspace(id);
+  ledger.setDraftReview(id, fix, { hunk: 0, status: 'accepted' });
+  ledger.setDraftReview(id, fix, { verdict: 'redirect', note: 'do it in the service instead' });
+  assert.equal(ledger.isAgreedCodeFix(ledger.loadLedger(id).findings.find((f) => f.fp === fix)), false);
+  assert.doesNotThrow(() => ledger.markPosted(id, [fix]));
+});
+
+test('a mixed batch is all-or-nothing: one ungated fix blocks the whole markPosted', () => {
+  const id = 'gate-batch';
+  const { fix, reply } = mkFixWorkspace(id);
+  ledger.setDraftReview(id, fix, { hunk: 0, status: 'accepted' });
+  ledger.setFindingDecision(id, reply, 'approve');
+  assert.throws(() => ledger.markPosted(id, [reply, fix]), (e) => e.code === 'EUSER');
+  // The reply must NOT have been stamped on the way to the failure.
+  assert.equal(ledger.loadLedger(id).findings.find((f) => f.fp === reply).postedAt, undefined,
+    'the batch must not half-apply');
+});
+
+test('unbackedFixes finds a fix closed as handled with no commit; clean once recorded', () => {
+  const id = 'gate-audit';
+  const { fix } = mkFixWorkspace(id);
+  ledger.setDraftReview(id, fix, { hunk: 0, status: 'accepted' });
+  // Simulate the production failure: stamped posted before the gate existed.
+  const doc = ledger.loadLedger(id);
+  doc.findings.find((f) => f.fp === fix).postedAt = '2026-08-12T07:00:30.763Z';
+  require('node:fs').writeFileSync(path.join(tmpDir, 'ledger', `${id}.json`), JSON.stringify(doc, null, 2));
+
+  assert.deepEqual(ledger.unbackedFixes(id).map((f) => f.fp), [fix]);
+  ledger.setFindingFixCommit(id, fix, { sha: 'deadbeef123' });
+  assert.deepEqual(ledger.unbackedFixes(id), [], 'recording the real commit clears the audit');
+});
+
+test('setFindingFixCommit validates the sha shape', () => {
+  const id = 'gate-shaval';
+  const { fix } = mkFixWorkspace(id);
+  for (const bad of ['', 'nope', 'zzzzzzz', '12345', undefined, null]) {
+    assert.throws(() => ledger.setFindingFixCommit(id, fix, { sha: bad }), (e) => e.code === 'EUSER');
+  }
+  assert.doesNotThrow(() => ledger.setFindingFixCommit(id, fix, { sha: '0123abc' }));
+});
+
+test('setFindingDecision accepts fix-only (apply the fix, post no reply) and still rejects junk', () => {
+  ledger.createFeature({ id: 'fixonly', title: 'Fix only', kind: 'pr-respond' });
+  ledger.ingestRound('fixonly', [mkFinding({ title: 'FO1', locus: 'pr:13:thread:1' })]);
+  const fp = ledger.loadLedger('fixonly').findings[0].fp;
+
+  assert.equal(ledger.setFindingDecision('fixonly', fp, 'fix-only').decision, 'fix-only');
+  // It survives a round-trip through disk, since the runner reads it back to know NOT to reply.
+  assert.equal(ledger.loadLedger('fixonly').findings[0].decision, 'fix-only');
+  assert.ok(ledger.loadLedger('fixonly').findings[0].history.some((h) => h.note === 'decided: fix-only'));
+
+  assert.equal(ledger.setFindingDecision('fixonly', fp, null).decision, undefined, 'undo still works');
+  assert.throws(() => ledger.setFindingDecision('fixonly', fp, 'fix only'), (e) => e.code === 'EUSER');
+  assert.throws(() => ledger.setFindingDecision('fixonly', fp, 'reply'), (e) => e.code === 'EUSER');
+});
+
+test('clearFindingPending releases a stranded in-flight marker without claiming a write', () => {
+  ledger.createFeature({ id: 'stuck', title: 'Stuck post', kind: 'pr-review' });
+  ledger.ingestRound('stuck', [
+    mkFinding({ title: 'S1', locus: 'pr:9:a.ts:L1' }),
+    mkFinding({ title: 'S2', locus: 'pr:9:b.ts:L2' }),
+  ]);
+  const [a, b] = ledger.loadLedger('stuck').findings.map((f) => f.fp);
+
+  ledger.setFindingPending('stuck', [a, b], 'post');
+  assert.equal(ledger.pendingFindings('stuck').length, 2, 'both are in flight');
+
+  // One really did post; the other never left the queue.
+  ledger.markPosted('stuck', [a]);
+  assert.equal(ledger.pendingFindings('stuck').length, 1, 'a stamped finding is no longer pending');
+
+  const released = ledger.clearFindingPending('stuck', [a, b], { reason: 'job never ran' });
+  const byFp = Object.fromEntries(ledger.loadLedger('stuck').findings.map((f) => [f.fp, f]));
+  assert.equal(byFp[b].pending, undefined, 'the marker is gone');
+  assert.equal(byFp[b].postedAt, undefined, 'releasing must NOT claim it was posted');
+  assert.equal(byFp[b].status, 'reworking', 'it stays triaged, back in the post queue');
+  assert.ok(byFp[b].history.some((h) => h.note === 'job never ran'), 'the release is on the trail');
+  assert.ok(byFp[a].postedAt, 'an already-posted finding keeps its stamp');
+  // Only the still-stranded one is released — markPosted already cleared a's marker, so a
+  // successful post is never "undone" by a cancel that arrives after it.
+  assert.equal(released.length, 1);
+  assert.equal(released[0].fp, b);
+
+  // Idempotent: nothing pending left, so a second call changes nothing.
+  assert.equal(ledger.clearFindingPending('stuck', [a, b]).length, 0);
+  assert.equal(ledger.pendingFindings('stuck').length, 0);
+});
+
+test('clearFindingPending keeps the decision so a retry can re-post the same items', () => {
+  ledger.createFeature({ id: 'stuck-dec', title: 'Stuck decisions', kind: 'pr-review' });
+  ledger.ingestRound('stuck-dec', [mkFinding({ title: 'D1', locus: 'pr:11:a.ts:L1' })]);
+  const fp = ledger.loadLedger('stuck-dec').findings[0].fp;
+
+  ledger.setFindingDecision('stuck-dec', fp, 'approve');
+  ledger.setFindingPending('stuck-dec', [fp], 'post');
+  ledger.clearFindingPending('stuck-dec', [fp]);
+
+  const f = ledger.loadLedger('stuck-dec').findings[0];
+  assert.equal(f.decision, 'approve', 'the triage decision survives the release');
+  assert.equal(ledger.isPending(f), false);
+});
+
+test('clearFindingPending throws EUSER for an unknown fp', () => {
+  ledger.createFeature({ id: 'stuck-unknown', title: 'Unknown', kind: 'pr-review' });
+  ledger.ingestRound('stuck-unknown', [mkFinding({ title: 'U1', locus: 'pr:12:a.ts:L1' })]);
+  assert.throws(() => ledger.clearFindingPending('stuck-unknown', ['nope']), (e) => e.code === 'EUSER');
+});
+
+test('setFeatureReview records lastActivityAt/lastActivityBy independently of the responded flag', () => {
+  ledger.createFeature({ id: 'stamps-ws', title: 'Stamps', kind: 'pr-review' });
+  // stamp-only: no --responded equivalent, just "the PR moved at T, by X"
+  ledger.setFeatureReview('stamps-ws', { lastActivityAt: '2026-08-17T09:42:11Z', lastActivityBy: 'Oriol Puig' });
+  let rev = ledger.getFeature('stamps-ws').review;
+  assert.equal(rev.lastActivityAt, '2026-08-17T09:42:11Z');
+  assert.equal(rev.lastActivityBy, 'Oriol Puig');
+  assert.equal(rev.authorRespondedAt, null, 'stamping activity must not imply the responded flag');
+
+  // a later update overwrites the stamp without touching the rest
+  ledger.setFeatureReview('stamps-ws', { lastActivityAt: '2026-08-17T11:00:00Z' });
+  rev = ledger.getFeature('stamps-ws').review;
+  assert.equal(rev.lastActivityAt, '2026-08-17T11:00:00Z');
+  assert.equal(rev.lastActivityBy, 'Oriol Puig', 'unspecified fields stay put');
+});
+
+test('reviewStamps pairs the two clocks and derives newSinceReview', () => {
+  const feature = { review: { lastActivityAt: '2026-08-17T10:00:00Z', lastActivityBy: 'Oriol', lastPostedAt: '2026-08-16T08:00:00Z' } };
+
+  // their update is newer than our last round → a re-review would see something
+  let s = ledger.reviewStamps(feature, '2026-08-17T09:00:00Z');
+  assert.equal(s.lastReviewedAt, '2026-08-17T09:00:00Z');
+  assert.equal(s.lastActivityAt, '2026-08-17T10:00:00Z');
+  assert.equal(s.lastActivityBy, 'Oriol');
+  assert.equal(s.lastPostedAt, '2026-08-16T08:00:00Z');
+  assert.equal(s.newSinceReview, true);
+
+  // we reviewed after their update → nothing new
+  s = ledger.reviewStamps(feature, '2026-08-17T12:00:00Z');
+  assert.equal(s.newSinceReview, false);
+
+  // never reviewed but the PR has activity → still "new"
+  assert.equal(ledger.reviewStamps(feature, null).newSinceReview, true);
+
+  // compared by parsed time, not string order: a +02:00 stamp is EARLIER than the 09:00Z round
+  assert.equal(
+    ledger.reviewStamps({ review: { lastActivityAt: '2026-08-17T10:30:00+02:00' } }, '2026-08-17T09:00:00Z').newSinceReview,
+    false, 'offsets must be parsed, not string-compared');
+
+  // no activity recorded at all → nothing new, no crash
+  const bare = ledger.reviewStamps({}, '2026-08-17T09:00:00Z');
+  assert.equal(bare.newSinceReview, false);
+  assert.equal(bare.lastActivityAt, null);
+});
+
+test('addRequest supports the poll (manual refresh) action + optional kind scope', () => {
+  const both = ledger.addRequest({ action: 'poll' });
+  assert.equal(both.action, 'poll');
+  assert.equal(both.kind, null, 'no kind = both PR sections');
+  assert.equal(both.prId, null);
+  assert.equal(both.wsId, null);
+
+  const scoped = ledger.addRequest({ action: 'poll', kind: 'pr-respond', title: 'Refresh PR Respond' });
+  assert.equal(scoped.kind, 'pr-respond');
+
+  assert.throws(() => ledger.addRequest({ action: 'poll', kind: 'spec' }), (e) => e.code === 'EUSER');
+  assert.throws(() => ledger.addRequest({ action: 'poll', kind: 'nonsense' }), (e) => e.code === 'EUSER');
+});
+
 test('setFeatureStatus: marks done, reopens, validates the enum', () => {
   ledger.createFeature({ id: 'lifecycle', title: 'Lifecycle', kind: 'pr-review' });
   assert.equal(ledger.getFeature('lifecycle').status, 'draft');
