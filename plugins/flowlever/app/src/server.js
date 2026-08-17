@@ -12,6 +12,20 @@ const { API_VERSION } = require('./version');
 const { generateReport } = require('./report');
 
 const PORT = process.env.PORT !== undefined && process.env.PORT !== '' ? Number(process.env.PORT) : 4173;
+// LOOPBACK BY DEFAULT. `listen(PORT)` with no host binds the unspecified address — every interface —
+// so the cockpit was reachable from the whole LAN with no authentication of any kind, including
+// POST /api/runner, which spawns a Claude session with permission checks disabled that can write
+// comments and code fixes to the user's Azure DevOps account. Binding a hostname of your own
+// (`127.0.0.1 lever` in /etc/hosts) still works against a loopback bind, so nothing is lost.
+// FLOWLEVER_HOST remains as a deliberate, documented opt-out — see the warning in listen().
+const HOST = process.env.FLOWLEVER_HOST !== undefined && process.env.FLOWLEVER_HOST !== ''
+  ? process.env.FLOWLEVER_HOST
+  : '127.0.0.1';
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const IS_LOOPBACK = LOOPBACK_HOSTS.has(HOST);
+// Opting into a non-loopback bind must not silently re-open the runner to anyone who can reach the
+// port: starting an agent session needs its own explicit opt-in.
+const ALLOW_REMOTE_RUNNER = process.env.FLOWLEVER_ALLOW_REMOTE_RUNNER === '1';
 // When this process started — shown next to the version so "restart the server" is verifiable.
 const SERVER_STARTED_AT = new Date().toISOString();
 const WEB_DIR = path.resolve(__dirname, '..', 'web');
@@ -342,15 +356,30 @@ async function handleReviewApply(req, res, id) {
 
   const uniq = [...new Set(fps)];
   let findings;
+  let skipped = [];
   // `posted` carries the fix gate: for a finding whose agreed response is a code change the ledger
   // refuses the stamp without the pushed commit's sha (→ EUSER → 400). The browser never sends this
   // status for code fixes (it sends `pending-post` and lets the runner do the real work), so a 400
   // here means something tried to claim a fix it did not push.
-  if (status === 'posted') findings = ledger.markPosted(id, uniq, { by: 'user', sha: body.sha, repo: body.repo, branch: body.branch });
-  else if (status === 'pending-post') findings = ledger.setFindingPending(id, uniq, 'post', { by: 'user' });
-  else if (status === 'pending-apply') findings = ledger.setFindingPending(id, uniq, 'apply', { by: 'user' });
-  else findings = uniq.map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user' }));
-  sendJson(res, 200, { updated: findings.length, status, findings });
+  if (status === 'posted') {
+    const r = ledger.markPosted(id, uniq, { by: 'user', sha: body.sha, repo: body.repo, branch: body.branch, detailed: true });
+    findings = r.updated; skipped = r.skipped;
+  } else if (status === 'pending-post' || status === 'pending-apply') {
+    const kind = status === 'pending-post' ? 'post' : 'apply';
+    const r = ledger.setFindingPending(id, uniq, kind, { by: 'user', detailed: true });
+    findings = r.updated; skipped = r.skipped;
+  } else {
+    // `reworking` here is the finish screen saying "these are in flight", NOT the reviewer
+    // re-triaging them — so their approve/edit decisions must survive. Clearing them sent every
+    // suggestion-only finding back to Undecided and left the export reading "No applicable
+    // changes to export". `resolved` is a real completion, so it supersedes the decision as usual.
+    const keepDecision = status === 'reworking';
+    findings = uniq.map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user', keepDecision }));
+  }
+  // `skipped` names the findings the bulk operation passed over (already waived/resolved). The
+  // response used to carry only a smaller count, so a reviewer who posted 5 and saw "4 updated"
+  // had no way to learn which one was dropped.
+  sendJson(res, 200, { updated: findings.length, status, findings, skipped });
 }
 
 // Cancel a stuck Post/Apply: clear the in-flight markers so the findings return to the review
@@ -395,10 +424,13 @@ async function handleIngest(req, res, id) {
     const message = findingError(body.findings[i], i);
     if (message) return sendError(res, 400, message);
   }
+  // `scope` marks a PARTIAL pass, so reconciliation doesn't auto-resolve findings this round never
+  // examined. Passed straight through; the ledger validates its shape.
   const { round, stats } = ledger.ingestRound(id, body.findings, {
     note: body.note,
     reopenResolved: Boolean(body.reopenResolved),
     trigger: 'audit',
+    scope: body.scope === undefined ? null : body.scope,
   });
   sendJson(res, 200, { round, stats });
 }
@@ -464,7 +496,20 @@ function handleRunnerGet(res, wantLog) {
 
 const RUNNER_ERROR_STATUS = { EACTION: 400, EBUSY: 409, ENOBIN: 503, ESPAWN: 500, EIDLE: 409, EKILL: 500 };
 
+// Starting the runner spawns a Claude session with permission checks disabled that writes to Azure
+// DevOps. On a loopback bind that is the same trust boundary as the CLI which started the server.
+// On a non-loopback bind it is not: it would hand that capability to anyone who can reach the port.
+function remoteRunnerBlocked(res) {
+  if (IS_LOOPBACK || ALLOW_REMOTE_RUNNER) return false;
+  sendError(res, 403, `The runner is disabled because the server is bound to ${HOST} rather than `
+    + 'loopback, and the cockpit has no authentication. Bind 127.0.0.1 (the default), or set '
+    + 'FLOWLEVER_ALLOW_REMOTE_RUNNER=1 to accept that anyone who can reach this port may write to '
+    + 'your Azure DevOps account.');
+  return true;
+}
+
 async function handleRunnerStart(req, res) {
+  if (remoteRunnerBlocked(res)) return;
   const body = await readJsonBody(req);
   const action = body.action === undefined ? 'watch' : body.action;
   if (typeof action !== 'string') return sendError(res, 400, 'action must be a string');
@@ -498,7 +543,9 @@ function handleReport(res, id) {
 // ---------- static files ----------
 
 function handleStatic(req, res, pathname) {
-  if (req.method !== 'GET') return sendError(res, 405, 'Method not allowed');
+  // HEAD is GET without a body — answering 405 broke the standard contract for no reason.
+  const headOnly = req.method === 'HEAD';
+  if (req.method !== 'GET' && !headOnly) return sendError(res, 405, 'Method not allowed');
   let rel;
   try {
     rel = decodeURIComponent(pathname === '/' ? 'index.html' : pathname.slice(1));
@@ -514,7 +561,8 @@ function handleStatic(req, res, pathname) {
   if (!contentType) return sendError(res, 404, 'Not found');
   fs.readFile(filePath, (err, data) => {
     if (err) return sendError(res, 404, 'Not found');
-    res.writeHead(200, { 'Content-Type': contentType });
+    res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': data.length });
+    if (headOnly) return res.end();
     res.end(data);
   });
 }
@@ -577,6 +625,12 @@ async function route(req, res) {
   if (parts[1] === 'version' && parts.length === 2 && req.method === 'GET') {
     return sendJson(res, 200, { apiVersion: API_VERSION, pid: process.pid, startedAt: SERVER_STARTED_AT });
   }
+  // The browser recomputes readiness optimistically after a decision, and used to do it against a
+  // hardcoded copy of the severity weights — which silently drifted the moment anyone edited the
+  // documented config.json. Serve the real one instead.
+  if (parts[1] === 'config' && parts.length === 2 && req.method === 'GET') {
+    return sendJson(res, 200, ledger.loadConfig());
+  }
   if (parts[1] === 'runner' && parts.length === 2) {
     if (req.method === 'GET') return handleRunnerGet(res, url.searchParams.get('log') === '1');
     if (req.method === 'POST') return handleRunnerStart(req, res);
@@ -597,8 +651,10 @@ const server = http.createServer((req, res) => {
     .catch((err) => {
       if (res.writableEnded) return;
       if (err && err.code === 'EUSER') {
-        const status = req.method === 'GET' ? 404 : euserStatus(err);
-        return sendError(res, status, err.message);
+        // euserStatus decides on the MESSAGE, on every method. Forcing 404 for GET made
+        // `GET /api/requests?status=bogus` — a validation error — answer 404, so a client could
+        // not tell "no such resource" from "you sent nonsense".
+        return sendError(res, euserStatus(err), err.message);
       }
       if (err && err.code === 'ETOOBIG') return sendError(res, 413, err.message);
       if (err && err.code === 'EBADJSON') return sendError(res, 400, err.message);
@@ -608,8 +664,13 @@ const server = http.createServer((req, res) => {
 });
 
 ledger.initDataDir();
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`FlowLever cockpit → http://localhost:${server.address().port}`);
+  if (!IS_LOOPBACK) {
+    console.warn(`WARNING: bound to ${HOST}, not loopback. The cockpit has NO authentication — `
+      + 'anyone who can reach this address can read and change your review data'
+      + `${ALLOW_REMOTE_RUNNER ? ' AND start runner sessions that write to Azure DevOps' : ''}.`);
+  }
 });
 
 module.exports = { server };
