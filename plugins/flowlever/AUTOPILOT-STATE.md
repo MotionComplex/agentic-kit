@@ -7,12 +7,28 @@ verified by an independent reviewer in a fresh context, re-fixed until clean.
 findings verified still live.
 
 ## DoD
-- [x] Every blocker + major fixed (pending reviewer confirmation)
-- [ ] Every minor + nit fixed or deferred with a logged reason
-- [x] `node --test` green and above the 98 baseline — 159+ and climbing
-- [ ] No mock/noop/stub on the real path (reviewer to confirm)
-- [ ] Each unit reviewed by a fresh independent reviewer; blockers re-reviewed
+- [x] Every blocker + major fixed
+- [x] Every minor + nit fixed or deferred with a logged reason
+- [x] `node --test` green and above the 98 baseline — **177 passing**
+- [x] No mock/noop/stub on the real path — RV1 confirmed the FLOWLEVER_CLAUDE_BIN seam is
+      unmistakably a test seam (surfaced to the UI as `binFrom`), and nothing in src/ fakes work
+- [~] Each unit reviewed by a fresh independent reviewer; blockers re-reviewed — RV3 + RV2b pending
 - [ ] Owner report written
+
+## Deferred, with reasons (owner may override)
+- **R-8b — the fix-gate sha is shape-only.** `deadbeef` passes. Verifying a commit exists needs a
+  repo context the ledger does not have; the gate raises the cost of a false claim from "say nothing"
+  to "fabricate a plausible sha" and now says so on `isValidSha` and in the error text. A real check
+  belongs in the caller that has a checkout.
+- **R-5 — the cockpit can still block ~1.5s** behind a contended write. Inherent to a synchronous
+  ledger in a single-threaded server; bounded and disclosed rather than papered over. Eliminating it
+  means an async ledger — a rewrite, not a fix.
+- **X-2 — skipped workspaces are not yet shown in the UI.** They are reported on a response header
+  and at `GET /api/diagnostics`, and warned once in the server log. Rendering them on the board is a
+  small UI change I did not make because it needed browser verification I could not fold into this
+  round safely.
+- **U-6 (no light theme) and U-7 (dead vertical space)** — ARCHITECTURE.md states dark-only is
+  deliberate; U-7 is cosmetic. Neither attempted.
 
 ## Units
 - [merged] U1 ledger.js — `533d6ab`. C-1/2/3/4/5/6/7/8/10/11/15/17/19/20/22/23 + F-4.
@@ -36,9 +52,24 @@ findings verified still live.
   forking stub (1 grandchild before stop, 0 after), and a pid-file guard that survives a restart
   (adopted runner blocks a second start with EBUSY; a dead pid is cleaned up, not sticky).
   This settles the disagreement between the two original reviewers — the leak was shell-dependent.
-- [in-review] RV1 adversarial Opus review of ledger+server+runner (`533d6ab`, `b9e6444`, `d382b4a`) —
-  briefed to falsify 10 specific claims, stress the lock, and audit the 3 changed test assertions.
-- [todo] RV2 adversarial review of cli+report+docs+app.js once U5 lands.
+- [merged] U5 web/app.js — `6442b8c` (delegated). U-1, U-2, U-3, U-4, U-8, C-18, C-24, C-25, F-5 and
+  the optional U-5 keyboard shortcuts, each verified in a real browser with screenshots read back.
+- [done] RV1 adversarial review of ledger+server+runner → **Request-changes**, 8 findings. Its control
+  experiment (my harness against the PRE-fix ledger: 271/320 writes lost, one job claimed 26x) proved
+  the concurrency tests are genuinely contended. All 10 original claims held, but 3 fixes had traded
+  one defect for another.
+- [merged] FIX-1 `8093838` — answered RV1. R-1/R-2(id half)/R-3/R-4/R-5(partial)/R-6a/R-6b/R-7/R-8a,c,d,e.
+- [done] RV2a scoped re-review of `8093838` → **Regressions-found**. Found X-1 (my pidAlive rewrite
+  re-created the wedge), X-3 (owesGitCommit stopped failing closed), R-2's symlink half untouched,
+  R-5 still a 9.71s freeze, R-8b disclosed only in a commit message, and — most valuable — proved
+  TWO of my new tests were VACUOUS by overlaying them on the pre-fix source.
+- [merged] FIX-2 `89eec9c` + `5d799d7` — answered RV2a. Both vacuous tests replaced with ones that
+  fail against the code they guard (verified by the same overlay method: 5 fail on pre-fix sources).
+  Server now caps its own lock wait at 1.5s and answers 503+Retry-After; freeze measured down from
+  9710ms to 1481ms — bounded, not eliminated, and now described that way.
+- [in-review] RV3 final scoped confirmation of `89eec9c` (Opus) — including an independent redo of the
+  vacuity overlay and an audit of the newly added tests.
+- [in-review] RV2b adversarial review of cli+report+docs+app.js (Sonnet, browser-driven).
 
 ## Real-data validation (beyond the test suite)
 The owner's live cockpit runs against `~/.flowlever` (40 workspaces, 189 findings), NOT the repo's
