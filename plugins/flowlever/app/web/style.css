@@ -813,6 +813,10 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 
 /* ============================== per-hunk review ============================== */
 
+/* Named heading above the per-hunk accept/reject/edit row — it used to have no caption at
+ * all, reading as an unlabeled second "decision" next to the finding-level one below it. */
+.hunk-section-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
+.hunk-section-head .step-section-label { margin-bottom: 0; }
 .hunk-tally { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--fg-mute); }
 .hunk-tally .num { font-family: var(--mono); font-weight: 700; }
 .tally-accepted { color: var(--add-fg); }
@@ -912,6 +916,10 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 }
 .btn:hover { border-color: var(--fg-mute); color: var(--fg); }
 .btn:active { transform: scale(.98); }
+/* Without this, a disabled Apply/Mark button (e.g. gated by an unsaved decision, U-2) was
+ * pixel-identical to a clickable one — "refusing" only worked in the DOM, not on screen. */
+.btn:disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
+.btn:disabled:hover { border-color: var(--line); color: var(--fg-dim); }
 .btn-accent { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 640; }
 .btn-accent:hover { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-fg); }
 .btn-good { color: var(--add-fg); }
@@ -1031,6 +1039,14 @@ body.modal-open { overflow: hidden; }
 }
 .step-progressbar { flex: 1; min-width: 160px; height: 6px; border-radius: 999px; background: var(--panel-3); overflow: hidden; }
 .step-progressbar > i { display: block; height: 100%; background: var(--accent); transition: width var(--dur-normal) var(--ease-enter); }
+/* Discoverability for the decide-loop keyboard shortcuts (U-5) — without this the bindings
+ * exist but no one finds them; hidden below the header width so it never crowds the title. */
+.step-kbd-hint { display: none; font-size: 11px; color: var(--fg-mute); white-space: nowrap; }
+.step-kbd-hint kbd {
+  font-family: var(--mono); font-size: 10.5px; background: var(--panel-3); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 5px; color: var(--fg-dim);
+}
+@media (min-width: 900px) { .step-kbd-hint { display: block; } }
 .step-exit { margin-left: auto; }
 
 .step-layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }
@@ -1126,6 +1142,16 @@ body.modal-open { overflow: hidden; }
 /* when a triage tag pushes to the right, the undo sits just after it */
 .triage-tag + .dec-undo { margin-left: 8px; }
 
+/* A decision the server never confirmed (U-2) — never let this read as saved: same amber as a
+ * "major" severity so it registers as something to act on, not decoration. Clickable — it
+ * retries the same persist call the original decision made. */
+.dec-not-saved {
+  font-size: 11.5px; font-weight: 640; color: var(--major); cursor: pointer;
+  background: transparent; border: 1px solid var(--major-line); border-radius: var(--radius-sm);
+  padding: 5px 10px;
+}
+.dec-not-saved:hover { background: var(--major-soft); }
+
 /* "Proposed comment" — the pr-review suggestion surfaced as the comment to post */
 .f-suggestion.proposed-comment { background: var(--panel-2); border-color: var(--line); }
 .f-suggestion.proposed-comment .f-suglabel { color: var(--fg-dim); }
@@ -1185,6 +1211,11 @@ body.modal-open { overflow: hidden; }
   background: var(--panel-2); border-bottom: 1px solid var(--line-soft);
 }
 .finish-target { font-family: var(--mono); font-size: 12px; color: var(--fg-dim); word-break: break-word; }
+/* One decision below the fold didn't save — say so before Apply/Mark, not just per-row (U-2). */
+.finish-unsaved-warning {
+  font-size: 12.5px; font-weight: 560; color: var(--major); margin: 0;
+  padding: 10px 14px; border-radius: var(--radius-sm); background: var(--major-soft); border: 1px solid var(--major-line);
+}
 .finish-rows { display: flex; flex-direction: column; }
 .finish-row { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line-soft); font-size: 13px; }
 .finish-row:first-child { border-top: none; }
@@ -1206,6 +1237,9 @@ body.modal-open { overflow: hidden; }
   background: var(--panel); border: 1px solid var(--line-soft);
 }
 .finish-actions .btn { padding: 10px 18px; font-size: 13px; }
+/* Are-you-sure that replaces the primary Apply button in place — same shape as the
+ * PR-post runner-confirm, so both irreversible write-backs read as equally guarded. */
+.apply-confirm { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .finish-next {
   display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--fg-mute);
   padding: 12px 16px; border-radius: var(--radius-sm); background: var(--accent-soft); border: 1px solid var(--accent-line);
@@ -1282,7 +1316,9 @@ body.modal-open { overflow: hidden; }
 /* ============================== empty / skeleton / toast ============================== */
 
 .empty, .empty-tab { text-align: center; color: var(--fg-mute); padding: 60px 20px; }
-.empty-glyphs { font-size: 28px; letter-spacing: 6px; margin-bottom: 14px; opacity: .5; }
+/* Now a captioned legend (glyph + label per severity), not decoration — a first-time
+ * visitor has nowhere else to learn what ◆▲●○ mean before any finding exists. */
+.empty-glyphs { display: flex; justify-content: center; gap: 16px; margin-bottom: 14px; opacity: .8; }
 .empty code { font-family: var(--mono); background: var(--panel-3); padding: 2px 8px; border-radius: 6px; color: var(--fg-dim); }
 
 .skel { background: linear-gradient(90deg, var(--panel) 25%, var(--panel-3) 37%, var(--panel) 63%); background-size: 400% 100%; animation: shimmer 1.4s ease infinite; border-radius: var(--radius-sm); }

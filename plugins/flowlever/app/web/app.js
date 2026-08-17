@@ -23,10 +23,19 @@ const STATUS_COLS = [
   { key: 'resolved',  label: 'Resolved' },
   { key: 'waived',    label: 'Waived' },
 ];
-// Mirrors config.json defaults — used only for optimistic readiness recompute;
-// the server's value is authoritative and reconciled after every POST.
+// Defaults matching ledger.js's DEFAULT_CONFIG — used only for the optimistic readiness
+// recompute, and only until GET /api/config answers (fetched at boot, see loadLiveConfig
+// below). The server's value is authoritative either way and reconciled after every POST;
+// this is what keeps the OPTIMISTIC number from drifting the moment someone edits
+// config.json's documented severityWeights/readyThreshold (F-5).
 const SEVERITY_WEIGHTS = { blocker: 10, major: 5, minor: 2, info: 0.5 };
 const READY_THRESHOLD = 85;
+const SCORE_ZERO_AT_PENALTY = 40;
+let liveConfig = null;   // { severityWeights, gates: { readyThreshold, scoreZeroAtPenalty } } once fetched
+
+async function loadLiveConfig() {
+  try { liveConfig = await api('/api/config'); } catch { /* keep the fallback constants */ }
+}
 
 const ICONS = {
   pin: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16v6"/><path d="M9 3h6l-1 6 3.5 3.5a1 1 0 0 1-.7 1.5H7.2a1 1 0 0 1-.7-1.5L10 9z"/></svg>',
@@ -77,7 +86,7 @@ const state = {
   // taken when the flow launches; `decisions` is the per-finding flow decision
   // (accept/edit/redirect/waive/skip) — the actual edits persist via the draft
   // review API, this just records which path the reviewer chose.
-  flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null },
+  flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null, persistFailed: {} },
   section: { kind: null, features: [] },   // cached cards for the open PR section, re-bound to live jobs each poll
   runner: null,            // last GET /api/runner — is a session draining the queue right now?
 };
@@ -310,18 +319,22 @@ async function api(path, opts = {}) {
 /* ============================== readiness (optimistic) ============================== */
 
 function computeReadiness(findings) {
+  const weights = (liveConfig && liveConfig.severityWeights) || SEVERITY_WEIGHTS;
+  const gates = (liveConfig && liveConfig.gates) || {};
+  const readyThreshold = gates.readyThreshold ?? READY_THRESHOLD;
+  const scoreZeroAtPenalty = gates.scoreZeroAtPenalty || SCORE_ZERO_AT_PENALTY;
   const openBySeverity = { blocker: 0, major: 0, minor: 0, info: 0 };
   let penalty = 0;
   for (const f of findings || []) {
     if (f.status !== 'open' && f.status !== 'reworking') continue;
     if (isInFlightOrOut(f)) continue;   // posted/applied/in-flight = not open reviewer work → no penalty
     if (openBySeverity[f.severity] != null) openBySeverity[f.severity]++;
-    penalty += SEVERITY_WEIGHTS[f.severity] ?? 0;
+    penalty += weights[f.severity] ?? 0;
   }
-  const score = Math.max(0, Math.round(100 - (penalty * 100) / 40));
+  const score = Math.max(0, Math.round(100 - (penalty * 100) / scoreZeroAtPenalty));
   let gate = 'in-progress';
   if (openBySeverity.blocker > 0) gate = 'not-ready';
-  else if (score >= READY_THRESHOLD) gate = 'ready';
+  else if (score >= readyThreshold) gate = 'ready';
   return { score, gate, openBySeverity };
 }
 
@@ -455,15 +468,15 @@ function renderGuide() {
         h('h2', {}, 'The loop'),
         h('div', { class: 'guide-steps' },
           gStep(1, 'Audit',
-            h('p', {}, 'In Claude Code: ', h('code', {}, '/lever:audit checkout-redesign'), ' (or “audit feature X”, or paste a spec link). It fetches the sources, runs a 7-dimension check, and ingests findings into the ledger.')),
+            h('p', {}, 'In Claude Code: ', h('code', {}, '/flowlever:audit checkout-redesign'), ' (or “audit feature X”, or paste a spec link). It fetches the sources, runs a 7-dimension check, and ingests findings into the ledger.')),
           gStep(2, 'Review — step through, one finding at a time',
             h('p', {}, 'Open the feature here and hit the ', h('strong', {}, '“Review N flagged items”'), ' button in the header loop strip. The guided ', h('strong', {}, 'stepper'), ' walks each flagged finding one at a time: you see the proposed change as a red/green diff and decide ', h('strong', {}, 'Accept · Edit · Redirect · Waive · Skip'), '. Decisions accumulate — nothing is applied mid-flow — and a rail lets you jump around. The ', h('strong', {}, 'All findings'), ' board, ', h('strong', {}, 'Coverage'), ', and ', h('strong', {}, 'Timeline'), ' tabs are all still there.')),
           gStep(3, 'Apply / Export',
-            h('p', {}, 'The finish screen is a ', h('strong', {}, 'decision summary'), ' grouped by spec page / work item. From there: ', h('strong', {}, 'Export the work order'), ' (markdown to hand a coding agent) and/or ', h('strong', {}, 'mark the reviewed findings as Reworking'), ' so the board reflects in-flight work. Drafts come from ', h('code', {}, '/lever:rework'), '; nothing is written to Confluence/ADO from the browser.')),
+            h('p', {}, 'The finish screen is a ', h('strong', {}, 'decision summary'), ' grouped by spec page / work item. From there: ', h('strong', {}, 'Export the work order'), ' (markdown to hand a coding agent) and/or ', h('strong', {}, 'mark the reviewed findings as Reworking'), ' so the board reflects in-flight work. Drafts come from ', h('code', {}, '/flowlever:rework'), '; nothing is written to Confluence/ADO from the browser.')),
           gStep(4, 'Re-audit',
-            h('p', {}, 'Run ', h('code', {}, '/lever:audit'), ' again. The ledger ', h('strong', {}, 'reconciles'), ': fixed findings auto-resolve, still-open ones refresh, and anything that ', h('strong', {}, 'silently came back'), ' is flagged as a regression (red on the timeline).')),
+            h('p', {}, 'Run ', h('code', {}, '/flowlever:audit'), ' again. The ledger ', h('strong', {}, 'reconciles'), ': fixed findings auto-resolve, still-open ones refresh, and anything that ', h('strong', {}, 'silently came back'), ' is flagged as a regression (red on the timeline).')),
           gStep(5, 'Ship',
-            h('p', {}, 'When the gate is green, ', h('code', {}, '/lever:brief checkout-redesign'), ' composes an implementation-ready handoff brief from the spec, designs and settled decisions.')))),
+            h('p', {}, 'When the gate is green, ', h('code', {}, '/flowlever:brief checkout-redesign'), ' composes an implementation-ready handoff brief from the spec, designs and settled decisions.')))),
 
       // PR flows
       h('section', { class: 'guide-card' },
@@ -902,6 +915,7 @@ function initFlow(data) {
     state.flow = {
       active: true, finish: false, featureId: current.id,
       items: reviewable.map((f) => f.fp), idx: 0, decisions: hydrateDecisions(findings), waiving: null, editingComment: null,
+      persistFailed: {},
     };
   }
   const len = state.flow.items.length;
@@ -910,10 +924,34 @@ function initFlow(data) {
   if (state.flow.idx < 0) state.flow.idx = 0;
 }
 
+/* While the stepper is open, a background reload (a decision synced in from the board modal, a
+ * scoped re-audit finishing, /flowlever:watch reconciling a round) can change which findings
+ * exist — but state.flow.items was frozen at launch and only ever rebuilt on a feature switch
+ * or by retryPost's manual reset. So a re-review landing mid-stepper added findings the rail and
+ * "x of N" never showed, and a finding removed by reconciliation stayed counted forever (C-25).
+ * Reconciles in place instead: keeps the reviewer's position and every decision already
+ * recorded, appends newly-reviewable fps, and drops only fps that no longer exist at all. */
+function reconcileFlowItems(data) {
+  if (state.flow.featureId !== current.id || !Array.isArray(state.flow.items)) return;
+  const findings = (data.ledger && data.ledger.findings) || [];
+  const byFp = new Set(findings.map((f) => f.fp));
+  const liveFps = reviewableFindings(findings).map((f) => f.fp);
+  const currentFp = state.flow.items[state.flow.idx];
+  const kept = state.flow.items.filter((fp) => byFp.has(fp));
+  const known = new Set(kept);
+  const added = liveFps.filter((fp) => !known.has(fp));
+  if (kept.length === state.flow.items.length && added.length === 0) return;   // nothing changed
+  state.flow.items = [...kept, ...added];
+  const newIdx = state.flow.items.indexOf(currentFp);
+  state.flow.idx = newIdx >= 0 ? newIdx : Math.min(state.flow.idx, state.flow.items.length - 1);
+  if (state.flow.idx < 0) state.flow.idx = 0;
+}
+
 function renderFlowInto() {
   if (current.view !== 'review-flow' || !state.detail) return;
   const app = $('#app');
   const data = state.detail;
+  reconcileFlowItems(data);
   const kind = data.feature && data.feature.kind;
   const postable = state.flow.finish && (kind === 'pr-review' || kind === 'pr-respond');
   if (postable) ensureApplyPolling(); else stopPolling();
@@ -946,6 +984,7 @@ function ensureFlow() {
     active: false, finish: false, featureId: current.id,
     items: reviewableFindings(findings).map((f) => f.fp),
     idx: 0, decisions: hydrateDecisions(findings), waiving: null, editingComment: null,
+    persistFailed: {},
   };
 }
 
@@ -974,8 +1013,27 @@ function flowEmptyView() {
       h('div', { class: 'step-empty' },
         h('h2', {}, 'Nothing to review'),
         h('p', { class: 'meta-dim' }, 'No open findings carry a proposed change yet. Run ',
-          h('code', {}, '/lever:rework'), ' in Claude Code to draft fixes, then re-audit.'),
+          h('code', {}, '/flowlever:rework'), ' in Claude Code to draft fixes, then re-audit.'),
         h('p', {}, h('a', { class: 'backlink', href: back }, '← Back to the board')))));
+}
+
+/* Single source of truth for the decide-loop keyboard shortcuts (U-5) — the global keydown
+ * handler and this discoverability hint both read it, so the hint can never claim a key the
+ * handler doesn't actually bind. Keyed by the same `kind` decisionActions() buttons use. */
+const DECIDE_KEYS = { a: 'accept', e: 'edit', w: 'waive', r: 'redirect', f: 'fix-only', s: 'skip' };
+
+function stepKbdHint(kind) {
+  const cfg = decisionActions(kind);
+  const labelFor = (k) => {
+    const b = cfg.buttons.find((btn) => btn.kind === k);
+    // Buttons carry an emoji glyph prefix ("✅ Accept") — strip it so the hint reads as plain text.
+    return b ? b.label.replace(/^\S+\s*/, '') : k;
+  };
+  const entries = [['k/j', '←/→ prev/next'],
+    ...Object.entries(DECIDE_KEYS).filter(([, k]) => cfg.buttons.some((b) => b.kind === k))
+      .map(([key, k]) => [key, labelFor(k)])];
+  return h('div', { class: 'step-kbd-hint', title: 'Keyboard shortcuts (disabled while typing)' },
+    entries.map(([key, label], i) => [i ? ' · ' : '', h('kbd', {}, key), ' ', label]));
 }
 
 /* The stepper: top bar (progress) · item rail · focused step card · prev/next. */
@@ -986,12 +1044,14 @@ function stepperView(data) {
   const f = findings.find((x) => x.fp === fp);
   const total = items.length;
   const decided = items.filter((id) => state.flow.decisions[id]).length;
+  const kind = (data.feature && data.feature.kind) || 'spec';
 
   const top = h('div', { class: 'step-top' },
     h('div', { class: 'step-top-title' }, 'Reviewing ', h('span', { class: 'meta-dim' }, data.feature.title || current.id)),
     h('span', { class: 'step-progress' }, `${idx + 1} of ${total}`),
     h('div', { class: 'step-progressbar', role: 'progressbar', 'aria-valuenow': String(decided), 'aria-valuemax': String(total) },
       h('i', { style: `width:${total ? Math.round((decided / total) * 100) : 0}%` })),
+    stepKbdHint(kind),
     h('button', { class: 'btn step-exit', type: 'button',
       onclick: () => { location.hash = `#/feature/${encodeURIComponent(current.id)}`; } }, 'Exit to board'),
   );
@@ -1232,10 +1292,18 @@ function decisionRow(data, f) {
   const undo = decKind
     ? h('button', { class: 'dec-undo', type: 'button', title: 'Clear this decision', onclick: () => undecide(f) }, '↺ Undo')
     : null;
+  // The click landed locally (decKind/tag above already reflect it) but the server never
+  // confirmed it — say so here rather than let the tag imply it's saved (U-2).
+  const notSaved = state.flow.persistFailed[f.fp]
+    ? h('button', {
+        class: 'dec-not-saved', type: 'button',
+        title: 'The server did not confirm this decision.', onclick: () => retryPersist(f.fp),
+      }, '⚠ not saved — retry')
+    : null;
   const row = h('div', { class: 'decision-row' },
     h('span', { class: 'decision-label' }, cfg.label || 'Decision'),
     ...cfg.buttons.map(mk),
-    tag, undo);
+    tag, undo, notSaved);
   return cfg.helper
     ? h('div', { class: 'decision-wrap' }, row, h('p', { class: 'decision-helper meta-dim' }, cfg.helper))
     : row;
@@ -1284,16 +1352,28 @@ function stepWaiveForm(f) {
   return form;
 }
 
+/* Shared with the j/k keyboard shortcuts (U-5) so both routes move the stepper identically. */
+function stepGoPrev() {
+  if (state.flow.idx <= 0) return;
+  state.flow.idx--;
+  renderFlowInto();
+}
+function stepGoNext() {
+  if (state.flow.idx >= state.flow.items.length - 1) state.flow.finish = true;
+  else state.flow.idx++;
+  renderFlowInto();
+}
+
 function stepNav() {
   const { idx, items } = state.flow;
   const atFirst = idx <= 0;
   const atLast = idx >= items.length - 1;
   return h('div', { class: 'step-nav' },
-    h('button', { class: 'btn', type: 'button', disabled: atFirst,
-      onclick: () => { if (!atFirst) { state.flow.idx--; renderFlowInto(); } } }, '← Prev'),
+    h('button', { class: 'btn', type: 'button', disabled: atFirst, title: 'Previous (k / ←)',
+      onclick: stepGoPrev }, '← Prev'),
     h('span', { class: 'step-nav-mid' }, `${idx + 1} / ${items.length}`),
-    h('button', { class: 'btn btn-accent', type: 'button',
-      onclick: () => { if (atLast) state.flow.finish = true; else state.flow.idx++; renderFlowInto(); } },
+    h('button', { class: 'btn btn-accent', type: 'button', title: 'Next (j / →)',
+      onclick: stepGoNext },
       atLast ? 'Finish →' : 'Next →'));
 }
 
@@ -1332,14 +1412,17 @@ async function decide(data, f, kind) {
   // straight away so the card moves to the Waived lane and the decision survives a refresh.
   if (kind === 'waive' && cfg.quickDismiss) {
     setFlowDecision(fp, 'waive', { reason: '' });
-    await persistWaive(fp, 'dismissed');
-    next();
+    const ok = await persistWaive(fp, 'dismissed');
+    // A failed persist must not read as done: stay put and show "not saved" rather than
+    // auto-advancing to a summary that claims this was dismissed (U-2).
+    if (ok) next(); else reviewRefresh();
     return;
   }
 
   if (kind === 'accept') {
     setFlowDecision(fp, 'accept');
-    await persistDecisionField(fp, 'approve');   // persist the approve so every surface agrees
+    const ok = await persistDecisionField(fp, 'approve');   // persist the approve so every surface agrees
+    if (!ok) { reviewRefresh(); return; }
     await acceptAll(f);
     next();
   } else if (kind === 'fix-only') {
@@ -1352,7 +1435,8 @@ async function decide(data, f, kind) {
       return;
     }
     setFlowDecision(fp, 'fix-only');
-    await persistDecisionField(fp, 'fix-only');
+    const ok = await persistDecisionField(fp, 'fix-only');
+    if (!ok) { reviewRefresh(); return; }
     await acceptAll(f);
     next();
   } else if (kind === 'edit') {
@@ -1396,8 +1480,20 @@ async function decide(data, f, kind) {
   }
 }
 
+/* A decision the Decision Summary lists as e.g. "Apply as proposed" must mean the server
+ * actually holds it — otherwise the summary is describing a click, not a saved state. Both
+ * persist helpers below report ok/failed here instead of only toasting, so a dropped POST
+ * (server down mid-stepper, say) stays visible on the finding and blocks Apply rather than
+ * silently reading as decided. Cleared the moment a later persist for the same fp succeeds. */
+function markPersisted(fp, ok) {
+  if (ok) delete state.flow.persistFailed[fp];
+  else state.flow.persistFailed[fp] = true;
+}
+
 /* Persist a triage decision (approve/edit, or null to clear) onto the finding so the board,
- * stepper and Post screen stay in sync and it survives a refresh. Optimistic, then reloads. */
+ * stepper and Post screen stay in sync and it survives a refresh. Optimistic, then reloads.
+ * Returns whether the server actually accepted it — callers must not advance/report success
+ * on a false return (U-2). */
 async function persistDecisionField(fp, decision) {
   const cur = findFinding(fp);
   if (cur) { if (decision) cur.decision = decision; else delete cur.decision; }
@@ -1407,14 +1503,19 @@ async function persistDecisionField(fp, decision) {
       body: JSON.stringify({ decision }),
     });
     await loadDetail(current.id, true);
+    markPersisted(fp, true);
+    return true;
   } catch (e) {
-    toast(`Could not save decision: ${e.message}`);
+    toast(`Could not save decision: ${e.message} — it will show as "not saved" until you retry`);
     try { await loadDetail(current.id, true); } catch { /* keep optimistic */ }
+    markPersisted(fp, false);
+    return false;
   }
 }
 
 /* Dismiss = persist the finding as `waived` immediately (it moves to the Waived lane and the
- * decision sticks across refreshes), rather than holding the decision only in the browser. */
+ * decision sticks across refreshes), rather than holding the decision only in the browser.
+ * Returns whether the server accepted it — same contract as persistDecisionField. */
 async function persistWaive(fp, reason) {
   const cur = findFinding(fp);
   if (cur) { cur.status = 'waived'; cur.statusReason = reason || 'dismissed'; }   // optimistic
@@ -1424,10 +1525,28 @@ async function persistWaive(fp, reason) {
       body: JSON.stringify({ status: 'waived', reason: reason || 'dismissed' }),
     });
     await loadDetail(current.id, true);
+    markPersisted(fp, true);
+    return true;
   } catch (e) {
-    toast(`Could not dismiss: ${e.message}`);
+    toast(`Could not dismiss: ${e.message} — it will show as "not saved" until you retry`);
     try { await loadDetail(current.id, true); } catch { /* keep optimistic */ }
+    markPersisted(fp, false);
+    return false;
   }
+}
+
+/* Retry a decision whose persist previously failed (surfaced as "not saved — retry" on the
+ * decision row and the Decision Summary). Re-issues the same persist call decide() made —
+ * doesn't re-run acceptAll/advance, so it's safe to call from the finish screen without
+ * disturbing the reviewer's position. */
+async function retryPersist(fp) {
+  const dec = state.flow.decisions[fp];
+  if (!dec) return;
+  if (dec.kind === 'accept') await persistDecisionField(fp, 'approve');
+  else if (dec.kind === 'fix-only') await persistDecisionField(fp, 'fix-only');
+  else if (dec.kind === 'waive') await persistWaive(fp, dec.reason || 'dismissed');
+  else { delete state.flow.persistFailed[fp]; }   // decisions with no direct persist call (edit/redirect/skip)
+  reviewRefresh();
 }
 
 /* Accept the whole proposal: mark every hunk accepted + verdict proposed, in one
@@ -1527,11 +1646,20 @@ function finishView(data) {
     h('div', { class: 'finish-group-head' }, h('code', { class: 'finish-target' }, target)),
     h('div', { class: 'finish-rows' }, rows.map(({ f, kind: dk, reason }) => {
       const sev = SEV[f.severity] ? f.severity : 'info';
+      // A decision the server never confirmed must not read the same as a saved one here —
+      // this IS the screen that told the reviewer their click "will be applied" (U-2).
+      const notSaved = state.flow.persistFailed[f.fp]
+        ? h('button', {
+            class: 'dec-not-saved', type: 'button',
+            title: 'The server did not confirm this decision.', onclick: () => retryPersist(f.fp),
+          }, '⚠ not saved — retry')
+        : null;
       return h('div', { class: 'finish-row' },
         h('span', { class: `sev-glyph sev-${sev}` }, SEV[sev].glyph),
         h('span', { class: 'frow-title' }, f.title || '(untitled)',
           reason ? h('span', { class: 'meta-dim' }, ` — ${reason}`) : null),
-        h('span', { class: `dec-pill dec-${dk}` }, pillMap[dk] || dk));
+        h('span', { class: `dec-pill dec-${dk}` }, pillMap[dk] || dk),
+        notSaved);
     }))));
 
   // `fix-only` belongs here too: it's the decision with the MOST to hand a coding agent (a code
@@ -1543,6 +1671,15 @@ function finishView(data) {
     .filter((fp) => flowDecisionKind(fp) === 'waive')
     .map((fp) => ({ fp, reason: (state.flow.decisions[fp] && state.flow.decisions[fp].reason) || '' }));
   const toExport = reworkFps.map((fp) => findings.find((x) => x.fp === fp)).filter(Boolean);
+  // Findings this screen is about to write back or mark in-flight, but whose decision the
+  // server never confirmed — Apply/Mark must refuse rather than act on a click that may not
+  // be what's actually recorded server-side (U-2).
+  const unsavedInScope = [...reworkFps, ...waiveItems.map((w) => w.fp)]
+    .filter((fp) => state.flow.persistFailed[fp]);
+  const unsavedWarning = unsavedInScope.length
+    ? h('p', { class: 'finish-unsaved-warning' },
+        `⚠ ${plural(unsavedInScope.length, 'decision', 'decisions')} above didn't save to the server — retry ${unsavedInScope.length === 1 ? 'it' : 'them'} before applying or marking in-flight.`)
+    : null;
 
   const exportEl = toExport.length
     ? exportPanel(data.feature, toExport, 'feature')
@@ -1583,21 +1720,46 @@ function finishView(data) {
     : (applyMode ? `Apply ${plural(draftableN, 'change', 'changes')} → ADO / Confluence`
         : proposeMode ? `Draft ${plural(undraftedN, 'proposal', 'proposals')} first`
         : 'Nothing accepted to apply');
+  // Apply writes real proposals to real ADO/Confluence targets — the same class of action
+  // PR posting gates behind an explicit "Run now?" (renderRunnerZone's showConfirm). A single
+  // click used to both queue the write and start the runner that executes it; this makes Apply
+  // ask the same are-you-sure, naming what gets written and where, before doing either.
+  const confirmingApply = applyMode && !!state.flow.confirmApply;
+  const applyPrimary = confirmingApply
+    ? h('span', { class: 'apply-confirm' },
+        h('span', { class: 'runner-confirm-msg' },
+          `Write ${plural(draftableN, 'change', 'changes')} to ADO work-item fields / Confluence sections now?`),
+        h('button', {
+          class: 'btn btn-accent', type: 'button',
+          onclick: () => { state.flow.confirmApply = false; applySpec(draftableFps); },
+        }, '▶ Write now'),
+        h('button', {
+          class: 'btn', type: 'button',
+          onclick: () => { state.flow.confirmApply = false; renderFlowInto(); },
+        }, 'Cancel'))
+    : h('button', {
+        class: `btn btn-accent${busy ? ' is-busy' : ''}`, type: 'button',
+        disabled: busy || unsavedInScope.length > 0 || (!applyMode && !proposeMode),
+        'aria-busy': busy ? 'true' : 'false',
+        title: unsavedInScope.length > 0
+          ? `${plural(unsavedInScope.length, 'decision', 'decisions')} below didn't save — retry ${unsavedInScope.length === 1 ? 'it' : 'them'} first.`
+          : applyMode
+            ? 'Queue the write-back: the runner applies your accepted/edited proposals to ADO work-item fields / Confluence sections — surgically, on your confirmation (nothing is written until you click, and confirmed again next).'
+            : proposeMode
+              ? 'Draft the before→after edits for your accepted findings (runs /flowlever:propose). You then review them here and Apply.'
+              : 'Nothing accepted to apply yet.',
+        onclick: () => {
+          if (applyMode) { state.flow.confirmApply = true; renderFlowInto(); }
+          else if (proposeMode) enqueuePropose();
+        },
+      }, busy ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : null, applyLabel);
   const actions = h('div', { class: 'finish-actions' },
+    isPr ? null : applyPrimary,
     isPr ? null : h('button', {
-      class: `btn btn-accent${busy ? ' is-busy' : ''}`, type: 'button',
-      disabled: busy || (!applyMode && !proposeMode),
-      'aria-busy': busy ? 'true' : 'false',
-      title: applyMode
-        ? 'Queue the write-back: the runner applies your accepted/edited proposals to ADO work-item fields / Confluence sections — surgically, on your confirmation (nothing is written until you click).'
-        : proposeMode
-          ? 'Draft the before→after edits for your accepted findings (runs /flowlever:propose). You then review them here and Apply.'
-          : 'Nothing accepted to apply yet.',
-      onclick: () => { if (applyMode) applySpec(draftableFps); else if (proposeMode) enqueuePropose(); },
-    }, busy ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : null, applyLabel),
-    isPr ? null : h('button', {
-      class: 'btn', type: 'button', disabled: applyN === 0 || busy,
-      title: 'Mark these findings as rework-in-flight locally (no write-back).',
+      class: 'btn', type: 'button', disabled: applyN === 0 || busy || unsavedInScope.length > 0,
+      title: unsavedInScope.length > 0
+        ? `${plural(unsavedInScope.length, 'decision', 'decisions')} below didn't save — retry ${unsavedInScope.length === 1 ? 'it' : 'them'} first.`
+        : 'Mark these findings as rework-in-flight locally (no write-back).',
       onclick: () => applyReviewed(reworkFps, waiveItems),
     }, applyN ? `Mark ${plural(applyN, 'finding', 'findings')} in-flight` : 'Nothing to mark'),
     h('button', { class: 'btn', type: 'button', onclick: () => { state.flow.finish = false; renderFlowInto(); } }, '← Back to steps'),
@@ -1608,6 +1770,7 @@ function finishView(data) {
     h('a', { class: 'backlink', href: `#/feature/${encodeURIComponent(current.id)}` }, '← Overview'),
     head,
     ...groups,
+    unsavedWarning,
     postActionEl(data),
     h('div', { class: 'finish-head' },
       h('div', { class: 'step-section-label' }, 'Export work order — hand to a coding agent'),
@@ -1673,7 +1836,7 @@ function nextStepNote(data) {
   }
   return h('div', { class: 'finish-next' }, '↻ Next: ', h('strong', {}, 'Apply'),
     ' writes accepted changes back to ADO / Confluence (countered items re-audit automatically), then ',
-    h('code', {}, '/lever:audit'), ' reconciles the ledger.');
+    h('code', {}, '/flowlever:audit'), ' reconciles the ledger.');
 }
 
 function postActionEl(data) {
@@ -2150,14 +2313,12 @@ async function renderHome() {
       requestsStripEl([]),
       h('div', { class: 'empty' },
         h('div', { class: 'empty-glyphs' },
-          h('span', { class: 'sev-blocker' }, '◆'), ' ',
-          h('span', { class: 'sev-major' }, '▲'), ' ',
-          h('span', { class: 'sev-minor' }, '●'), ' ',
-          h('span', { class: 'sev-info' }, '○')),
+          ...SEV_ORDER.map((s) => h('span', { class: `sev sev-${s}` },
+            h('span', { class: 'sev-glyph' }, SEV[s].glyph), ' ', SEV[s].label))),
         h('h2', {}, 'Nothing in the cockpit yet'),
         h('p', {}, 'Seed the demo with ', h('code', {}, 'node src/cli.js demo'),
-          ', or run ', h('code', {}, '/lever:audit'), ', ', h('code', {}, '/pr-review'),
-          ' or ', h('code', {}, '/pr-respond'), ' from Claude Code.')));
+          ', or run ', h('code', {}, '/flowlever:audit'), ', ', h('code', {}, '/flowlever:pr-review'),
+          ' or ', h('code', {}, '/flowlever:pr-respond'), ' from Claude Code.')));
     startHomeRequestsPoll();
     return;
   }
@@ -2233,7 +2394,7 @@ function sectionEmpty(kind) {
         h('span', { class: 'sev-info' }, '○')),
       h('h2', {}, 'No spec audits yet'),
       h('p', {}, 'Seed a demo workspace with ', h('code', {}, 'node src/cli.js demo'),
-        ' or run ', h('code', {}, '/lever:audit'), ' from a Claude Code session.'));
+        ' or run ', h('code', {}, '/flowlever:audit'), ' from a Claude Code session.'));
   }
   const cmd = kind === 'pr-review' ? '/pr-review <id>' : '/pr-respond <id>';
   const what = kind === 'pr-review'
@@ -2457,7 +2618,7 @@ function featureCard(f, job) {
 /* ============================== UI-triggered job requests ============================== */
 
 /* A request is a job the UI enqueues (POST /api/requests) for the session-side
- * runner skill (/lever:watch) to pick up. We poll GET /api/requests on a ~4s
+ * runner skill (/flowlever:watch) to pick up. We poll GET /api/requests on a ~4s
  * cadence while Home or a PR section is open and reflect the status here. */
 
 const REQ_STATUS = {
@@ -2674,11 +2835,14 @@ function startPolling(scope, fn) {
     try { reqs = await api('/api/requests'); } catch { return; /* transient — keep last view */ }
     if (token !== poller.token || !poller.fn) return;
     // The runner's liveness rides the same tick: every surface that shows a job also wants to know
-    // whether anything is draining it, and one extra tiny GET beats a second interval.
+    // whether anything is draining it, and one extra tiny GET beats a second interval. The
+    // server-version check rides along too (C-18) — a tab left open across an upgrade re-checks
+    // instead of only ever trusting the verdict from page load.
     await refreshRunner();
     if (token !== poller.token || !poller.fn) return;
     poller.fn(Array.isArray(reqs) ? reqs : []);
     renderRunnerZones();
+    checkServerVersion();
   };
   tick();
   poller.timer = setInterval(tick, 4000);
@@ -3183,6 +3347,9 @@ function rerenderDetail() {
   if (current.view !== 'detail' || !state.detail) return;
   $('#app').replaceChildren(detailView(state.detail, current.tab));
   if (current.tab === 'report') loadReportInto(current.id, routeSeq);
+  // A propose/apply job finishing reloads state.detail behind an open finding modal — without
+  // this the modal keeps showing the pre-reload finding while the board underneath moves on (C-24).
+  syncModal();
 }
 
 /* Keep the feature view's job banner live: while a propose/apply job for THIS workspace is
@@ -3965,12 +4132,17 @@ function reviewBodyKids(f) {
       h('div', { class: 'diff-empty-note' }, 'No changes — proposed text is identical to the current text.')));
   } else {
     const t = reviewTally(hunks, review);
-    kids.push(h('div', { class: 'hunk-tally' },
-      tallyPart(t.accepted, 'accepted', 'accepted'),
-      tallyPart(t.rejected, 'rejected', 'rejected'),
-      tallyPart(t.edited, 'edited', 'edited'),
-      tallyPart(t.undecided, 'undecided', 'undecided'),
-    ));
+    // Captioned so the per-hunk ✅/❌/✏️ buttons read as scoped to each individual change,
+    // not a second "the decision" — they sit below the finding-level Decision row and the
+    // draft verdict control, and this heading is what makes that nesting legible (U-3).
+    kids.push(h('div', { class: 'hunk-section-head' },
+      h('span', { class: 'step-section-label' }, 'Per-change:'),
+      h('div', { class: 'hunk-tally' },
+        tallyPart(t.accepted, 'accepted', 'accepted'),
+        tallyPart(t.rejected, 'rejected', 'rejected'),
+        tallyPart(t.edited, 'edited', 'edited'),
+        tallyPart(t.undecided, 'undecided', 'undecided'),
+      )));
     for (const hunk of hunks) kids.push(hunkEl(f, hunk, review[String(hunk.id)]));
   }
   if (truncated) kids.push(h('div', { class: 'diff-trunc' }, `Diff truncated to ${DIFF_MAX_LINES} lines per side.`));
@@ -4834,7 +5006,7 @@ function coverageView(data) {
   if (!sections.length && !coverage.length) {
     return h('div', { class: 'empty empty-tab' },
       h('h2', {}, 'No coverage data yet'),
-      h('p', {}, 'Coverage is filled in by an audit round (', h('code', {}, '/lever:audit'),
+      h('p', {}, 'Coverage is filled in by an audit round (', h('code', {}, '/flowlever:audit'),
         ') or via ', h('code', {}, 'coverage set'), '.'));
   }
 
@@ -4938,7 +5110,7 @@ function timelineView(data) {
   if (!rounds.length) {
     return h('div', { class: 'empty empty-tab' },
       h('h2', {}, 'No audit rounds yet'),
-      h('p', {}, 'Run ', h('code', {}, '/lever:audit'), ' to start the ledger.'));
+      h('p', {}, 'Run ', h('code', {}, '/flowlever:audit'), ' to start the ledger.'));
   }
   const allFindings = (data.ledger && data.ledger.findings) || [];
   const byN = new Map(rounds.map((r) => [r.n, r]));
@@ -5187,14 +5359,45 @@ document.addEventListener('keydown', (e) => {
     } else if (isTyping(document.activeElement)) {
       document.activeElement.blur();
     }
+  } else if (
+    // Stepper-scoped decide-loop shortcuts (U-5): only while the focused card is showing (not
+    // the finish screen), never while an inline editor is open (its own textarea/keys own input),
+    // and never while any modifier is held or focus is in a field — isTyping already covers a
+    // field with focus, this adds the belt-and-suspenders check for non-field-but-editing state.
+    current.view === 'review-flow' && !state.flow.finish && !state.flow.waiving
+    && !state.flow.editingComment && !state.editingHunk
+    && !isTyping(e.target) && !e.metaKey && !e.ctrlKey && !e.altKey
+  ) {
+    const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (key === 'j' || e.key === 'ArrowRight') { e.preventDefault(); stepGoNext(); return; }
+    if (key === 'k' || e.key === 'ArrowLeft') { e.preventDefault(); stepGoPrev(); return; }
+    const decKind = DECIDE_KEYS[key];
+    if (!decKind || !state.detail) return;
+    const data = state.detail;
+    const fp = state.flow.items[state.flow.idx];
+    const findings = (data.ledger && data.ledger.findings) || [];
+    const f = findings.find((x) => x.fp === fp);
+    if (!f) return;
+    const kind = (data.feature && data.feature.kind) || 'spec';
+    // Only fire a key the current workspace kind actually offers — the SAME handler the visible
+    // decision button calls (decide()), so there is no separate, easier-to-drift code path.
+    if (!decisionActions(kind).buttons.some((b) => b.kind === decKind)) return;
+    e.preventDefault();
+    decide(data, f, decKind);
   }
 });
 
 /* ============================== boot ============================== */
 
 /* Compare the running server's API version against what this page was built for, and say so loudly
- * if they differ. A 404 on /api/version means the server predates the check entirely — which is
- * itself conclusive evidence it's stale. */
+ * if they differ — in the RIGHT direction. A 404 on /api/version means the server predates the
+ * check entirely, which is conclusive evidence the SERVER is the stale side; a numeric mismatch
+ * can go either way (an upgraded server outliving a browser tab with a cached older app.js is just
+ * as real as the reverse), so the two are told apart and each gets the instruction that actually
+ * fixes it — the previous version only ever blamed the server, even when the PAGE was behind.
+ * Re-checked on every poll tick (not a second timer) so a tab left open across an upgrade catches
+ * up instead of latching the boot-time verdict forever; a banner is dropped once versions agree
+ * again (e.g. the server got restarted). */
 async function checkServerVersion() {
   let got = null;
   try {
@@ -5202,25 +5405,37 @@ async function checkServerVersion() {
     if (res.ok) {
       const body = await res.json();
       got = body && body.apiVersion;
-      if (String(got) === EXPECTED_API_VERSION) return;   // in sync — nothing to say
     } else if (res.status !== 404) {
       return;   // some other transient failure; don't cry wolf
     }
   } catch {
     return;     // server down / offline — the views surface that on their own
   }
-  showStaleServerBanner(got);
+  const gotN = got == null ? NaN : Number(got);
+  if (Number.isFinite(gotN) && gotN === Number(EXPECTED_API_VERSION)) {
+    const bar = $('#stale-server');
+    if (bar) bar.remove();   // back in sync since the last check
+    return;
+  }
+  const serverIsNewer = Number.isFinite(gotN) && gotN > Number(EXPECTED_API_VERSION);
+  showStaleServerBanner(got, serverIsNewer);
 }
 
-function showStaleServerBanner(got) {
-  if ($('#stale-server')) return;
+function showStaleServerBanner(got, serverIsNewer) {
+  const versionNote = got ? ` (server API v${got}, page expects v${EXPECTED_API_VERSION})` : ' (server predates the version check)';
+  const body = serverIsNewer
+    ? h('div', { class: 'stale-server-body' },
+        h('strong', {}, 'This page is running an older build than the cockpit server.'),
+        h('span', {}, ' It may call routes or read fields the server has since changed. Hard-reload this tab', versionNote, '.'))
+    : h('div', { class: 'stale-server-body' },
+        h('strong', {}, 'The cockpit server is running an older build than this page.'),
+        h('span', {}, ' Actions can fail with a bare “Not found” because the server has never heard of ',
+          'the routes this page calls. Restart it: ', h('code', {}, 'node src/cli.js start'), versionNote));
+  const existing = $('#stale-server');
+  if (existing) existing.remove();   // rebuilt below — the direction may have flipped since last check
   const bar = h('div', { class: 'stale-server', id: 'stale-server', role: 'alert' },
     h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
-    h('div', { class: 'stale-server-body' },
-      h('strong', {}, 'The cockpit server is running an older build than this page.'),
-      h('span', {}, ' Actions can fail with a bare “Not found” because the server has never heard of ',
-        'the routes this page calls. Restart it: ', h('code', {}, 'node src/cli.js start'),
-        got ? ` (server API v${got}, page expects v${EXPECTED_API_VERSION})` : ' (server predates the version check)')),
+    body,
     h('button', {
       class: 'btn-icon stale-server-dismiss', type: 'button', 'aria-label': 'Dismiss',
       title: 'Dismiss (the mismatch remains)', onclick: () => bar.remove(),
@@ -5233,4 +5448,5 @@ window.addEventListener('hashchange', route);
 // a tick later (the shared poller keeps it fresh from then on).
 refreshRunner().then(renderRunnerZones).catch(() => {});
 checkServerVersion();
+loadLiveConfig();
 route();
