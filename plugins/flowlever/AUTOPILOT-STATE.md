@@ -67,9 +67,23 @@ findings verified still live.
   fail against the code they guard (verified by the same overlay method: 5 fail on pre-fix sources).
   Server now caps its own lock wait at 1.5s and answers 503+Retry-After; freeze measured down from
   9710ms to 1481ms — bounded, not eliminated, and now described that way.
-- [in-review] RV3 final scoped confirmation of `89eec9c` (Opus) — including an independent redo of the
-  vacuity overlay and an audit of the newly added tests.
-- [in-review] RV2b adversarial review of cli+report+docs+app.js (Sonnet, browser-driven).
+- [done] RV2b adversarial review of cli+report+docs+app.js → **Approve-with-nits**. Every finding
+  verified fixed by driving the real browser (server killed mid-stepper, Apply cancelled, shortcuts
+  typed into a textarea, both stale-banner directions) and by checking 10+ doc claims against source.
+  Two new: Y-1 (stepper skipped a finding landing on the last item) and Y-2 (a literal stale skill
+  name in this state file). Both fixed in `3fcb8c3`; Y-1 browser-verified at 4/4 -> 5/5.
+- [done] RV3 final confirmation of `89eec9c` → **Some-unresolved**. Confirmed X-1, X-2, X-3, X-4..X-7,
+  R-2 and both de-vacuumed tests hold, and independently redid the overlay audit — finding my own
+  count CONSERVATIVE (5 fail vs 8093838, 6 vs d382b4a; I had claimed 3 and 2). Its own stress: 6033
+  ops across 20 processes, 0 lost, 0 double-claimed, 0 timeouts. Found Z-1 (two write routes still
+  answered 400 on a lock timeout), Z-2 (docs still promised what the sha check cannot deliver), Z-3
+  (diagnostics readable from a non-loopback bind), Z-5 (two latent fragilities).
+- [merged] FIX-3 `fb1164a` — answered RV3. All Z findings fixed; 178 tests.
+
+## Outcome
+All 48 REVIEW.md findings plus 17 review-of-the-review findings (R-1..R-8, X-1..X-7, Y-1..Y-2,
+Z-1..Z-5) are fixed or explicitly deferred with a reason. Three fix->review cycles ran; each review
+was a fresh context that had not written the code. 98 -> 178 tests.
 
 ## Real-data validation (beyond the test suite)
 The owner's live cockpit runs against `~/.flowlever` (40 workspaces, 189 findings), NOT the repo's
