@@ -543,7 +543,7 @@ test('DELETE /api/features/:id returns 200 { id, deleted:true } and removes the 
   const res = await fetch(`${base}/api/features/del-via-api`, { method: 'DELETE' });
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.deepEqual(body, { id: 'del-via-api', deleted: true });
+  assert.deepEqual(body, { id: 'del-via-api', deleted: true, cancelledRequests: [] });
 
   const get = await fetch(`${base}/api/features/del-via-api`);
   assert.equal(get.status, 404);

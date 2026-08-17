@@ -44,9 +44,12 @@ const REQUEST_STATUSES = ['queued', 'running', 'done', 'error'];
 // Workspace kinds a `poll` request may be narrowed to (null = both).
 const REQUEST_KINDS = ['pr-review', 'pr-respond'];
 
+// `scoreZeroAtPenalty` is the penalty total at which readiness hits 0 — the constant the score
+// is normalized against. It lives in config because severityWeights do: scaling the weights
+// without scaling this would silently redefine what `readyThreshold` means.
 const DEFAULT_CONFIG = {
   severityWeights: { blocker: 10, major: 5, minor: 2, info: 0.5 },
-  gates: { blockerOpenMeansNotReady: true, readyThreshold: 85 },
+  gates: { blockerOpenMeansNotReady: true, readyThreshold: 85, scoreZeroAtPenalty: 40 },
   dimensions: ['consistency', 'completeness', 'testability', 'design-match', 'dor', 'ambiguity', 'feasibility'],
 };
 
@@ -62,21 +65,150 @@ function now() {
   return new Date().toISOString();
 }
 
-function featurePath(id) { return path.join(DATA_DIR, 'features', `${id}.json`); }
-function ledgerPath(id) { return path.join(DATA_DIR, 'ledger', `${id}.json`); }
-function roundsPath(id) { return path.join(DATA_DIR, 'rounds', `${id}.json`); }
+// Validated at the point an id becomes a filename, so no caller — HTTP route, CLI, skill — can
+// forget to do it. See assertFeatureId for why this is the load-bearing guard.
+function featurePath(id) { return path.join(DATA_DIR, 'features', `${assertFeatureId(id)}.json`); }
+function ledgerPath(id) { return path.join(DATA_DIR, 'ledger', `${assertFeatureId(id)}.json`); }
+function roundsPath(id) { return path.join(DATA_DIR, 'rounds', `${assertFeatureId(id)}.json`); }
 function configPath() { return path.join(DATA_DIR, 'config.json'); }
 function requestsPath() { return path.join(DATA_DIR, 'requests.json'); }
 
+// A corrupt/hand-edited file on disk is a USER problem (they can fix the file), not an internal
+// error — so it must surface as EUSER with the path, never as a raw SyntaxError behind a 500.
 function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
+  const text = fs.readFileSync(file, 'utf8');
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw euser(`${file} is not valid JSON (${e.message}). Fix or delete the file.`);
+  }
 }
 
+// Durable replace: write to a temp file, fsync it, rename over the target, then fsync the
+// directory so the rename itself survives a crash. Without the fsyncs the rename can be visible
+// while the contents are not — the window that makes "atomic" untrue at the level that matters.
 function writeJson(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n');
+  const tmp = `${file}.${process.pid}.${nextTmpSeq()}.tmp`;
+  const body = JSON.stringify(obj, null, 2) + '\n';
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeFileSync(fd, body);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
+  // Directory fsync is not supported everywhere (notably Windows); the rename is still atomic.
+  try {
+    const dfd = fs.openSync(path.dirname(file), 'r');
+    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+  } catch { /* best effort */ }
+}
+
+let tmpSeq = 0;
+function nextTmpSeq() { tmpSeq += 1; return `${Date.now()}.${tmpSeq}`; }
+
+// ---------- cross-process locking ----------
+//
+// The server (browser decisions), the CLI, and the /flowlever:watch runner all mutate the same
+// JSON files by design — the runner is even pinned to the same FLOWLEVER_DATA. Every mutation is
+// a read-modify-write, so without a lock two overlapping writers silently discard each other's
+// changes (measured: 6 processes enqueueing 240 jobs persisted 47).
+//
+// `mkdir` is the lock primitive because it is atomic on every platform and leaves a file we can
+// age out: a holder that crashed leaves a stale directory, so a lock older than LOCK_STALE_MS is
+// broken rather than waited on forever. Re-entrant within a process (this module is fully
+// synchronous, so "already held here" is unambiguous) which keeps nested public calls deadlock-free.
+const LOCK_STALE_MS = 30_000;
+const LOCK_WAIT_MS = 10_000;
+const LOCK_POLL_MS = 20;
+const heldLocks = new Set();
+
+function sleepSync(ms) {
+  // Blocking sleep with no dependencies: wait on a futex that never gets notified.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withFileLock(file, fn) {
+  const lock = `${file}.lock`;
+  if (heldLocks.has(lock)) return fn();          // re-entrant: this process already holds it
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      fs.mkdirSync(lock);
+      // Stamp ownership INSIDE the lock so a crashed holder can be told apart from a live one.
+      // Until this lands a waiter sees a lock with no stamp and simply retries — it must never
+      // conclude "stale" from a missing stamp.
+      try { fs.writeFileSync(path.join(lock, 'owner'), `${process.pid}\n${Date.now()}\n`); }
+      catch { /* unstampable: the lock still works, it just can't be broken as stale */ }
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      if (Date.now() >= deadline) {
+        throw euser(`timed out waiting for a lock on ${path.basename(file)} — another FlowLever `
+          + `process is writing it. If nothing is running, remove ${lock} and retry.`);
+      }
+      breakIfStale(lock);
+      sleepSync(LOCK_POLL_MS);
+    }
+  }
+  heldLocks.add(lock);
+  try {
+    return fn();
+  } finally {
+    heldLocks.delete(lock);
+    try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* already gone */ }
+  }
+}
+
+// Reclaim a lock left behind by a process that died holding it — and ONLY that.
+//
+// Two rules keep this from becoming the very bug it guards against:
+//   1. A lock whose stamp is missing is NOT stale. It is either mid-acquire or was just released,
+//      and treating absence as staleness lets a waiter delete a lock another process legitimately
+//      holds — two writers, silent lost update. (Measured while building this: 1 enqueue in 240.)
+//   2. Breaking is an atomic rename, so if several waiters decide to break at once exactly one
+//      succeeds; the losers get ENOENT and simply retry.
+function breakIfStale(lock) {
+  let stamp;
+  try { stamp = fs.readFileSync(path.join(lock, 'owner'), 'utf8'); }
+  catch { return; }                                    // rule 1
+  const at = Number(String(stamp).split('\n')[1]);
+  if (!Number.isFinite(at) || Date.now() - at < LOCK_STALE_MS) return;
+  const doomed = `${lock}.stale.${process.pid}.${nextTmpSeq()}`;
+  try { fs.renameSync(lock, doomed); } catch { return; }  // rule 2: another waiter won
+  try { fs.rmSync(doomed, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+
+// Read-modify-write a feature's ledger under its lock. `fn` mutates the loaded doc in place;
+// the doc is saved once `fn` returns (a throw leaves the on-disk state untouched).
+function mutateLedger(featureId, fn) {
+  return withFileLock(ledgerPath(featureId), () => {
+    const ledger = loadLedger(featureId);
+    const out = fn(ledger);
+    saveLedger(ledger);
+    return out;
+  });
+}
+
+function mutateFeature(featureId, fn) {
+  return withFileLock(featurePath(featureId), () => {
+    const feature = getFeature(featureId);
+    const out = fn(feature);
+    saveFeature(feature);
+    return out === undefined ? feature : out;
+  });
+}
+
+function mutateRequests(fn) {
+  return withFileLock(requestsPath(), () => {
+    const doc = loadRequests();
+    const out = fn(doc);
+    saveRequests(doc);
+    return out;
+  });
 }
 
 // ---------- data dir / config ----------
@@ -91,17 +223,73 @@ function initDataDir() {
   return DATA_DIR;
 }
 
+// config.json is a documented, hand-editable surface, so a partial or half-edited file must never
+// be able to break the app: every key is merged onto the defaults and range-checked. Dropping
+// `gates` while tuning weights used to make every readiness call and every ingest throw.
 function loadConfig() {
   if (!fs.existsSync(configPath())) return structuredClone(DEFAULT_CONFIG);
-  return readJson(configPath());
+  const raw = readJson(configPath());
+  return mergeConfig(raw);
+}
+
+function mergeConfig(raw) {
+  const out = structuredClone(DEFAULT_CONFIG);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+
+  const rw = raw.severityWeights;
+  if (rw && typeof rw === 'object' && !Array.isArray(rw)) {
+    for (const sev of SEVERITIES) {
+      const v = rw[sev];
+      // A weight that is missing or nonsense keeps its default — never 0, which would make that
+      // severity free and let a blocker contribute nothing while still tripping the blocker gate.
+      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) out.severityWeights[sev] = v;
+    }
+  }
+
+  const rg = raw.gates;
+  if (rg && typeof rg === 'object' && !Array.isArray(rg)) {
+    if (typeof rg.blockerOpenMeansNotReady === 'boolean') {
+      out.gates.blockerOpenMeansNotReady = rg.blockerOpenMeansNotReady;
+    }
+    if (typeof rg.readyThreshold === 'number' && Number.isFinite(rg.readyThreshold)
+      && rg.readyThreshold >= 0 && rg.readyThreshold <= 100) {
+      out.gates.readyThreshold = rg.readyThreshold;
+    }
+    if (typeof rg.scoreZeroAtPenalty === 'number' && Number.isFinite(rg.scoreZeroAtPenalty)
+      && rg.scoreZeroAtPenalty > 0) {
+      out.gates.scoreZeroAtPenalty = rg.scoreZeroAtPenalty;
+    }
+  }
+
+  if (Array.isArray(raw.dimensions)) {
+    const dims = raw.dimensions.filter((d) => typeof d === 'string' && d.trim() !== '');
+    if (dims.length) out.dimensions = dims;
+  }
+  return out;
 }
 
 // ---------- features ----------
 
-function createFeature({ id, title, kind = 'spec' }) {
-  if (typeof id !== 'string' || !/^[a-z0-9-]{1,64}$/.test(id)) {
+// THE id guard. Every feature id becomes a path segment (`features/<id>.json`), so an id that
+// escapes the character class escapes the data directory: the HTTP layer percent-decodes route
+// segments, which turned `..%2f..%2fsecret` into a real traversal and let any reachable client
+// read or delete arbitrary .json files. Validation therefore cannot live only in createFeature —
+// it must run on every path that turns an id into a filename. Callers use `assertFeatureId`.
+const FEATURE_ID_RE = /^[a-z0-9-]{1,64}$/;
+
+function isValidFeatureId(id) {
+  return typeof id === 'string' && FEATURE_ID_RE.test(id);
+}
+
+function assertFeatureId(id) {
+  if (!isValidFeatureId(id)) {
     throw euser(`invalid feature id "${id}": must match [a-z0-9-]{1,64}`);
   }
+  return id;
+}
+
+function createFeature({ id, title, kind = 'spec' }) {
+  assertFeatureId(id);
   if (typeof title !== 'string' || title.trim() === '') {
     throw euser('feature title is required');
   }
@@ -129,9 +317,23 @@ function createFeature({ id, title, kind = 'spec' }) {
   return feature;
 }
 
-// Features written before `kind` existed are treated as `spec` everywhere.
+// Back-fill every structural field a feature file is expected to carry, so a workspace written by
+// an older version (or hand-edited) can't make a downstream `.push` / `.filter` throw TypeError and
+// surface as an opaque 500. Only shapes are repaired here — no content is invented.
 function normalizeFeature(feature) {
+  if (!feature || typeof feature !== 'object' || Array.isArray(feature)) {
+    throw euser('feature file is malformed: expected a JSON object');
+  }
   if (!feature.kind) feature.kind = 'spec';
+  const sources = feature.sources && typeof feature.sources === 'object' && !Array.isArray(feature.sources)
+    ? feature.sources
+    : {};
+  for (const t of SOURCE_TYPES) {
+    if (!Array.isArray(sources[t])) sources[t] = [];
+  }
+  feature.sources = sources;
+  if (!Array.isArray(feature.specSections)) feature.specSections = [];
+  if (!Array.isArray(feature.coverage)) feature.coverage = [];
   return feature;
 }
 
@@ -162,9 +364,7 @@ function setFeatureStatus(featureId, status) {
   if (!FEATURE_STATUSES.includes(status)) {
     throw euser(`invalid feature status "${status}": must be one of ${FEATURE_STATUSES.join(', ')}`);
   }
-  const feature = getFeature(featureId);
-  feature.status = status;
-  return saveFeature(feature);
+  return mutateFeature(featureId, (feature) => { feature.status = status; });
 }
 
 // The PR-review "waiting on author" tracker (pr-review / pr-respond). After posting, a
@@ -183,16 +383,16 @@ function setFeatureStatus(featureId, status) {
 // (null clears a field).
 const REVIEW_FIELDS = ['lastPostedAt', 'authorRespondedAt', 'lastActivityAt', 'lastActivityBy', 'note'];
 function setFeatureReview(featureId, patch = {}) {
-  const feature = getFeature(featureId);
-  const review = {
-    lastPostedAt: null, authorRespondedAt: null, lastActivityAt: null, lastActivityBy: null, note: null,
-    ...(feature.review || {}),
-  };
-  for (const k of REVIEW_FIELDS) {
-    if (patch[k] !== undefined) review[k] = patch[k];
-  }
-  feature.review = review;
-  return saveFeature(feature);
+  return mutateFeature(featureId, (feature) => {
+    const review = {
+      lastPostedAt: null, authorRespondedAt: null, lastActivityAt: null, lastActivityBy: null, note: null,
+      ...(feature.review || {}),
+    };
+    for (const k of REVIEW_FIELDS) {
+      if (patch[k] !== undefined) review[k] = patch[k];
+    }
+    feature.review = review;
+  });
 }
 
 // Is `a` strictly later than `b`? Parsed (not string-compared) so timestamps that ADO hands
@@ -223,11 +423,13 @@ function reviewStamps(feature, lastRoundAt = null) {
   };
 }
 
+// Register a source on a workspace. Idempotent by the type's key field: re-adding the same
+// Confluence page / work item / Figma file UPDATES that entry instead of appending a second copy
+// (a duplicate would double-count in the coverage matrix and the dashboard's source counts).
 function addSource(featureId, { type, ...fields }) {
   if (!SOURCE_TYPES.includes(type)) {
     throw euser(`invalid source type "${type}": must be one of ${SOURCE_TYPES.join(', ')}`);
   }
-  const feature = getFeature(featureId);
   const entry = { ...fields, lastFetched: fields.lastFetched ?? null };
   // The ado source entry carries its own "type" field (work item type), which
   // collides with the source-kind discriminator; accept it as `itemType`.
@@ -239,21 +441,47 @@ function addSource(featureId, { type, ...fields }) {
   if (entry[keyField] === undefined || entry[keyField] === null || entry[keyField] === '') {
     throw euser(`${type} source requires "${keyField}"`);
   }
-  feature.sources[type].push(entry);
-  saveFeature(feature);
-  return entry;
+  return mutateFeature(featureId, (feature) => {
+    const list = feature.sources[type];
+    const idx = list.findIndex((s) => s && String(s[keyField]) === String(entry[keyField]));
+    if (idx === -1) list.push(entry);
+    else list[idx] = { ...list[idx], ...entry };
+    return entry;
+  });
 }
 
 // ---------- ledger / rounds stores ----------
 
+// Repair the SHAPE of a persisted ledger so a legacy or truncated file degrades instead of
+// crashing. A bare array of findings is the known pre-1.0 shape (report.js already tolerated it
+// while readiness did not, so the same file both worked and 500'd depending on the route).
+// `history` is normalized because the lifecycle code pushes onto it unconditionally.
+function normalizeLedger(featureId, doc) {
+  const base = Array.isArray(doc)
+    ? { featureId, findings: doc }
+    : (doc && typeof doc === 'object' ? { ...doc, featureId: doc.featureId || featureId } : { featureId, findings: [] });
+  base.findings = Array.isArray(base.findings)
+    ? base.findings.filter((f) => f && typeof f === 'object' && !Array.isArray(f))
+    : [];
+  for (const f of base.findings) {
+    if (!Array.isArray(f.history)) f.history = [];
+  }
+  return base;
+}
+
 function loadLedger(featureId) {
   if (!fs.existsSync(ledgerPath(featureId))) return { featureId, findings: [] };
-  return readJson(ledgerPath(featureId));
+  return normalizeLedger(featureId, readJson(ledgerPath(featureId)));
 }
 
 function loadRounds(featureId) {
   if (!fs.existsSync(roundsPath(featureId))) return { featureId, rounds: [] };
-  return readJson(roundsPath(featureId));
+  const doc = readJson(roundsPath(featureId));
+  const base = doc && typeof doc === 'object' && !Array.isArray(doc)
+    ? { ...doc, featureId: doc.featureId || featureId }
+    : { featureId, rounds: Array.isArray(doc) ? doc : [] };
+  if (!Array.isArray(base.rounds)) base.rounds = [];
+  return base;
 }
 
 function saveLedger(ledger) { writeJson(ledgerPath(ledger.featureId), ledger); }
@@ -261,17 +489,34 @@ function saveRounds(rounds) { writeJson(roundsPath(rounds.featureId), rounds); }
 
 // ---------- fingerprint ----------
 
-function fingerprint(featureId, dimension, title, locus) {
-  const normTitle = String(title)
+function normalizeTitleForFp(title) {
+  return String(title)
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, '')   // strip punctuation, keep a-z0-9 and whitespace
     .replace(/\s+/g, ' ')          // collapse whitespace
-    .trim()
-    .slice(0, 80);
+    .trim();
+}
+
+function hashFp(featureId, dimension, normTitle, locus) {
   return crypto.createHash('sha1')
     .update(`${featureId}|${dimension}|${normTitle}|${locus}`)
     .digest('hex')
     .slice(0, 10);
+}
+
+// The finding's stable identity across audit rounds. The FULL normalized title is hashed: the
+// title used to be truncated to 80 characters first, so two genuinely different findings sharing
+// a dimension, a locus and an 80-character prefix — routine for audit titles — collided, and
+// ingest silently dropped the second one with no warning and no trace in the round stats.
+function fingerprint(featureId, dimension, title, locus) {
+  return hashFp(featureId, dimension, normalizeTitleForFp(title), locus);
+}
+
+// The pre-fix fingerprint (title truncated at 80 chars). Kept ONLY so ingest can recognise a
+// finding already on disk under its old id and carry it forward instead of treating it as new and
+// auto-resolving the original. See migrateLegacyFp.
+function legacyFingerprint(featureId, dimension, title, locus) {
+  return hashFp(featureId, dimension, normalizeTitleForFp(title).slice(0, 80), locus);
 }
 
 // ---------- validation ----------
@@ -345,14 +590,21 @@ function computeReadiness(ledger, config) {
   // Posted / applied / in-flight findings are out of the reviewer's hands (awaiting the author,
   // awaiting re-audit, or mid write-back), not open work — so they don't penalize the score, but
   // they remain `isOpen` for reconciliation's auto-resolve.
-  const open = ledger.findings.filter((f) => isOpen(f) && !isPosted(f) && !isApplied(f) && !isPending(f));
+  // Tolerates a legacy bare-array ledger and a doc with no findings — this is reached from the
+  // report and every readiness call, so a malformed file must degrade, not throw.
+  const all = Array.isArray(ledger) ? ledger : (Array.isArray(ledger?.findings) ? ledger.findings : []);
+  const open = all.filter((f) => f && isOpen(f) && !isPosted(f) && !isApplied(f) && !isPending(f));
   const openBySeverity = { blocker: 0, major: 0, minor: 0, info: 0 };
   let penalty = 0;
   for (const f of open) {
+    if (!SEVERITIES.includes(f.severity)) continue;   // hand-edited severity: don't crash the score
     openBySeverity[f.severity] += 1;
-    penalty += config.severityWeights[f.severity] ?? 0;
+    penalty += config.severityWeights[f.severity] ?? DEFAULT_CONFIG.severityWeights[f.severity] ?? 0;
   }
-  const score = Math.max(0, Math.round(100 - (penalty * 100) / 40));
+  // Normalized against a configured penalty ceiling, not a hardcoded one: scaling severityWeights
+  // without scaling this would collapse every score to 0 and silently redefine readyThreshold.
+  const fullScale = config.gates.scoreZeroAtPenalty || DEFAULT_CONFIG.gates.scoreZeroAtPenalty;
+  const score = Math.max(0, Math.round(100 - (penalty * 100) / fullScale));
   const blockers = open.filter((f) => f.severity === 'blocker');
   let gate;
   if (config.gates.blockerOpenMeansNotReady && blockers.length > 0) gate = 'not-ready';
@@ -368,26 +620,96 @@ function readiness(featureId) {
 
 // ---------- ingest / reconciliation ----------
 
-function ingestRound(featureId, findings, { note = '', reopenResolved = false, trigger = 'audit' } = {}) {
+// A round's SCOPE: which of the workspace's existing findings this pass actually re-checked.
+// null (the default) means a full sweep — anything absent was genuinely fixed, so it auto-resolves.
+// A partial pass MUST say so, because auto-resolve is otherwise indiscriminate: a re-review scoped
+// to one area would close every finding outside it and flip the readiness gate green.
+function normalizeScope(scope) {
+  if (scope === null || scope === undefined) return null;
+  if (typeof scope !== 'object' || Array.isArray(scope)) {
+    throw euser('scope must be an object like { fps: [...] } or { dimensions: [...] }');
+  }
+  const out = {};
+  const strList = (v, label) => {
+    if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || x.trim() === '')) {
+      throw euser(`scope.${label} must be an array of non-empty strings`);
+    }
+    return v.map((s) => s.trim());
+  };
+  if (scope.fps !== undefined && scope.fps !== null) out.fps = strList(scope.fps, 'fps');
+  if (scope.dimensions !== undefined && scope.dimensions !== null) {
+    out.dimensions = strList(scope.dimensions, 'dimensions');
+  }
+  if (!out.fps && !out.dimensions) throw euser('scope must name "fps" or "dimensions"');
+  return out;
+}
+
+function inScope(finding, scope) {
+  if (!scope) return true;
+  if (scope.fps && scope.fps.includes(finding.fp)) return true;
+  if (scope.dimensions && scope.dimensions.includes(finding.dimension)) return true;
+  return false;
+}
+
+function ingestRound(featureId, findings, { note = '', reopenResolved = false, trigger = 'audit', scope = null } = {}) {
   getFeature(featureId); // EUSER if missing
   if (!Array.isArray(findings)) throw euser('findings must be an array');
   findings.forEach(validateIngestFinding);
+  const normScope = normalizeScope(scope);
 
   const config = loadConfig();
+  return withFileLock(ledgerPath(featureId), () => ingestRoundLocked(featureId, findings, {
+    note, reopenResolved, trigger, scope: normScope, config,
+  }));
+}
+
+function ingestRoundLocked(featureId, findings, { note, reopenResolved, trigger, scope, config }) {
   const ledger = loadLedger(featureId);
   const rounds = loadRounds(featureId);
-  const n = rounds.rounds.length + 1;
+  // The round number is derived from BOTH stores. The ledger and the rounds file are two separate
+  // writes, so if the second one fails the ledger already carries the mutation for round n while
+  // the rounds file never recorded it — taking `rounds.length + 1` alone would then hand the next
+  // ingest the same n, and `firstSeenRound`/`resolvedInRound` would point at a round whose stats
+  // describe a different pass. Taking the max of the two makes reuse impossible either way.
+  const n = Math.max(rounds.rounds.length, Number(ledger.lastRound) || 0) + 1;
   const at = now();
   const byFp = new Map(ledger.findings.map((f) => [f.fp, f]));
 
-  const stats = { new: 0, stillOpen: 0, autoResolved: 0, regressions: 0, totalOpen: 0 };
+  const stats = {
+    new: 0, stillOpen: 0, autoResolved: 0, regressions: 0, totalOpen: 0,
+    // Honest bookkeeping for the things ingest used to do silently.
+    duplicatesInBatch: 0, outOfScopeSkipped: 0, migratedFps: 0,
+  };
   const seenFps = new Set();
+  const adoptedLegacy = new Set();
 
   for (const incoming of findings) {
     const fp = fingerprint(featureId, incoming.dimension, incoming.title, incoming.locus);
-    if (seenFps.has(fp)) continue; // duplicate within the batch
+    if (seenFps.has(fp)) {
+      // Genuinely the same finding twice in one batch (same dimension, locus and full title).
+      // Counted rather than dropped in silence.
+      stats.duplicatesInBatch += 1;
+      continue;
+    }
     seenFps.add(fp);
-    const existing = byFp.get(fp);
+    let existing = byFp.get(fp);
+
+    // Carry forward a finding stored under the pre-fix (80-char-truncated) fingerprint, so
+    // upgrading does not orphan long-titled findings — which would auto-resolve the original and
+    // re-insert it as new, losing its history, pins and decisions.
+    if (!existing) {
+      const legacy = legacyFingerprint(featureId, incoming.dimension, incoming.title, incoming.locus);
+      const old = legacy !== fp && !adoptedLegacy.has(legacy) ? byFp.get(legacy) : undefined;
+      if (old) {
+        adoptedLegacy.add(legacy);
+        old.fp = fp;
+        old.history.push({ at, from: old.status, to: old.status, by: 'migrate', note: `fingerprint migrated from ${legacy}` });
+        byFp.delete(legacy);
+        byFp.set(fp, old);
+        existing = old;
+        stats.migratedFps += 1;
+      }
+    }
 
     if (!existing) {
       const finding = {
@@ -436,9 +758,12 @@ function ingestRound(featureId, findings, { note = '', reopenResolved = false, t
     }
   }
 
-  // auto-resolve open findings absent from this round, unless pinned
+  // Auto-resolve open findings absent from this round, unless pinned — or unless this round only
+  // covered part of the workspace, in which case an absent finding outside the scope was never
+  // looked at and must be left exactly as it was.
   for (const finding of ledger.findings) {
     if (!isOpen(finding) || seenFps.has(finding.fp) || finding.pinned) continue;
+    if (!inScope(finding, scope)) { stats.outOfScopeSkipped += 1; continue; }
     finding.history.push({ at, from: finding.status, to: 'resolved', by: 'reconcile', note: `not flagged in round ${n}` });
     finding.status = 'resolved';
     finding.statusReason = null;
@@ -457,9 +782,13 @@ function ingestRound(featureId, findings, { note = '', reopenResolved = false, t
     stats,
     readiness: { score: r.score, gate: r.gate, openBySeverity: r.openBySeverity },
     note,
+    // Recorded so the trail shows a partial pass as partial rather than looking like a full sweep.
+    scope: scope || null,
   };
   rounds.rounds.push(round);
 
+  // Ledger first, stamped with the round it now reflects (see the `n` derivation above).
+  ledger.lastRound = n;
   saveLedger(ledger);
   saveRounds(rounds);
   return { round, stats };
@@ -467,8 +796,16 @@ function ingestRound(featureId, findings, { note = '', reopenResolved = false, t
 
 // ---------- finding lifecycle ----------
 
-function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = 'user' } = {}) {
-  const ledger = loadLedger(featureId);
+// `keepDecision` is for WORKFLOW transitions (queueing a post/apply, a runner advancing a finding)
+// as opposed to a user re-triaging it. A plain status change supersedes the reviewer's pending
+// approve/edit — but the finish screen's "mark these in-flight" is not a re-triage, and clearing
+// the decision there sent every suggestion-only finding back to Undecided and left the export
+// reading "No applicable changes", destroying the triage the reviewer had just done.
+function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = 'user', keepDecision = false } = {}) {
+  return mutateLedger(featureId, (ledger) => setFindingStatusIn(ledger, featureId, fp, { status, reason, pinned, by, keepDecision }));
+}
+
+function setFindingStatusIn(ledger, featureId, fp, { status, reason = null, pinned, by = 'user', keepDecision = false }) {
   const finding = ledger.findings.find((f) => f.fp === fp);
   if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
 
@@ -487,8 +824,12 @@ function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = '
     finding.status = status;
     finding.statusReason = status === 'waived' ? reason : reason ?? null;
     // A status change supersedes any pending triage decision (approve/edit) and any in-flight
-    // post/apply marker — drop them.
-    delete finding.decision;
+    // post/apply marker — drop them. `agreedCodeFix` is deliberately NOT dropped: it is the
+    // durable record that the reviewer signed off a code change, and the fix gate reads it. When
+    // it was inferred from `decision` alone, moving a finding's status disarmed the gate AND
+    // erased the evidence `unbackedFixes` needs, so the audit built to catch an unbacked fix
+    // reported clean on exactly the case it exists for.
+    if (!keepDecision) delete finding.decision;
     delete finding.pending;
     // Reopening a posted/applied finding pulls it back into the review flow, so drop the stamps.
     if (status === 'open') { delete finding.postedAt; delete finding.appliedAt; }
@@ -500,7 +841,6 @@ function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = '
   }
 
   finding.updatedAt = at;
-  saveLedger(ledger);
   return finding;
 }
 
@@ -513,12 +853,19 @@ function setFindingStatus(featureId, fp, { status, reason = null, pinned, by = '
 // the diff. The hunk path matters: going straight from per-hunk Accept to Post never sets the
 // finding-level `decision`, so keying off `decision` alone would leave the commonest case ungated.
 // `redirect`/`reject` verdicts are excluded — those are explicitly "don't apply this".
+// `agreedCodeFix` is the DURABLE half of that sign-off, stamped by setFindingDecision and never
+// cleared by a status change — only by explicitly undoing the decision. Without it the gate keyed
+// solely off the transient `decision`, so any status change (including the cockpit's own
+// "mark in-flight") silently un-gated the finding.
+const AGREE_DECISIONS = ['edit', 'fix-only'];
+
 function isAgreedCodeFix(finding) {
   const d = finding.draft;
   if (!d || typeof d.after !== 'string' || d.after === d.before) return false;
   const review = d.review || {};
   if (review.verdict === 'redirect' || review.verdict === 'reject') return false;
-  if (finding.decision === 'edit' || finding.decision === 'fix-only') return true;
+  if (AGREE_DECISIONS.includes(finding.decision)) return true;
+  if (AGREE_DECISIONS.includes(finding.agreedCodeFix)) return true;
   return Object.values(review.hunks || {}).some((h) => h && (h.status === 'accepted' || h.status === 'edited'));
 }
 
@@ -548,11 +895,23 @@ function owesGitCommit(featureId) {
   }
 }
 
+// A git sha, not merely a non-empty string. The gate used to accept anything truthy, so posting
+// over HTTP with sha="lol-no-commit" satisfied it and wrote that value into the trail verbatim —
+// the CLI validated the shape but the API did not, which is the path the cockpit actually uses.
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+function isValidSha(sha) {
+  return typeof sha === 'string' && SHA_RE.test(sha.trim());
+}
+
 function assertFixCommit(featureId, finding, sha) {
   if (!isAgreedCodeFix(finding)) return;
   if (!owesGitCommit(featureId)) return;
   if (finding.fixCommit && finding.fixCommit.sha) return;
-  if (typeof sha === 'string' && sha.trim()) return;
+  if (isValidSha(sha)) return;
+  if (typeof sha === 'string' && sha.trim()) {
+    throw euser(`invalid commit sha "${sha}": expected a 7–40 character hex git sha`);
+  }
   throw euser(
     `finding "${finding.fp}" is an agreed code fix (${finding.draft.target || finding.locus}) — `
     + 'it cannot be marked posted without the commit that carries it. Apply the change, commit and '
@@ -563,18 +922,18 @@ function assertFixCommit(featureId, finding, sha) {
 // Record the pushed commit a fix landed in. Kept separate from the posted stamp so the trail shows
 // the code went out before (or without) any comment about it.
 function setFindingFixCommit(featureId, fp, { sha, repo = null, branch = null, by = 'apply' } = {}) {
-  if (typeof sha !== 'string' || !/^[0-9a-f]{7,40}$/i.test(sha.trim())) {
+  if (!isValidSha(sha)) {
     throw euser(`invalid commit sha "${sha}": expected a 7–40 character hex git sha`);
   }
-  const ledger = loadLedger(featureId);
-  const finding = ledger.findings.find((f) => f.fp === fp);
-  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-  const at = now();
-  finding.fixCommit = { sha: sha.trim(), repo, branch, at };
-  finding.history.push({ at, from: finding.status, to: finding.status, by, note: `fix pushed in ${sha.trim().slice(0, 10)}` });
-  finding.updatedAt = at;
-  saveLedger(ledger);
-  return finding;
+  return mutateLedger(featureId, (ledger) => {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    const at = now();
+    finding.fixCommit = { sha: sha.trim(), repo, branch, at };
+    finding.history.push({ at, from: finding.status, to: finding.status, by, note: `fix pushed in ${sha.trim().slice(0, 10)}` });
+    finding.updatedAt = at;
+    return finding;
+  });
 }
 
 // Findings whose agreed code fix is claimed done but points at no commit — i.e. someone said
@@ -596,63 +955,76 @@ function unbackedFixes(featureId) {
 // `sha` (+ optional repo/branch) is the pushed commit carrying the code fix. It is REQUIRED for any
 // finding whose agreed response is a code change (see assertFixCommit) and ignored for reply-only
 // ones. Validated for the whole batch BEFORE anything is written, so a mixed batch can't half-apply.
-function markPosted(featureId, fps, { by = 'post', sha, repo = null, branch = null } = {}) {
+// `detailed: true` returns { updated, skipped } instead of the bare updated array. The skipped
+// list exists because these bulk operations pass over waived/resolved findings silently: the
+// caller only saw a smaller count ("posted 5, updated 4") with no way to learn which one it was.
+function markPosted(featureId, fps, { by = 'post', sha, repo = null, branch = null, detailed = false } = {}) {
   const list = Array.isArray(fps) ? fps : [fps];
-  const ledger = loadLedger(featureId);
   const at = now();
   const uniq = [...new Set(list)];
-  // Gate first, write second: all-or-nothing.
-  for (const fp of uniq) {
-    const finding = ledger.findings.find((f) => f.fp === fp);
-    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-    assertFixCommit(featureId, finding, sha);
-  }
-  const updated = [];
-  for (const fp of uniq) {
-    const finding = ledger.findings.find((f) => f.fp === fp);
-    // Record the commit on the findings that represent a code fix, so the trail (and the cockpit)
-    // can point at the change itself rather than just at a comment about it.
-    if (typeof sha === 'string' && sha.trim() && isAgreedCodeFix(finding) && !(finding.fixCommit && finding.fixCommit.sha)) {
-      finding.fixCommit = { sha: sha.trim(), repo, branch, at };
-      finding.history.push({ at, from: finding.status, to: finding.status, by, note: `fix pushed in ${sha.trim().slice(0, 10)}` });
+  const result = mutateLedger(featureId, (ledger) => {
+    // Gate first, write second: all-or-nothing.
+    for (const fp of uniq) {
+      const finding = ledger.findings.find((f) => f.fp === fp);
+      if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+      assertFixCommit(featureId, finding, sha);
     }
-    // Posting only applies to live findings; a waived/resolved finding isn't awaiting anyone.
-    if (finding.status === 'open') {
-      finding.history.push({ at, from: 'open', to: 'reworking', by, note: 'posted to PR' });
-      finding.status = 'reworking';
-      finding.resolvedInRound = null;
-    } else if (!finding.postedAt) {
-      finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'posted to PR' });
+    const updated = [];
+    for (const fp of uniq) {
+      const finding = ledger.findings.find((f) => f.fp === fp);
+      // Record the commit on the findings that represent a code fix, so the trail (and the cockpit)
+      // can point at the change itself rather than just at a comment about it.
+      if (isValidSha(sha) && isAgreedCodeFix(finding) && !(finding.fixCommit && finding.fixCommit.sha)) {
+        finding.fixCommit = { sha: sha.trim(), repo, branch, at };
+        finding.history.push({ at, from: finding.status, to: finding.status, by, note: `fix pushed in ${sha.trim().slice(0, 10)}` });
+      }
+      // Posting only applies to live findings; a waived/resolved finding isn't awaiting anyone.
+      if (finding.status === 'open') {
+        finding.history.push({ at, from: 'open', to: 'reworking', by, note: 'posted to PR' });
+        finding.status = 'reworking';
+        finding.resolvedInRound = null;
+      } else if (!finding.postedAt) {
+        finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'posted to PR' });
+      }
+      finding.postedAt = at;
+      delete finding.decision;   // posting supersedes the pending approve/edit decision
+      delete finding.pending;    // the in-flight "Posting…" marker is now resolved
+      finding.updatedAt = at;
+      updated.push(finding);
     }
-    finding.postedAt = at;
-    delete finding.decision;   // posting supersedes the pending approve/edit decision
-    delete finding.pending;    // the in-flight "Posting…" marker is now resolved
-    finding.updatedAt = at;
-    updated.push(finding);
-  }
-  saveLedger(ledger);
+    return updated;
+  });
   // Posting (re)starts the wait on the author: anchor the "since" time and clear any prior
   // "author responded" flag. Best-effort — a missing feature file shouldn't fail the post.
-  if (updated.length) {
+  if (result.length) {
     try { setFeatureReview(featureId, { lastPostedAt: at, authorRespondedAt: null, note: null }); }
     catch { /* feature gone — ignore */ }
   }
-  return updated;
+  return detailed ? { updated: result, skipped: [] } : result;
 }
 
 // Spec mirror of markPosted: the runner has actually written the accepted change back to
 // Confluence/ADO. Stamp `appliedAt` (→ "Applied — awaiting re-audit" lane), keep it `reworking`
 // so the next /flowlever:audit reconciles it (auto-resolves if the spec now reflects the fix,
 // keeps it open if not). Clears the in-flight "Applying…" marker. Idempotent.
-function markApplied(featureId, fps, { by = 'apply' } = {}) {
+function markApplied(featureId, fps, { by = 'apply', detailed = false } = {}) {
   const list = Array.isArray(fps) ? fps : [fps];
-  const ledger = loadLedger(featureId);
   const at = now();
+  const skipped = [];
+  const updated = mutateLedger(featureId, (ledger) => markAppliedIn(ledger, featureId, [...new Set(list)], { by, at, skipped }));
+  return detailed ? { updated, skipped } : updated;
+}
+
+function markAppliedIn(ledger, featureId, uniq, { by, at, skipped }) {
   const updated = [];
-  for (const fp of [...new Set(list)]) {
+  for (const fp of uniq) {
     const finding = ledger.findings.find((f) => f.fp === fp);
     if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-    if (finding.status === 'waived' || finding.status === 'resolved') continue; // not awaiting anything
+    if (finding.status === 'waived' || finding.status === 'resolved') {
+      // Not awaiting anything — recorded so the caller can say WHICH items it passed over.
+      skipped.push({ fp, reason: finding.status });
+      continue;
+    }
     if (finding.status === 'open') {
       finding.history.push({ at, from: 'open', to: 'reworking', by, note: 'applied to spec' });
       finding.status = 'reworking';
@@ -666,7 +1038,6 @@ function markApplied(featureId, fps, { by = 'apply' } = {}) {
     finding.updatedAt = at;
     updated.push(finding);
   }
-  saveLedger(ledger);
   return updated;
 }
 
@@ -675,29 +1046,34 @@ function markApplied(featureId, fps, { by = 'apply' } = {}) {
 // (markPosted/markApplied) or it's reopened. An open finding moves to `reworking` so it's no
 // longer counted as untriaged. `kind` is 'post' | 'apply'. `fps` may be a single fp or array.
 const PENDING_KINDS = ['post', 'apply'];
-function setFindingPending(featureId, fps, kind, { by = 'user' } = {}) {
+function setFindingPending(featureId, fps, kind, { by = 'user', detailed = false } = {}) {
   if (!PENDING_KINDS.includes(kind)) {
     throw euser(`invalid pending kind "${kind}": must be one of ${PENDING_KINDS.join(', ')}`);
   }
   const list = Array.isArray(fps) ? fps : [fps];
-  const ledger = loadLedger(featureId);
   const at = now();
-  const updated = [];
-  for (const fp of [...new Set(list)]) {
-    const finding = ledger.findings.find((f) => f.fp === fp);
-    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-    if (finding.status === 'waived' || finding.status === 'resolved') continue;
-    if (finding.status === 'open') {
-      finding.history.push({ at, from: 'open', to: 'reworking', by, note: `queued for ${kind}` });
-      finding.status = 'reworking';
-      finding.resolvedInRound = null;
+  const skipped = [];
+  const updated = mutateLedger(featureId, (ledger) => {
+    const out = [];
+    for (const fp of [...new Set(list)]) {
+      const finding = ledger.findings.find((f) => f.fp === fp);
+      if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+      if (finding.status === 'waived' || finding.status === 'resolved') {
+        skipped.push({ fp, reason: finding.status });
+        continue;
+      }
+      if (finding.status === 'open') {
+        finding.history.push({ at, from: 'open', to: 'reworking', by, note: `queued for ${kind}` });
+        finding.status = 'reworking';
+        finding.resolvedInRound = null;
+      }
+      finding.pending = kind;
+      finding.updatedAt = at;
+      out.push(finding);
     }
-    finding.pending = kind;
-    finding.updatedAt = at;
-    updated.push(finding);
-  }
-  saveLedger(ledger);
-  return updated;
+    return out;
+  });
+  return detailed ? { updated, skipped } : updated;
 }
 
 // Undo setFindingPending: drop the transient "Posting…/Applying…" marker WITHOUT claiming the
@@ -710,22 +1086,22 @@ function setFindingPending(featureId, fps, kind, { by = 'user' } = {}) {
 // `fps` may be a single fp or an array; unknown fps throw. Returns the findings it changed.
 function clearFindingPending(featureId, fps, { by = 'user', reason = '' } = {}) {
   const list = Array.isArray(fps) ? fps : [fps];
-  const ledger = loadLedger(featureId);
   const at = now();
-  const updated = [];
-  for (const fp of [...new Set(list)]) {
-    const finding = ledger.findings.find((f) => f.fp === fp);
-    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-    if (!finding.pending) continue;                     // nothing in flight — no-op
-    if (finding.postedAt || finding.appliedAt) { delete finding.pending; updated.push(finding); continue; }
-    const kind = finding.pending;
-    delete finding.pending;
-    finding.history.push({ at, from: finding.status, to: finding.status, by, note: reason || `cancelled queued ${kind}` });
-    finding.updatedAt = at;
-    updated.push(finding);
-  }
-  if (updated.length) saveLedger(ledger);
-  return updated;
+  return mutateLedger(featureId, (ledger) => {
+    const updated = [];
+    for (const fp of [...new Set(list)]) {
+      const finding = ledger.findings.find((f) => f.fp === fp);
+      if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+      if (!finding.pending) continue;                     // nothing in flight — no-op
+      if (finding.postedAt || finding.appliedAt) { delete finding.pending; updated.push(finding); continue; }
+      const kind = finding.pending;
+      delete finding.pending;
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: reason || `cancelled queued ${kind}` });
+      finding.updatedAt = at;
+      updated.push(finding);
+    }
+    return updated;
+  });
 }
 
 // Every finding of a workspace currently sitting in the in-flight lane — what a "cancel the
@@ -752,23 +1128,29 @@ function setFindingDecision(featureId, fp, decision, { by = 'user' } = {}) {
   if (decision !== null && !FINDING_DECISIONS.includes(decision)) {
     throw euser(`invalid decision "${decision}": must be one of ${FINDING_DECISIONS.join(', ')} or null`);
   }
-  const ledger = loadLedger(featureId);
-  const finding = ledger.findings.find((f) => f.fp === fp);
-  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-  const at = now();
-  if (decision === null) {
-    if (finding.decision === undefined) return finding;   // nothing to clear
-    delete finding.decision;
-    finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'cleared decision' });
-  } else if (finding.decision !== decision) {
-    finding.decision = decision;
-    finding.history.push({ at, from: finding.status, to: finding.status, by, note: `decided: ${decision}` });
-  } else {
-    return finding;   // unchanged
-  }
-  finding.updatedAt = at;
-  saveLedger(ledger);
-  return finding;
+  return mutateLedger(featureId, (ledger) => {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    const at = now();
+    if (decision === null) {
+      // An explicit undo is the ONLY thing that retracts the durable code-fix agreement.
+      const had = finding.decision !== undefined || finding.agreedCodeFix !== undefined;
+      if (!had) return finding;
+      delete finding.decision;
+      delete finding.agreedCodeFix;
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'cleared decision' });
+    } else if (finding.decision !== decision) {
+      finding.decision = decision;
+      // Durable record of "the reviewer signed off a code change here", so the fix gate and the
+      // unbacked-fix audit survive the status changes that clear the transient decision.
+      if (AGREE_DECISIONS.includes(decision)) finding.agreedCodeFix = decision;
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: `decided: ${decision}` });
+    } else {
+      return finding;   // unchanged
+    }
+    finding.updatedAt = at;
+    return finding;
+  });
 }
 
 // The reviewer's free-text NOTE on a finding (distinct from the audit `suggestion` and from a
@@ -776,17 +1158,17 @@ function setFindingDecision(featureId, fp, decision, { by = 'user' } = {}) {
 // whoever actions it. Lives on the finding so suggestion-only items (no code-diff draft) can still
 // carry a reviewer response. Pass '' to clear. Surfaced in the card + the exported work order.
 function setFindingNote(featureId, fp, note, { by = 'user' } = {}) {
-  const ledger = loadLedger(featureId);
-  const finding = ledger.findings.find((f) => f.fp === fp);
-  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-  const next = typeof note === 'string' ? note : '';
-  if ((finding.note || '') === next) return finding;
-  const at = now();
-  if (next.trim()) finding.note = next; else delete finding.note;
-  finding.history.push({ at, from: finding.status, to: finding.status, by, note: next.trim() ? 'reviewer note' : 'cleared note' });
-  finding.updatedAt = at;
-  saveLedger(ledger);
-  return finding;
+  return mutateLedger(featureId, (ledger) => {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+    const next = typeof note === 'string' ? note : '';
+    if ((finding.note || '') === next) return finding;
+    const at = now();
+    if (next.trim()) finding.note = next; else delete finding.note;
+    finding.history.push({ at, from: finding.status, to: finding.status, by, note: next.trim() ? 'reviewer note' : 'cleared note' });
+    finding.updatedAt = at;
+    return finding;
+  });
 }
 
 // Refine a finding's descriptive text without touching its identity. title, locus and
@@ -794,10 +1176,6 @@ function setFindingNote(featureId, fp, note, { by = 'user' } = {}) {
 // them would create a different finding. detail/suggestion/severity can be corrected as
 // understanding improves during refinement; a history entry records the refinement.
 function setFindingDetails(featureId, fp, { detail, suggestion, severity, duplicateOf, by = 'user', note = '' } = {}) {
-  const ledger = loadLedger(featureId);
-  const finding = ledger.findings.find((f) => f.fp === fp);
-  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-
   if (severity !== undefined && !SEVERITIES.includes(severity)) {
     throw euser(`invalid severity "${severity}": must be one of ${SEVERITIES.join(', ')}`);
   }
@@ -806,21 +1184,25 @@ function setFindingDetails(featureId, fp, { detail, suggestion, severity, duplic
     throw euser('nothing to refine: provide detail, suggestion, severity or duplicateOf');
   }
 
-  const at = now();
-  const changed = [];
-  if (detail !== undefined && detail !== finding.detail) { finding.detail = String(detail); changed.push('detail'); }
-  if (suggestion !== undefined && suggestion !== finding.suggestion) { finding.suggestion = String(suggestion); changed.push('suggestion'); }
-  if (duplicateOf !== undefined) { finding.duplicateOf = duplicateOf; changed.push(duplicateOf ? `marked duplicate of ${duplicateOf.label}` : 'duplicate mark cleared'); }
-  if (severity !== undefined && severity !== finding.severity) {
-    changed.push(`severity ${finding.severity}→${severity}`);
-    finding.severity = severity;
-  }
-  if (changed.length) {
-    finding.history.push({ at, from: finding.status, to: finding.status, by, note: note || `refined ${changed.join(', ')}` });
-    finding.updatedAt = at;
-    saveLedger(ledger);
-  }
-  return finding;
+  return mutateLedger(featureId, (ledger) => {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+
+    const at = now();
+    const changed = [];
+    if (detail !== undefined && detail !== finding.detail) { finding.detail = String(detail); changed.push('detail'); }
+    if (suggestion !== undefined && suggestion !== finding.suggestion) { finding.suggestion = String(suggestion); changed.push('suggestion'); }
+    if (duplicateOf !== undefined) { finding.duplicateOf = duplicateOf; changed.push(duplicateOf ? `marked duplicate of ${duplicateOf.label}` : 'duplicate mark cleared'); }
+    if (severity !== undefined && severity !== finding.severity) {
+      changed.push(`severity ${finding.severity}→${severity}`);
+      finding.severity = severity;
+    }
+    if (changed.length) {
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: note || `refined ${changed.join(', ')}` });
+      finding.updatedAt = at;
+    }
+    return finding;
+  });
 }
 
 // ---------- finding rework drafts ----------
@@ -868,10 +1250,6 @@ function normalizeTargetRef(ref) {
 }
 
 function setFindingDraft(featureId, fp, { target, targetRef, before, after, format = 'text', by = 'user' } = {}) {
-  const ledger = loadLedger(featureId);
-  const finding = ledger.findings.find((f) => f.fp === fp);
-  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
-
   if (typeof before !== 'string' || typeof after !== 'string') {
     throw euser('a draft requires "before" and "after" strings');
   }
@@ -879,40 +1257,44 @@ function setFindingDraft(featureId, fp, { target, targetRef, before, after, form
     throw euser(`invalid draft format "${format}": must be one of ${DRAFT_FORMATS.join(', ')}`);
   }
 
-  const at = now();
-  const draft = {
-    target: typeof target === 'string' && target.trim() ? target : finding.locus,
-    format,
-    before,
-    after,
-    updatedAt: at,
-  };
-  if (targetRef !== undefined && targetRef !== null) {
-    draft.targetRef = normalizeTargetRef(targetRef);
-  } else if (finding.draft && finding.draft.targetRef) {
-    // Re-drafting the text only (e.g. an edited proposal) keeps the machine write target.
-    draft.targetRef = finding.draft.targetRef;
-  }
-  finding.draft = draft;
-  finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'drafted change' });
-  finding.updatedAt = at;
-  saveLedger(ledger);
-  return finding;
+  return mutateLedger(featureId, (ledger) => {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+
+    const at = now();
+    const draft = {
+      target: typeof target === 'string' && target.trim() ? target : finding.locus,
+      format,
+      before,
+      after,
+      updatedAt: at,
+    };
+    if (targetRef !== undefined && targetRef !== null) {
+      draft.targetRef = normalizeTargetRef(targetRef);
+    } else if (finding.draft && finding.draft.targetRef) {
+      // Re-drafting the text only (e.g. an edited proposal) keeps the machine write target.
+      draft.targetRef = finding.draft.targetRef;
+    }
+    finding.draft = draft;
+    finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'drafted change' });
+    finding.updatedAt = at;
+    return finding;
+  });
 }
 
 function clearFindingDraft(featureId, fp, { by = 'user' } = {}) {
-  const ledger = loadLedger(featureId);
-  const finding = ledger.findings.find((f) => f.fp === fp);
-  if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
+  return mutateLedger(featureId, (ledger) => {
+    const finding = ledger.findings.find((f) => f.fp === fp);
+    if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
 
-  if (finding.draft) {
-    const at = now();
-    delete finding.draft;
-    finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'cleared draft' });
-    finding.updatedAt = at;
-    saveLedger(ledger);
-  }
-  return finding;
+    if (finding.draft) {
+      const at = now();
+      delete finding.draft;
+      finding.history.push({ at, from: finding.status, to: finding.status, by, note: 'cleared draft' });
+      finding.updatedAt = at;
+    }
+    return finding;
+  });
 }
 
 // A draft review records the user's decisions on a rework draft so they can be
@@ -931,7 +1313,10 @@ function clearFindingDraft(featureId, fp, { by = 'user' } = {}) {
 //     at all. These override the per-hunk proposal in the export.
 // Any combination may be sent in one call; each field present is merged.
 function setDraftReview(featureId, fp, review, { by = 'user' } = {}) {
-  const ledger = loadLedger(featureId);
+  return mutateLedger(featureId, (ledger) => setDraftReviewIn(ledger, featureId, fp, review, { by }));
+}
+
+function setDraftReviewIn(ledger, featureId, fp, review, { by = 'user' } = {}) {
   const finding = ledger.findings.find((f) => f.fp === fp);
   if (!finding) throw euser(`finding "${fp}" not found in ledger for "${featureId}"`);
   if (!finding.draft) throw euser(`finding "${fp}" has no draft to review`);
@@ -996,7 +1381,6 @@ function setDraftReview(featureId, fp, review, { by = 'user' } = {}) {
   const histNote = (hasNote || hasVerdict) && !hasHunkPatch && !hasHunks ? 'reviewer note' : 'reviewed draft';
   finding.history.push({ at, from: finding.status, to: finding.status, by, note: histNote });
   finding.updatedAt = at;
-  saveLedger(ledger);
   return finding;
 }
 
@@ -1005,12 +1389,25 @@ function setDraftReview(featureId, fp, review, { by = 'user' } = {}) {
 // The queue file holds a monotonic counter alongside the requests, so ids are
 // derived from the counter (req-1, req-2, …) — never from a clock. This keeps
 // ids deterministic in tests and stable across reads.
+function requestIdNumber(id) {
+  const n = Number(String(id ?? '').replace(/^req-/, ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
 function loadRequests() {
   if (!fs.existsSync(requestsPath())) return { counter: 0, requests: [] };
   const doc = readJson(requestsPath());
-  if (!doc || typeof doc !== 'object') return { counter: 0, requests: [] };
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { counter: 0, requests: [] };
   if (!Array.isArray(doc.requests)) doc.requests = [];
-  if (typeof doc.counter !== 'number') doc.counter = doc.requests.length;
+  doc.requests = doc.requests.filter((r) => r && typeof r === 'object' && !Array.isArray(r));
+  // The counter must never fall below the highest id ever issued. `requests.length` was the old
+  // fallback, but deleteRequest splices without touching the counter, so after any deletion the
+  // length is lower than the highest issued id — and the next enqueue would mint a duplicate id
+  // that `find`/`findIndex` would then resolve to the WRONG request.
+  const maxIssued = doc.requests.reduce((m, r) => Math.max(m, requestIdNumber(r.id)), 0);
+  if (typeof doc.counter !== 'number' || !Number.isFinite(doc.counter) || doc.counter < maxIssued) {
+    doc.counter = maxIssued;
+  }
   return doc;
 }
 
@@ -1044,7 +1441,10 @@ function addRequest({ action, prId, wsId, title, instructions, kind } = {}) {
   if (instructions !== undefined && instructions !== null && typeof instructions !== 'string') {
     throw euser('instructions must be a string when provided');
   }
-  const doc = loadRequests();
+  return mutateRequests((doc) => addRequestIn(doc, { action, prId, wsId, title, instructions, kind }));
+}
+
+function addRequestIn(doc, { action, prId, wsId, title, instructions, kind }) {
   doc.counter += 1;
   const ts = now();
   const request = {
@@ -1068,7 +1468,6 @@ function addRequest({ action, prId, wsId, title, instructions, kind } = {}) {
     updatedAt: ts,
   };
   doc.requests.push(request);
-  saveRequests(doc);
   return request;
 }
 
@@ -1091,19 +1490,67 @@ function setRequestStatus(id, { status, note, wsId, phase, needsInput } = {}) {
   if (status !== undefined && !REQUEST_STATUSES.includes(status)) {
     throw euser(`invalid status "${status}": must be one of ${REQUEST_STATUSES.join(', ')}`);
   }
-  const doc = loadRequests();
-  const request = doc.requests.find((r) => r.id === id);
-  if (!request) throw euser(`request "${id}" not found`);
-  if (status !== undefined) request.status = status;
-  if (note !== undefined) request.note = note === null || note === '' ? null : String(note);
-  if (wsId !== undefined && wsId !== null && String(wsId).trim() !== '') request.wsId = String(wsId).trim();
-  if (phase !== undefined) request.phase = phase === null || phase === '' ? null : String(phase);
-  if (needsInput !== undefined) request.needsInput = Boolean(needsInput);
-  // A terminal status is never "waiting on you".
-  if (status === 'done' || status === 'error') request.needsInput = false;
-  request.updatedAt = now();
-  saveRequests(doc);
-  return request;
+  return mutateRequests((doc) => {
+    const request = doc.requests.find((r) => r.id === id);
+    if (!request) throw euser(`request "${id}" not found`);
+    if (status !== undefined) request.status = status;
+    if (note !== undefined) request.note = note === null || note === '' ? null : String(note);
+    if (wsId !== undefined && wsId !== null && String(wsId).trim() !== '') request.wsId = String(wsId).trim();
+    if (phase !== undefined) request.phase = phase === null || phase === '' ? null : String(phase);
+    if (needsInput !== undefined) request.needsInput = Boolean(needsInput);
+    // A terminal status is never "waiting on you".
+    if (status === 'done' || status === 'error') request.needsInput = false;
+    request.updatedAt = now();
+    return request;
+  });
+}
+
+// ---------- claiming work (the runner's exclusive take) ----------
+//
+// A runner used to do `listRequests({status:'queued'})` and then `setRequestStatus(id,'running')` —
+// load, mutate, save, with nothing checking the status it thought it saw. Two runners (the
+// scheduled /flowlever:poll and a cockpit-started watch) therefore both saw the same queued rows
+// and both executed them, posting every PR comment twice. runner.js's in-memory `isRunning` cannot
+// help: it is per-process.
+//
+// claimRequest is a compare-and-swap under the queue lock: it succeeds only if the request is
+// STILL queued, so exactly one caller can win. A loser gets EUSER and moves on.
+function claimRequest(id, { by = null, phase = null } = {}) {
+  return mutateRequests((doc) => {
+    const request = doc.requests.find((r) => r.id === id);
+    if (!request) throw euser(`request "${id}" not found`);
+    if (request.status !== 'queued') {
+      throw euser(`request "${id}" is already "${request.status}" — another runner claimed it`);
+    }
+    request.status = 'running';
+    request.claimedBy = by === null || by === '' ? null : String(by);
+    request.claimedAt = now();
+    if (phase !== undefined && phase !== null && phase !== '') request.phase = String(phase);
+    request.updatedAt = request.claimedAt;
+    return request;
+  });
+}
+
+// Atomically take the OLDEST queued job (optionally filtered to certain actions) — the operation a
+// runner actually wants, since it removes the list-then-claim window entirely. Returns null when
+// the queue is empty, so a drain loop is `while ((r = claimNextRequest())) { ... }`.
+function claimNextRequest({ actions = null, by = null, phase = null } = {}) {
+  if (actions !== null && actions !== undefined) {
+    if (!Array.isArray(actions) || actions.some((a) => !REQUEST_ACTIONS.includes(a))) {
+      throw euser(`actions must be an array drawn from ${REQUEST_ACTIONS.join(', ')}`);
+    }
+  }
+  return mutateRequests((doc) => {
+    const next = doc.requests.find((r) => r.status === 'queued'
+      && (!actions || actions.includes(r.action)));
+    if (!next) return null;
+    next.status = 'running';
+    next.claimedBy = by === null || by === '' ? null : String(by);
+    next.claimedAt = now();
+    if (phase !== undefined && phase !== null && phase !== '') next.phase = String(phase);
+    next.updatedAt = next.claimedAt;
+    return next;
+  });
 }
 
 // ---------- delete ----------
@@ -1113,16 +1560,34 @@ function deleteFeature(id) {
   for (const p of [featurePath(id), ledgerPath(id), roundsPath(id)]) {
     try { fs.rmSync(p); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   }
-  return { id, deleted: true };
+  // Any job still pointing at this workspace is now unrunnable: a queued one would be picked up by
+  // the runner and fail (or an `audit` would silently re-create the id), and the cockpit would show
+  // a job stalled forever against a workspace that no longer exists. Fail them explicitly instead —
+  // terminal, so no runner claims them, with the reason visible on the card. History is preserved.
+  let cancelled = [];
+  try {
+    cancelled = mutateRequests((doc) => {
+      const hit = doc.requests.filter((r) => r.wsId === id && (r.status === 'queued' || r.status === 'running'));
+      const at = now();
+      for (const r of hit) {
+        r.status = 'error';
+        r.note = `workspace "${id}" was deleted before this job ran`;
+        r.needsInput = false;
+        r.updatedAt = at;
+      }
+      return hit.map((r) => r.id);
+    });
+  } catch { /* queue unreadable — the feature is still deleted */ }
+  return { id, deleted: true, cancelledRequests: cancelled };
 }
 
 function deleteRequest(id) {
-  const doc = loadRequests();
-  const idx = doc.requests.findIndex((r) => r.id === id);
-  if (idx === -1) throw euser(`request "${id}" not found`);
-  doc.requests.splice(idx, 1);
-  saveRequests(doc);
-  return { id, deleted: true };
+  return mutateRequests((doc) => {
+    const idx = doc.requests.findIndex((r) => r.id === id);
+    if (idx === -1) throw euser(`request "${id}" not found`);
+    doc.requests.splice(idx, 1);
+    return { id, deleted: true };
+  });
 }
 
 // ---------- coverage ----------
@@ -1135,9 +1600,7 @@ function setCoverage(featureId, coverage) {
       throw euser(`invalid coverage status "${entry.status}": must be one of ${COVERAGE_STATUSES.join(', ')}`);
     }
   }
-  const feature = getFeature(featureId);
-  feature.coverage = coverage;
-  return saveFeature(feature);
+  return mutateFeature(featureId, (feature) => { feature.coverage = coverage; });
 }
 
 module.exports = {
@@ -1149,6 +1612,13 @@ module.exports = {
   REQUEST_KINDS,
   initDataDir,
   loadConfig,
+  mergeConfig,
+  isValidFeatureId,
+  assertFeatureId,
+  isValidSha,
+  legacyFingerprint,
+  claimRequest,
+  claimNextRequest,
   createFeature,
   getFeature,
   listFeatures,

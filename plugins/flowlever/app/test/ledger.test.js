@@ -106,12 +106,70 @@ test('fingerprint: 10-char sha1 slice, normalization-stable, locus-sensitive', (
   assert.equal(a, c);
   assert.notEqual(a, ledger.fingerprint('feat', 'consistency', 'hello world', 'loc:2'), 'different locus');
   assert.notEqual(a, ledger.fingerprint('feat', 'completeness', 'hello world', 'loc:1'), 'different dimension');
-  // truncation to 80 chars: divergence after char 80 is invisible
+  // The FULL title is hashed. Two findings that diverge only after character 80 are still two
+  // findings — truncating first made them collide, and ingest then dropped the second silently.
   const long = 'x'.repeat(80);
-  assert.equal(
+  assert.notEqual(
     ledger.fingerprint('feat', 'dor', long + 'aaa', 'l'),
-    ledger.fingerprint('feat', 'dor', long + 'bbb', 'l')
+    ledger.fingerprint('feat', 'dor', long + 'bbb', 'l'),
+    'divergence after char 80 must produce different fingerprints'
   );
+  // The legacy (truncating) fingerprint is kept only so ingest can adopt findings already stored
+  // under it; it still collides, which is exactly why it was replaced.
+  assert.equal(
+    ledger.legacyFingerprint('feat', 'dor', long + 'aaa', 'l'),
+    ledger.legacyFingerprint('feat', 'dor', long + 'bbb', 'l')
+  );
+});
+
+test('two findings sharing an 80-char title prefix are BOTH ingested (no silent collision drop)', () => {
+  const id = 'fp-collide';
+  ledger.createFeature({ id, title: 'Collision' });
+  const prefix = 'Spec and ADO disagree on the payment method list for the checkout redesign flow, item ';
+  assert.ok(prefix.length >= 80, 'prefix must exceed the old truncation length');
+
+  const { stats } = ledger.ingestRound(id, [
+    mkFinding({ title: `${prefix}Twint`, locus: 'confluence:1#pay' }),
+    mkFinding({ title: `${prefix}Apple Pay`, locus: 'confluence:1#pay' }),
+  ]);
+
+  assert.equal(stats.new, 2, 'both findings must be inserted');
+  assert.equal(stats.duplicatesInBatch, 0);
+  const titles = ledger.loadLedger(id).findings.map((f) => f.title).sort();
+  assert.deepEqual(titles, [`${prefix}Apple Pay`, `${prefix}Twint`]);
+});
+
+test('ingest ADOPTS a finding stored under the legacy truncated fingerprint (no orphan+re-insert)', () => {
+  const id = 'fp-migrate';
+  ledger.createFeature({ id, title: 'Migrate' });
+  const longTitle = `${'y'.repeat(90)} tail`;
+  const f = mkFinding({ title: longTitle, locus: 'x:1' });
+
+  // Seed the ledger the way the previous version would have written it: legacy fp, real history.
+  const legacyFp = ledger.legacyFingerprint(id, f.dimension, f.title, f.locus);
+  const newFp = ledger.fingerprint(id, f.dimension, f.title, f.locus);
+  assert.notEqual(legacyFp, newFp);
+  fs.mkdirSync(path.join(tmpDir, 'ledger'), { recursive: true });
+  fs.writeFileSync(path.join(tmpDir, 'ledger', `${id}.json`), JSON.stringify({
+    featureId: id,
+    findings: [{
+      fp: legacyFp, dimension: f.dimension, severity: f.severity, title: f.title, detail: '',
+      locus: f.locus, suggestion: '', duplicateOf: null, status: 'open', statusReason: null,
+      pinned: true, firstSeenRound: 1, lastSeenRound: 1, resolvedInRound: null,
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', history: [],
+    }],
+  }, null, 2));
+
+  const { stats } = ledger.ingestRound(id, [f]);
+  assert.equal(stats.migratedFps, 1, 'the legacy row must be adopted');
+  assert.equal(stats.new, 0, 'not re-inserted as new');
+  assert.equal(stats.autoResolved, 0, 'the original must not be orphaned and auto-resolved');
+
+  const findings = ledger.loadLedger(id).findings;
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].fp, newFp, 're-keyed to the full-title fingerprint');
+  assert.equal(findings[0].pinned, true, 'pins and history survive the migration');
+  assert.equal(findings[0].firstSeenRound, 1, 'identity (first seen) is preserved');
 });
 
 test('validateIngestFinding rejects bad dimension/severity/missing fields', () => {
@@ -1053,7 +1111,7 @@ test('deleteFeature removes all three files and returns { id, deleted: true }', 
   ], { note: 'seed' });
 
   const result = ledger.deleteFeature(id);
-  assert.deepEqual(result, { id, deleted: true });
+  assert.deepEqual(result, { id, deleted: true, cancelledRequests: [] });
 
   assert.ok(!fs.existsSync(path.join(tmpDir, 'features', `${id}.json`)), 'feature file must be gone');
   assert.ok(!fs.existsSync(path.join(tmpDir, 'ledger', `${id}.json`)), 'ledger file must be gone');
@@ -1070,7 +1128,7 @@ test('deleteFeature ignores missing ledger/rounds files (feature with no rounds)
   const id = 'del-bare-feature';
   ledger.createFeature({ id, title: 'No rounds' });
   const result = ledger.deleteFeature(id);
-  assert.deepEqual(result, { id, deleted: true });
+  assert.deepEqual(result, { id, deleted: true, cancelledRequests: [] });
 });
 
 test('deleteRequest removes the request and returns { id, deleted: true }', () => {
