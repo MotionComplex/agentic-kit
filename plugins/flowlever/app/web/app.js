@@ -1358,7 +1358,16 @@ function stepGoPrev() {
   state.flow.idx--;
   renderFlowInto();
 }
+/* Reconcile BEFORE asking "was that the last one?". A finding ingested while the reviewer was
+ * deciding is already in state.detail but not yet in state.flow.items, and measuring against the
+ * stale list jumped straight to the summary instead of walking them onto the new item. Nothing was
+ * lost — it appeared there as Undecided — but they were never taken to it. */
+function syncFlowBeforeMove() {
+  if (state.detail) reconcileFlowItems(state.detail);
+}
+
 function stepGoNext() {
+  syncFlowBeforeMove();
   if (state.flow.idx >= state.flow.items.length - 1) state.flow.finish = true;
   else state.flow.idx++;
   renderFlowInto();
@@ -1382,6 +1391,7 @@ function setFlowDecision(fp, kind, extra = {}) {
 }
 
 function advance() {
+  syncFlowBeforeMove();
   if (state.flow.idx >= state.flow.items.length - 1) state.flow.finish = true;
   else state.flow.idx++;
   renderFlowInto();

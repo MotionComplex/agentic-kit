@@ -43,7 +43,7 @@ findings verified still live.
 - [merged] U4 report.js — `a8e1e20` (delegated). C-9: split "Open (scored)" vs "On the board" with an
   in-place note wherever they diverge. New test/report.test.js (6 tests).
 - [building] U5 web/app.js — delegated. U-1, U-2, U-3, U-4, U-8, C-18, C-24, C-25, F-5 client (+U-5 optional).
-- [merged] U6 docs/skills/packaging — `178ad9e`. G-1..G-9. Verified independently: zero `/lever:` left
+- [merged] U6 docs/skills/packaging — `178ad9e`. G-1..G-9. Verified independently: zero stale `lever:`-prefixed skill names left
   in any .md or in app.js; .gitignore present; plugin.json lists all 12 skills; SCHEMA.md documents
   every command I spot-checked plus /api/config and /api/version. app/README.md was reduced to a
   pointer (rather than rewritten) so there is one source of truth — a reasonable call. It also caught
