@@ -581,6 +581,7 @@ DELETE /api/runner                  → SIGTERM the running runner → 200 + sta
 GET  /api/report/:id                → text/markdown report
 GET  /api/version                   → { apiVersion, pid, startedAt } — the HTTP wire-contract version (src/version.js), checked first and matched before anything else so it answers even when the rest of the build is mismatched. The browser compares this against its own compiled-in expectation and tells the user to restart the cockpit instead of failing with a bare "Not found" when a plugin update lands mid-session.
 GET  /api/config                    → the real, merged `config.json` (`ledger.loadConfig()` — defaults applied, out-of-range values dropped; see "config.json" above). Exists so the browser's optimistic readiness recompute uses the actual severity weights/gates/scoreZeroAtPenalty instead of a hardcoded copy that silently drifted the moment anyone hand-edited config.json.
+GET  /api/diagnostics               → { dataDir, host, loopback, remoteWritesAllowed, lockWaitMs, fsyncDir, workspaces, skippedWorkspaces:[{file,reason}] }. Where a workspace file the server could NOT read shows up: the list routes keep their array shape and only flag a count on the `X-FlowLever-Skipped` header, so this is the place that names the file and why.
 Static: / → web/index.html, /app.js, /style.css
 ```
 GET request validation errors (e.g. `GET /api/requests?status=bogus`) return their real status

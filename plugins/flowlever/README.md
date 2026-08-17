@@ -270,12 +270,21 @@ so it's shared across repositories and kept out of the plugin. Override the loca
 
 ## Troubleshooting
 
+- **A workspace is missing from the board** — the server could not read its file (truncated,
+  hand-edited, or a name that isn't a valid workspace id). It is skipped rather than taking the whole
+  board down with it, the count is flagged on the `X-FlowLever-Skipped` response header, and
+  `curl localhost:4173/api/diagnostics` names the file and the reason. Fix or remove the file.
+- **A write returns 503 "timed out waiting for a lock"** — another FlowLever process (the CLI, a
+  runner) was writing the same file. It is transient: retry. If nothing is running, the message names
+  the `.lock` directory to delete.
 - **The cockpit hangs for a moment while the CLI or a runner is writing** — expected, and bounded.
   The ledger is synchronous and every write takes a cross-process lock, so a request that needs a
   file another process is mid-write on blocks the server's single thread until it clears. Real writes
-  take about 5 ms, so this is normally invisible; a long stall means something is holding a lock
-  (see the next item). `FLOWLEVER_LOCK_WAIT_MS` bounds the worst case, after which the request fails
-  with a retryable error rather than hanging indefinitely.
+  take about 5 ms, so this is normally invisible; a long stall means something is holding a lock.
+  The server caps its own wait at 1.5s (the CLI and the runner use the longer default, since
+  blocking costs them nothing) and then answers 503 with `Retry-After`. Measured worst case for an
+  unrelated request behind a contended write: ~1.5s. It is bounded, not eliminated — that is
+  inherent to a synchronous ledger in a single-threaded server.
 
 - **`node src/cli.js` prints usage instead of doing anything** — that's correct: a bare invocation
   (or `help`) prints usage and exits 0. Run `node src/cli.js help` to see every command.
