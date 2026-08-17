@@ -796,3 +796,57 @@ test('the static handler still refuses traversal out of web/', async () => {
     assert.equal(res.status, 404, `${p} → ${res.status}`);
   }
 });
+
+test('X-2: an unreadable workspace file is reported, not silently dropped from the board', async () => {
+  // The first fix stopped one bad file from 400ing the whole board, but then omitted it with only a
+  // stderr warning — so the workspace simply vanished from the UI and the inbox stopped nagging.
+  const bad = path.join(tmpDir, 'features', 'x2-truncated.json');
+  fs.writeFileSync(bad, '{ "title": "truncated');
+  try {
+    const res = await fetch(`${base}/api/features`);
+    assert.equal(res.status, 200, 'healthy workspaces still list');
+    assert.equal(res.headers.get('x-flowlever-skipped'), '1', 'the count rides on a header');
+    const body = await res.json();
+    assert.ok(Array.isArray(body), 'the array shape is preserved for existing clients');
+    assert.ok(body.some((f) => f.id === 'flow-feat'), 'the healthy workspace is present');
+
+    const home = await fetch(`${base}/api/home`);
+    assert.equal(home.status, 200);
+    assert.equal(home.headers.get('x-flowlever-skipped'), '1', 'the inbox flags it too');
+
+    // ...and the detail is retrievable from inside the product, not only from the server's stdout.
+    const diag = await fetch(`${base}/api/diagnostics`);
+    assert.equal(diag.status, 200);
+    const d = await diag.json();
+    assert.equal(d.skippedWorkspaces.length, 1);
+    assert.equal(d.skippedWorkspaces[0].file, 'x2-truncated.json');
+    assert.match(d.skippedWorkspaces[0].reason, /not valid JSON/);
+    assert.equal(typeof d.lockWaitMs, 'number');
+    assert.equal(d.loopback, true);
+  } finally {
+    fs.rmSync(bad, { force: true });
+  }
+});
+
+test('a lock timeout answers 503 with Retry-After, not 400', async () => {
+  // A contended lock is transient: "try again", not "your request was wrong". The server also runs a
+  // much shorter lock ceiling than the CLI, because waiting blocks its event loop.
+  const lock = path.join(tmpDir, 'requests.json.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner'), `999999\n${Date.now()}\n`);   // fresh, so not stale
+  try {
+    const started = Date.now();
+    const res = await fetch(`${base}/api/requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'pr-review', prId: '4242' }),
+    });
+    const waited = Date.now() - started;
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get('retry-after'), '1');
+    assert.match((await res.json()).error, /timed out waiting for a lock/);
+    assert.ok(waited < 6000, `the server must fail fast, waited ${waited}ms`);
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+});

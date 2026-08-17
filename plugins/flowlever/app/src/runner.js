@@ -95,22 +95,22 @@ function inProcessRunning() {
 // forgot it entirely: a runner started before the restart was invisible, and the next click spawned
 // a second session draining the same queue. The pid file makes the guard survive a restart.
 //
-// A recycled pid could in principle read as alive. That errs toward REFUSING to start a second
-// runner, which is the safe direction — the cost is a stale-looking "already going" the operator can
-// clear by stopping it, versus two sessions posting the same comments twice.
+// A pid recycled by one of OUR OWN later processes could still read as alive, which errs toward
+// refusing to start a second runner — the safe direction, and clearable by stopping it.
 const PID_PATH = () => path.join(DATA_DIR, 'runner.pid');
 
-// "Alive" means alive AND ours to signal. EPERM says the pid exists but belongs to another user,
-// which our runner never does — it is a recycled pid belonging to someone else's process. Treating
-// that as a live runner adopted a process we could neither stop (DELETE returned EPERM and left the
-// stamp in place) nor replace (start returned EBUSY), leaving the runner permanently unusable with
-// no in-product way out. Treating it as not-ours discards the stale stamp instead.
+// "Alive" means alive AND ours to signal, and only a SUCCESSFUL signal proves that. Every failure
+// means "not our runner": ESRCH is dead, EPERM belongs to another user, and anything else (a
+// hand-edited pid that isn't even a valid argument) is nonsense. Enumerating the known failures and
+// defaulting the rest to "alive" re-created the very wedge this guard exists to remove — a
+// `runner.pid` of 2147483648 throws ERR_INVALID_ARG_TYPE, read as a live runner, and left the runner
+// neither startable (EBUSY) nor stoppable.
 function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (err) {
-    return err.code !== 'ESRCH' && err.code !== 'EPERM' ? true : false;
+  } catch {
+    return false;
   }
 }
 
@@ -270,14 +270,9 @@ function stop() {
   try {
     process.kill(-pid, 'SIGTERM');
   } catch (err) {
-    if (err.code === 'EPERM') {
-      // Not our process (a recycled pid). Drop the stamp so the runner is usable again rather than
-      // wedged behind something we can never signal.
-      clearPidFile();
-      return { ok: false, code: 'EKILL', error: `The recorded runner pid ${pid} belongs to another `
-        + 'user\'s process, so it was not ours to stop. The stale record has been cleared — you can '
-        + 'start a runner again.' };
-    }
+    // A foreign pid never reaches here: isRunning() -> externalRunner() -> pidAlive() already
+    // discards a pid we cannot signal, along with its stamp. This handles a process that died
+    // between that check and this signal.
     if (err.code !== 'ESRCH') {
       return { ok: false, code: 'EKILL', error: `Could not stop the runner: ${err.message}` };
     }

@@ -611,18 +611,85 @@ test('R-8e: markPosted skips closed findings instead of stamping them, and says 
 });
 
 test('R-8c: a failed write leaves no .tmp litter next to the real data', () => {
+  // Making the target a directory does NOT exercise this: loadLedger's read throws EISDIR first, so
+  // writeJson is never entered and the assertion cannot fail. (That was the first version of this
+  // test, and it passed against the unfixed code.) Force the failure inside writeJson instead, at
+  // the rename — after the temp file definitely exists.
   const id = 'r8c';
   ledger.createFeature({ id, title: 'Tmp' });
   const dir = path.join(tmpDir, 'ledger');
-  // Make the target a directory so the rename fails.
-  const target = path.join(dir, `${id}.json`);
-  fs.rmSync(target, { force: true });
-  fs.mkdirSync(target, { recursive: true });
+  const realRename = fs.renameSync;
+  let sawTmp = false;
+  fs.renameSync = (from, to) => {
+    if (String(from).includes('.tmp')) {
+      sawTmp = fs.existsSync(from);
+      const err = new Error('simulated ENOSPC'); err.code = 'ENOSPC'; throw err;
+    }
+    return realRename(from, to);
+  };
   try {
-    assert.throws(() => ledger.ingestRound(id, [mkFinding({ title: 't', locus: 't' })]));
+    assert.throws(() => ledger.ingestRound(id, [mkFinding({ title: 't', locus: 't' })]),
+      (e) => e.code === 'ENOSPC');
+    assert.ok(sawTmp, 'the temp file must really have been written before the rename failed');
     const litter = fs.readdirSync(dir).filter((f) => f.includes('.tmp'));
     assert.deepEqual(litter, [], `left behind: ${litter.join(', ')}`);
   } finally {
-    fs.rmSync(target, { recursive: true, force: true });
+    fs.renameSync = realRename;
+  }
+});
+
+test('R-8c: a filesystem that rejects fsync does not break writes that used to work', () => {
+  const id = 'r8c-fsync';
+  ledger.createFeature({ id, title: 'Fsync' });
+  const realFsync = fs.fsyncSync;
+  fs.fsyncSync = () => { const e = new Error('simulated EINVAL'); e.code = 'EINVAL'; throw e; };
+  try {
+    assert.doesNotThrow(() => ledger.setFeatureStatus(id, 'done'));
+    assert.equal(ledger.getFeature(id).status, 'done', 'the write must still have landed');
+  } finally {
+    fs.fsyncSync = realFsync;
+  }
+});
+
+test('X-3: an unrecognised workspace kind fails CLOSED on the fix gate', () => {
+  // Narrowing owesGitCommit to `=== pr-respond` silently un-gated every hand-edited or future kind,
+  // the opposite of what its own comment claimed.
+  const id = 'x3-unknown';
+  ledger.createFeature({ id, title: 'Unknown kind', kind: 'pr-respond' });
+  ledger.ingestRound(id, [mkFinding({ title: 'Fix', locus: 'k:1' })]);
+  const fp = ledger.loadLedger(id).findings[0].fp;
+  ledger.setFindingDraft(id, fp, { before: 'a', after: 'b' });
+  ledger.setFindingDecision(id, fp, 'fix-only');
+
+  // Hand-edit the kind to something unrecognised, as a stale or future file would carry.
+  const fpath = path.join(tmpDir, 'features', `${id}.json`);
+  const doc = JSON.parse(fs.readFileSync(fpath, 'utf8'));
+  doc.kind = 'wat';
+  fs.writeFileSync(fpath, JSON.stringify(doc));
+
+  assert.throws(() => ledger.markPosted(id, [fp]), (e) => e.code === 'EUSER',
+    'an unknown kind must gate, not wave the fix through');
+});
+
+test('R-2: a symlink inside the data dir is not followed out of it', () => {
+  // Validating the id stops a traversing id; it says nothing about a symlink planted in the data
+  // dir, which was followed and served arbitrary outside JSON straight back through the API.
+  const outside = path.join(tmpDir, '..', `flowlever-secret-${process.pid}.json`);
+  fs.writeFileSync(outside, JSON.stringify({ title: 'TOP SECRET', apiToken: 'sk-DO-NOT-LEAK' }));
+  const link = path.join(tmpDir, 'features', 'sneaky.json');
+  try {
+    fs.symlinkSync(outside, link);
+  } catch {
+    fs.rmSync(outside, { force: true });
+    return;   // no symlink support here
+  }
+  try {
+    assert.throws(() => ledger.getFeature('sneaky'),
+      (e) => e.code === 'EUSER' && /outside the data directory/.test(e.message));
+    assert.ok(!ledger.listFeatures().some((f) => f.id === 'sneaky'),
+      'and it must not appear on the board either');
+  } finally {
+    fs.rmSync(link, { force: true });
+    fs.rmSync(outside, { force: true });
   }
 });

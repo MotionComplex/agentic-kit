@@ -75,7 +75,24 @@ function requestsPath() { return path.join(DATA_DIR, 'requests.json'); }
 
 // A corrupt/hand-edited file on disk is a USER problem (they can fix the file), not an internal
 // error — so it must surface as EUSER with the path, never as a raw SyntaxError behind a 500.
+// Every read is confined to the real data directory. Validating the ID stops a traversing *id*, but
+// it says nothing about a SYMLINK planted inside the data dir: `features/x.json` pointing at a file
+// elsewhere was followed, so arbitrary JSON from outside was served straight back through the API.
+// Both sides are resolved, so a symlinked FLOWLEVER_DATA (a legitimate setup) still works.
+let realDataDir = null;
+function assertInsideDataDir(file) {
+  if (realDataDir === null) {
+    try { realDataDir = fs.realpathSync(DATA_DIR); } catch { realDataDir = path.resolve(DATA_DIR); }
+  }
+  let real;
+  try { real = fs.realpathSync(file); } catch { return; }   // missing: the caller's own check reports it
+  if (real !== realDataDir && !real.startsWith(realDataDir + path.sep)) {
+    throw euser(`refusing to read ${path.basename(file)}: it resolves outside the data directory`);
+  }
+}
+
 function readJson(file) {
+  assertInsideDataDir(file);
   const text = fs.readFileSync(file, 'utf8');
   try {
     return JSON.parse(text);
@@ -84,9 +101,10 @@ function readJson(file) {
   }
 }
 
-// Durable replace: write to a temp file, fsync it, rename over the target, then fsync the
-// directory so the rename itself survives a crash. Without the fsyncs the rename can be visible
-// while the contents are not — the window that makes "atomic" untrue at the level that matters.
+// Durable replace: write to a temp file, fsync it, then rename over the target. Without the file
+// fsync the rename can be visible while the contents are not — the window that makes "atomic"
+// untrue at the level that matters. Syncing the DIRECTORY as well (so the rename itself survives an
+// OS crash) is opt-in; see the note at the end of this function for the measurement behind that.
 function writeJson(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${nextTmpSeq()}.tmp`;
@@ -142,14 +160,26 @@ const LOCK_STALE_MS = 30_000;
 // the server this wait BLOCKS THE EVENT LOOP — a contended write stalls every other request until it
 // clears. Real writes take single-digit milliseconds, so contention normally resolves instantly; the
 // wait only matters when another process (the CLI, the watch runner) is mid-write or died holding
-// the lock. Kept deliberately short so a pathological case degrades into a clear, retryable error
-// instead of a long freeze. Tunable for slow/network filesystems.
+// the lock. Be clear-eyed about the worst case: a request that waits the full timeout blocks the
+// server for that whole time, so the ceiling IS a potential freeze, not merely a slow request. The
+// server therefore sets a much shorter ceiling of its own (see configureLocking) and turns the
+// timeout into a retryable 503; this default is for the CLI and the runner, where blocking is free.
+// Tunable for slow/network filesystems.
 // 10s is a safety net, not an expected latency: a write costs ~5ms, so even a dozen processes
 // hammering one file clear in well under a second. It is only reached when something is genuinely
 // stuck, and an orphaned lock is now reclaimed (see breakIfStale) rather than blocking forever.
-const LOCK_WAIT_MS = Number(process.env.FLOWLEVER_LOCK_WAIT_MS) > 0
+const DEFAULT_LOCK_WAIT_MS = Number(process.env.FLOWLEVER_LOCK_WAIT_MS) > 0
   ? Number(process.env.FLOWLEVER_LOCK_WAIT_MS)
   : 10_000;
+let lockWaitMs = DEFAULT_LOCK_WAIT_MS;
+
+// The server calls this at startup with a much smaller ceiling. Blocking is free in the CLI and the
+// runner — they have nothing else to serve — but in the server the wait is time the WHOLE cockpit is
+// unresponsive, so there it must fail fast and let the caller retry rather than hold the event loop.
+function configureLocking({ waitMs } = {}) {
+  if (Number(waitMs) > 0) lockWaitMs = Number(waitMs);
+  return { waitMs: lockWaitMs };
+}
 // A lock directory that never got its owner stamp can only be aged by its own mtime, which is a
 // weaker signal — so it gets a much longer grace period before anyone reclaims it.
 const LOCK_ORPHAN_MS = 60_000;
@@ -165,7 +195,7 @@ function withFileLock(file, fn) {
   const lock = `${file}.lock`;
   if (heldLocks.has(lock)) return fn();          // re-entrant: this process already holds it
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const deadline = Date.now() + LOCK_WAIT_MS;
+  const deadline = Date.now() + lockWaitMs;
   for (;;) {
     try {
       fs.mkdirSync(lock);
@@ -178,8 +208,10 @@ function withFileLock(file, fn) {
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       if (Date.now() >= deadline) {
-        throw euser(`timed out waiting for a lock on ${path.basename(file)} — another FlowLever `
+        const err = euser(`timed out waiting for a lock on ${path.basename(file)} — another FlowLever `
           + `process is writing it. If nothing is running, remove ${lock} and retry.`);
+        err.lockTimeout = true;   // transient: the HTTP layer answers 503, not 400
+        throw err;
       }
       breakIfStale(lock);
       sleepSync(LOCK_POLL_MS);
@@ -398,23 +430,42 @@ function getFeature(id) {
 // directory rather than from validated ids, so a single hand-edited or truncated workspace made
 // GET /api/features and the inbox fail for every OTHER workspace too. Bad files are skipped and
 // named on stderr — visible in the server log, never silently dropped.
-function listFeatures() {
+// Warn once per file+mtime, not once per call: the board polls, so an unchanged bad file otherwise
+// reprints its warning on every request and buries the log.
+const warnedSkips = new Set();
+function warnSkipOnce(file, reason) {
+  let key = `${file}:?`;
+  try { key = `${file}:${fs.statSync(file).mtimeMs}`; } catch { /* gone; warn under '?' */ }
+  if (warnedSkips.has(key)) return;
+  warnedSkips.add(key);
+  console.warn(`FlowLever: skipping ${path.basename(file)} — ${reason}`);
+}
+
+// `withSkipped` returns { features, skipped } so a caller can TELL THE USER something was omitted.
+// Silently dropping a workspace is its own failure: the board would simply not show it and the inbox
+// would stop nagging, which is quieter but no more honest than the whole-board error it replaced.
+function listFeatures({ withSkipped = false } = {}) {
   const dir = path.join(DATA_DIR, 'features');
-  if (!fs.existsSync(dir)) return [];
-  const out = [];
+  if (!fs.existsSync(dir)) return withSkipped ? { features: [], skipped: [] } : [];
+  const features = [];
+  const skipped = [];
   for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
+    const full = path.join(dir, file);
     const id = file.slice(0, -'.json'.length);
     if (!isValidFeatureId(id)) {
-      console.warn(`FlowLever: skipping features/${file} — "${id}" is not a valid workspace id`);
+      const reason = `"${id}" is not a valid workspace id`;
+      warnSkipOnce(full, reason);
+      skipped.push({ file, reason });
       continue;
     }
     try {
-      out.push(normalizeFeature(readJson(path.join(dir, file)), id));
+      features.push(normalizeFeature(readJson(full), id));
     } catch (err) {
-      console.warn(`FlowLever: skipping features/${file} — ${err.message}`);
+      warnSkipOnce(full, err.message);
+      skipped.push({ file, reason: err.message });
     }
   }
-  return out;
+  return withSkipped ? { features, skipped } : features;
 }
 
 function saveFeature(feature) {
@@ -957,8 +1008,9 @@ function isAgreedCodeFix(finding) {
 //
 // A finding with an existing fixCommit passes (idempotent re-stamp). Comment/reply-only findings
 // (no agreed code change) are unaffected — a reply IS the whole deliverable there.
-// Only PR workspaces owe a git commit. A `spec` workspace's drafts are Confluence/ADO edits whose
-// proof of delivery is `appliedAt` (markApplied), so demanding a sha there would be nonsense.
+// Only a `pr-respond` workspace owes a git commit (see owesGitCommit). A `spec` workspace's drafts
+// are Confluence/ADO edits whose proof of delivery is `appliedAt` (markApplied), so demanding a sha
+// there would be nonsense.
 // Unknown/unreadable kind fails CLOSED (gate on) — the cost of an extra required flag is a moment's
 // friction; the cost of a missed gate is a reviewer told a lie.
 // ONLY `pr-respond` owes a git commit — that is the workflow where you are the PR author acting on
@@ -969,11 +1021,15 @@ function isAgreedCodeFix(finding) {
 // you are going to commit. Demanding a sha there blocked posting a review comment, and because the
 // agreement marker is now durable there was no longer an accidental way out — the finding stranded
 // in "Posting…". A `spec` workspace proves delivery with appliedAt, as before.
-// Unknown/unreadable kind still fails CLOSED: an unreadable workspace is a real unknown, and a
-// spurious required flag is cheaper than a reviewer told a fix shipped when it did not.
+// Unknown AND unreadable kinds both fail CLOSED — an unrecognised kind is a real unknown, and a
+// spurious required flag is cheaper than a reviewer told a fix shipped when it did not. Testing for
+// `=== 'pr-respond'` alone silently un-gated any hand-edited or future kind, which is the opposite
+// of what this comment claimed.
 function owesGitCommit(featureId) {
   try {
-    return (getFeature(featureId).kind || 'spec') === 'pr-respond';
+    const kind = getFeature(featureId).kind || 'spec';
+    if (kind === 'pr-respond') return true;
+    return !KINDS.includes(kind);
   } catch {
     return true;
   }
@@ -982,6 +1038,13 @@ function owesGitCommit(featureId) {
 // A git sha, not merely a non-empty string. The gate used to accept anything truthy, so posting
 // over HTTP with sha="lol-no-commit" satisfied it and wrote that value into the trail verbatim —
 // the CLI validated the shape but the API did not, which is the path the cockpit actually uses.
+//
+// LIMIT, and it matters: this checks the SHAPE only. The ledger has no repository to ask, so a
+// well-formed invention like "deadbeef" passes and then reads as a delivered fix (unbackedFixes
+// returns clean for it). The gate raises the cost of claiming a fix that was never made from
+// "say nothing" to "fabricate a plausible sha"; it does not make it impossible. Verifying the
+// commit exists needs a repo context — `git cat-file -e <sha>` in the right checkout — which
+// belongs to the caller that has one, not here.
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
 function isValidSha(sha) {
@@ -999,7 +1062,8 @@ function assertFixCommit(featureId, finding, sha) {
   throw euser(
     `finding "${finding.fp}" is an agreed code fix (${(finding.draft && finding.draft.target) || finding.locus}) — `
     + 'it cannot be marked posted without the commit that carries it. Apply the change, commit and '
-    + 'push it, then pass --sha <pushed commit sha>. If the fix was NOT made, run '
+    + 'push it, then pass --sha <pushed commit sha> — the sha is recorded and checked for shape, not '
+    + 'verified against the repository, so it is on you that it is real. If the fix was NOT made, run '
     + `\`finding cancel ${featureId} --fps ${finding.fp}\` instead — never reply claiming a fix that isn't on the branch.`);
 }
 
@@ -1024,7 +1088,10 @@ function setFindingFixCommit(featureId, fp, { sha, repo = null, branch = null, b
 // "handled" without the change being on the branch. The cockpit badges these and /flowlever:watch
 // reports them; ideally always empty.
 function unbackedFixes(featureId) {
-  if (!owesGitCommit(featureId)) return [];   // spec workspaces prove delivery with appliedAt
+  // Only the kinds that owe a commit can have an UNBACKED one: a spec workspace proves delivery with
+  // appliedAt, and on a pr-review workspace a suggested diff is a comment for the PR's author to
+  // commit, so there is no commit of yours that could be missing.
+  if (!owesGitCommit(featureId)) return [];
   return (loadLedger(featureId).findings || []).filter((f) =>
     isAgreedCodeFix(f) && (f.postedAt || f.status === 'resolved')
     && !(f.fixCommit && f.fixCommit.sha) && !f.appliedAt);
@@ -1702,6 +1769,7 @@ module.exports = {
   REQUEST_STATUSES,
   REQUEST_KINDS,
   initDataDir,
+  configureLocking,
   loadConfig,
   mergeConfig,
   isValidFeatureId,

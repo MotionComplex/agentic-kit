@@ -109,7 +109,9 @@ function findingError(f, idx) {
 // ---------- API handlers ----------
 
 function handleFeatureList(res, kindFilter) {
-  let features = ledger.listFeatures() || [];
+  const listed = ledger.listFeatures({ withSkipped: true });
+  let features = listed.features || [];
+  const skipped = listed.skipped || [];
   if (kindFilter) features = features.filter((f) => (f.kind || 'spec') === kindFilter);
   const summaries = features.map((f) => {
     let readiness = null;
@@ -148,6 +150,10 @@ function handleFeatureList(res, kindFilter) {
       stamps: ledger.reviewStamps(f, lastRoundAt),
     };
   });
+  // A workspace file we could not read must not vanish silently. The response body stays an ARRAY
+  // (that is the client contract, and attaching a property to an array is dropped by JSON.stringify
+  // anyway), so the signal rides on a header and the detail is available from /api/diagnostics.
+  if (skipped.length) res.setHeader('X-FlowLever-Skipped', String(skipped.length));
   sendJson(res, 200, summaries);
 }
 
@@ -155,7 +161,9 @@ function handleFeatureList(res, kindFilter) {
 // sorted so the most actionable surface first (most toReview, then most open).
 // toReview = open/reworking findings carrying a proposed change (draft).
 function handleHome(res) {
-  const features = ledger.listFeatures() || [];
+  const listed = ledger.listFeatures({ withSkipped: true });
+  const features = listed.features || [];
+  const skippedWorkspaces = listed.skipped || [];
   const rows = features.map((f) => {
     const findings = (ledger.loadLedger(f.id).findings) || [];
     const counts = { toReview: 0, open: 0, reworking: 0, posted: 0, resolved: 0, waived: 0 };
@@ -191,6 +199,7 @@ function handleHome(res) {
     (b.counts.open - a.counts.open) ||
     (b.counts.reworking - a.counts.reworking) ||
     a.title.localeCompare(b.title));
+  if (skippedWorkspaces.length) res.setHeader('X-FlowLever-Skipped', String(skippedWorkspaces.length));
   sendJson(res, 200, rows);
 }
 
@@ -645,6 +654,23 @@ async function route(req, res) {
   if (parts[1] === 'version' && parts.length === 2 && req.method === 'GET') {
     return sendJson(res, 200, { apiVersion: API_VERSION, pid: process.pid, startedAt: SERVER_STARTED_AT });
   }
+  // What the server could NOT read, plus the knobs that change its behavior. Exists because a
+  // skipped workspace was otherwise invisible from inside the product: the board simply omitted it
+  // and the inbox stopped nagging, which is quieter than the whole-board error it replaced but no
+  // more honest. The list routes flag the count on X-FlowLever-Skipped and point here for detail.
+  if (parts[1] === 'diagnostics' && parts.length === 2 && req.method === 'GET') {
+    const listed = ledger.listFeatures({ withSkipped: true });
+    return sendJson(res, 200, {
+      dataDir: ledger.DATA_DIR,
+      host: HOST,
+      loopback: IS_LOOPBACK,
+      remoteWritesAllowed: ALLOW_REMOTE_WRITES,
+      lockWaitMs: ledger.configureLocking().waitMs,
+      fsyncDir: process.env.FLOWLEVER_FSYNC_DIR === '1',
+      workspaces: listed.features.length,
+      skippedWorkspaces: listed.skipped,
+    });
+  }
   // The browser recomputes readiness optimistically after a decision, and used to do it against a
   // hardcoded copy of the severity weights — which silently drifted the moment anyone edited the
   // documented config.json. Serve the real one instead.
@@ -670,6 +696,11 @@ const server = http.createServer((req, res) => {
     .then(() => route(req, res))
     .catch((err) => {
       if (res.writableEnded) return;
+      // A lock timeout is transient — the right answer is "try again", not "your request was wrong".
+      if (err && err.lockTimeout) {
+        res.setHeader('Retry-After', '1');
+        return sendError(res, 503, err.message);
+      }
       if (err && err.code === 'EUSER') {
         // euserStatus decides on the MESSAGE, on every method. Forcing 404 for GET made
         // `GET /api/requests?status=bogus` — a validation error — answer 404, so a client could
@@ -684,6 +715,12 @@ const server = http.createServer((req, res) => {
 });
 
 ledger.initDataDir();
+// A contended lock blocks this process's event loop, so the whole cockpit is unresponsive while a
+// request waits. The CLI and the runner can afford the ledger's generous default; the server cannot,
+// so it fails fast and tells the client to retry. Measured worst case drops from ~10s to ~1.5s.
+ledger.configureLocking({ waitMs: Number(process.env.FLOWLEVER_LOCK_WAIT_MS) > 0
+  ? Number(process.env.FLOWLEVER_LOCK_WAIT_MS)
+  : 1500 });
 server.listen(PORT, HOST, () => {
   console.log(`FlowLever cockpit → http://localhost:${server.address().port}`);
   if (!IS_LOOPBACK) {

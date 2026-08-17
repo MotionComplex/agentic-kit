@@ -190,17 +190,52 @@ test('a stale pid file (dead process) does not block a start', async () => {
   assert.ok(!fs.existsSync(path.join(tmpDir, 'runner.pid')), 'and the stale stamp is cleaned up');
 });
 
-test('R-6b: a recycled pid owned by another user is not adopted as our runner', async () => {
+// A live pid that is NOT ours to signal. pid 1 is useless here — externalRunner rejects `pid <= 1`
+// before pidAlive is consulted, so a test using it passes even against the unfixed code (that is
+// how the first version of this test was vacuous). Find a real foreign pid instead.
+function foreignPid() {
+  let out = '';
+  try { out = cp.execSync('ps -axo pid=,uid=', { encoding: 'utf8' }); } catch { return null; }
+  const me = process.getuid ? process.getuid() : null;
+  if (me === null) return null;
+  for (const line of out.split('\n')) {
+    const [pid, uid] = line.trim().split(/\s+/).map(Number);
+    if (!Number.isInteger(pid) || pid <= 1 || !Number.isInteger(uid)) continue;
+    if (uid === me) continue;
+    try { process.kill(pid, 0); } catch (e) { if (e.code === 'EPERM') return pid; }
+  }
+  return null;
+}
+
+test('R-6b: a live pid we cannot signal is not adopted as our runner', async (t) => {
   await quiesce();
-  // pid 1 (launchd/init) is alive but not ours to signal: EPERM. Treating that as a live runner
-  // adopted a process we could neither stop (DELETE → EPERM, stamp left in place) nor replace
-  // (start → EBUSY), leaving the runner permanently unusable with no way out from the product.
+  const foreign = foreignPid();
+  if (foreign === null) {
+    t.skip('no foreign (EPERM) pid available on this machine to exercise the guard');
+    return;
+  }
+  // Adopting such a pid left the runner neither stoppable (DELETE → EPERM, stamp retained) nor
+  // startable (EBUSY) — unusable with no way out from inside the product.
   fs.writeFileSync(path.join(tmpDir, 'runner.pid'),
-    JSON.stringify({ pid: 1, action: 'watch', startedAt: new Date().toISOString() }));
-  assert.equal(runner.isRunning(), false, 'a pid we cannot signal is not our runner');
+    JSON.stringify({ pid: foreign, action: 'watch', startedAt: new Date().toISOString() }));
+  assert.equal(runner.isRunning(), false, `pid ${foreign} is alive but not ours, so it is not our runner`);
   assert.ok(!fs.existsSync(path.join(tmpDir, 'runner.pid')), 'and the stale record is discarded');
 
   const started = runner.start('watch');
   assert.equal(started.ok, true, 'so a runner can still be started');
+  runner.stop();
+});
+
+test('R-6b/X-1: a pid that is not even a valid argument is not adopted either', async () => {
+  await quiesce();
+  // 2^31 is an integer > 1, so externalRunner's own guard passes it through, and process.kill then
+  // throws ERR_INVALID_ARG_TYPE rather than ESRCH/EPERM. Defaulting an unrecognised failure to
+  // "alive" wedged the runner exactly as above.
+  fs.writeFileSync(path.join(tmpDir, 'runner.pid'),
+    JSON.stringify({ pid: 2147483648, action: 'watch', startedAt: new Date().toISOString() }));
+  assert.equal(runner.isRunning(), false, 'only a successful signal proves a live runner');
+  assert.ok(!fs.existsSync(path.join(tmpDir, 'runner.pid')));
+  const started = runner.start('watch');
+  assert.equal(started.ok, true);
   runner.stop();
 });
