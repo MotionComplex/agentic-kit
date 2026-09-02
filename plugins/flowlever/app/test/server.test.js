@@ -543,7 +543,7 @@ test('DELETE /api/features/:id returns 200 { id, deleted:true } and removes the 
   const res = await fetch(`${base}/api/features/del-via-api`, { method: 'DELETE' });
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.deepEqual(body, { id: 'del-via-api', deleted: true });
+  assert.deepEqual(body, { id: 'del-via-api', deleted: true, cancelledRequests: [] });
 
   const get = await fetch(`${base}/api/features/del-via-api`);
   assert.equal(get.status, 404);
@@ -572,4 +572,336 @@ test('DELETE /api/requests/:id returns 200 and removes the request', async () =>
 test('DELETE /api/requests/:id returns 404 for an unknown request', async () => {
   const res = await fetch(`${base}/api/requests/req-nope-server`, { method: 'DELETE' });
   assert.equal(res.status, 404);
+});
+
+// ---------- security: the traversal hole (C-1) ----------
+//
+// `featureId` was validated only in createFeature while every read/write/delete built a path from
+// the raw URL segment — and route() percent-decodes segments, so `..%2f..%2fsecret` reached the
+// filesystem. A reachable client could DELETE any .json file the server user could write, and read
+// one back through the status route.
+
+const TRAVERSAL_IDS = [
+  '..%2f..%2foutside%2fsecret',
+  '..%2fsecret',
+  '%2e%2e%2f%2e%2e%2foutside%2fsecret',
+  '..%5c..%5csecret',
+  'UPPERCASE',
+  'has%20space',
+];
+
+test('DELETE with a traversing id is refused and deletes nothing outside the data dir', async () => {
+  const outside = path.join(tmpDir, '..', `flowlever-must-survive-${process.pid}.json`);
+  fs.writeFileSync(outside, JSON.stringify({ apiToken: 'sk-DO-NOT-LEAK' }));
+  try {
+    for (const id of TRAVERSAL_IDS) {
+      const res = await fetch(`${base}/api/features/${id}`, { method: 'DELETE' });
+      assert.ok(res.status === 400 || res.status === 404, `${id} → ${res.status}`);
+      const body = await res.json();
+      assert.ok(!body.deleted, `${id} must not report a deletion`);
+    }
+    // the exact path the reviewer used, aimed at the real file
+    const rel = path.basename(outside, '.json');
+    const res = await fetch(`${base}/api/features/${encodeURIComponent(`../${rel}`)}`, { method: 'DELETE' });
+    assert.equal(res.status, 400);
+    assert.ok(fs.existsSync(outside), 'a file outside the data dir must survive');
+  } finally {
+    fs.rmSync(outside, { force: true });
+  }
+});
+
+test('a traversing id cannot read a file back through the status route', async () => {
+  const outside = path.join(tmpDir, '..', `flowlever-leak-${process.pid}.json`);
+  fs.writeFileSync(outside, JSON.stringify({ apiToken: 'sk-DO-NOT-LEAK' }));
+  try {
+    const rel = path.basename(outside, '.json');
+    const res = await fetch(`${base}/api/features/${encodeURIComponent(`../${rel}`)}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'done' }),
+    });
+    assert.equal(res.status, 400);
+    const text = await res.text();
+    assert.ok(!text.includes('sk-DO-NOT-LEAK'), 'the file contents must not come back in the response');
+  } finally {
+    fs.rmSync(outside, { force: true });
+  }
+});
+
+test('every id-taking route rejects a traversing id', async () => {
+  const id = '..%2f..%2foutside%2fsecret';
+  const cases = [
+    ['GET', `/api/features/${id}`],
+    ['GET', `/api/report/${id}`],
+    ['POST', `/api/ingest/${id}`, { findings: [] }],
+    ['POST', `/api/features/${id}/review/apply`, { fps: ['x'] }],
+    ['POST', `/api/features/${id}/review/cancel`, {}],
+    ['POST', `/api/features/${id}/activity`, { lastActivityAt: '2026-01-01T00:00:00.000Z' }],
+  ];
+  for (const [method, url, body] of cases) {
+    const res = await fetch(`${base}${url}`, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    assert.ok(res.status === 400 || res.status === 404, `${method} ${url} → ${res.status}`);
+    const text = await res.text();
+    assert.ok(!/"deleted":\s*true/.test(text), `${method} ${url} must not report success`);
+  }
+});
+
+// ---------- status-code honesty (C-14) ----------
+
+test('a validation error on a GET is 400, not 404', async () => {
+  const bad = await fetch(`${base}/api/requests?status=bogus`);
+  assert.equal(bad.status, 400, 'bad input is not a missing resource');
+  assert.match((await bad.json()).error, /invalid status/);
+
+  const missing = await fetch(`${base}/api/features/no-such-workspace`);
+  assert.equal(missing.status, 404, 'a genuinely absent resource is still 404');
+});
+
+// ---------- decisions survive the finish screen (C-8) ----------
+
+test('review/apply reworking keeps the reviewer\'s decision; resolved supersedes it', async () => {
+  ledger.createFeature({ id: 'keep-dec-api', title: 'Keep decisions' });
+  ledger.ingestRound('keep-dec-api', [
+    mkFinding({ title: 'K1', locus: 'k:1' }),
+    mkFinding({ title: 'K2', locus: 'k:2' }),
+  ]);
+  const [a, b] = ledger.loadLedger('keep-dec-api').findings.map((f) => f.fp);
+  ledger.setFindingDecision('keep-dec-api', a, 'approve');
+  ledger.setFindingDecision('keep-dec-api', b, 'approve');
+
+  const res = await fetch(`${base}/api/features/keep-dec-api/review/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: [a], status: 'reworking' }),
+  });
+  assert.equal(res.status, 200);
+  const after = ledger.loadLedger('keep-dec-api').findings.find((f) => f.fp === a);
+  assert.equal(after.status, 'reworking');
+  assert.equal(after.decision, 'approve', 'marking in-flight is not a re-triage');
+
+  await fetch(`${base}/api/features/keep-dec-api/review/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: [b], status: 'resolved' }),
+  });
+  const resolved = ledger.loadLedger('keep-dec-api').findings.find((f) => f.fp === b);
+  assert.equal(resolved.decision, undefined, 'a real completion still supersedes the decision');
+});
+
+test('review/apply reports which findings it skipped', async () => {
+  ledger.createFeature({ id: 'skip-api', title: 'Skips' });
+  ledger.ingestRound('skip-api', [
+    mkFinding({ title: 'S1', locus: 's:1' }),
+    mkFinding({ title: 'S2', locus: 's:2' }),
+  ]);
+  const [live, gone] = ledger.loadLedger('skip-api').findings.map((f) => f.fp);
+  ledger.setFindingStatus('skip-api', gone, { status: 'waived', reason: 'not doing it' });
+
+  const res = await fetch(`${base}/api/features/skip-api/review/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: [live, gone], status: 'pending-apply' }),
+  });
+  const body = await res.json();
+  assert.equal(body.updated, 1);
+  assert.deepEqual(body.skipped, [{ fp: gone, reason: 'waived' }], 'the caller learns WHICH was dropped');
+});
+
+// ---------- the fix gate over HTTP (C-4) ----------
+
+test('posting an agreed code fix over HTTP refuses a missing or malformed sha', async () => {
+  ledger.createFeature({ id: 'gate-api', title: 'Gate', kind: 'pr-respond' });
+  ledger.ingestRound('gate-api', [mkFinding({ title: 'G1', locus: 'pr:1:a.cs:1' })]);
+  const fp = ledger.loadLedger('gate-api').findings[0].fp;
+  ledger.setFindingDraft('gate-api', fp, { before: 'old', after: 'new' });
+  ledger.setFindingDecision('gate-api', fp, 'fix-only');
+
+  const post = (payload) => fetch(`${base}/api/features/gate-api/review/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: [fp], status: 'posted', ...payload }),
+  });
+
+  const noSha = await post({});
+  assert.equal(noSha.status, 400);
+  assert.match((await noSha.json()).error, /cannot be marked posted without the commit/);
+
+  const junk = await post({ sha: 'lol-no-commit' });
+  assert.equal(junk.status, 400, 'the API used to accept any non-empty string');
+  assert.match((await junk.json()).error, /invalid commit sha/);
+
+  const ok = await post({ sha: 'a1b2c3d4e5f6' });
+  assert.equal(ok.status, 200);
+  assert.equal(ledger.loadLedger('gate-api').findings[0].fixCommit.sha, 'a1b2c3d4e5f6');
+});
+
+// ---------- config + scope + HEAD ----------
+
+test('GET /api/config serves the real merged config', async () => {
+  const res = await fetch(`${base}/api/config`);
+  assert.equal(res.status, 200);
+  const cfg = await res.json();
+  assert.deepEqual(cfg, ledger.loadConfig());
+  assert.equal(typeof cfg.gates.readyThreshold, 'number');
+  assert.equal(typeof cfg.gates.scoreZeroAtPenalty, 'number');
+});
+
+test('POST /api/ingest honours scope and rejects a malformed one', async () => {
+  ledger.createFeature({ id: 'scope-api', title: 'Scoped' });
+  ledger.ingestRound('scope-api', [
+    mkFinding({ severity: 'blocker', title: 'BE', locus: 'be:1', dimension: 'feasibility' }),
+    mkFinding({ title: 'FE', locus: 'fe:1', dimension: 'design-match' }),
+  ]);
+
+  const res = await fetch(`${base}/api/ingest/scope-api`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      findings: [mkFinding({ title: 'FE', locus: 'fe:1', dimension: 'design-match' })],
+      scope: { dimensions: ['design-match'] },
+    }),
+  });
+  assert.equal(res.status, 200);
+  const { stats } = await res.json();
+  assert.equal(stats.autoResolved, 0, 'the out-of-scope blocker must not be closed');
+  assert.equal(stats.outOfScopeSkipped, 1);
+  assert.equal(ledger.readiness('scope-api').gate, 'not-ready');
+
+  const bad = await fetch(`${base}/api/ingest/scope-api`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ findings: [], scope: 'front-end only' }),
+  });
+  assert.equal(bad.status, 400);
+});
+
+test('HEAD on a static file returns headers, not 405', async () => {
+  const res = await fetch(`${base}/app.js`, { method: 'HEAD' });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /javascript/);
+  assert.ok(Number(res.headers.get('content-length')) > 0);
+  assert.equal((await res.text()).length, 0, 'HEAD carries no body');
+
+  const post = await fetch(`${base}/app.js`, { method: 'POST' });
+  assert.equal(post.status, 405, 'other methods are still refused');
+});
+
+test('the static handler still refuses traversal out of web/', async () => {
+  for (const p of ['/../src/ledger.js', '/..%2fsrc%2fledger.js', '/../../etc/passwd']) {
+    const res = await fetch(`${base}${p}`);
+    assert.equal(res.status, 404, `${p} → ${res.status}`);
+  }
+});
+
+test('X-2: an unreadable workspace file is reported, not silently dropped from the board', async () => {
+  // The first fix stopped one bad file from 400ing the whole board, but then omitted it with only a
+  // stderr warning — so the workspace simply vanished from the UI and the inbox stopped nagging.
+  const bad = path.join(tmpDir, 'features', 'x2-truncated.json');
+  fs.writeFileSync(bad, '{ "title": "truncated');
+  try {
+    const res = await fetch(`${base}/api/features`);
+    assert.equal(res.status, 200, 'healthy workspaces still list');
+    assert.equal(res.headers.get('x-flowlever-skipped'), '1', 'the count rides on a header');
+    const body = await res.json();
+    assert.ok(Array.isArray(body), 'the array shape is preserved for existing clients');
+    assert.ok(body.some((f) => f.id === 'flow-feat'), 'the healthy workspace is present');
+
+    const home = await fetch(`${base}/api/home`);
+    assert.equal(home.status, 200);
+    assert.equal(home.headers.get('x-flowlever-skipped'), '1', 'the inbox flags it too');
+
+    // ...and the detail is retrievable from inside the product, not only from the server's stdout.
+    const diag = await fetch(`${base}/api/diagnostics`);
+    assert.equal(diag.status, 200);
+    const d = await diag.json();
+    assert.equal(d.skippedWorkspaces.length, 1);
+    assert.equal(d.skippedWorkspaces[0].file, 'x2-truncated.json');
+    assert.match(d.skippedWorkspaces[0].reason, /not valid JSON/);
+    assert.equal(typeof d.lockWaitMs, 'number');
+    assert.equal(d.loopback, true);
+  } finally {
+    fs.rmSync(bad, { force: true });
+  }
+});
+
+test('a lock timeout answers 503 with Retry-After, not 400', async () => {
+  // A contended lock is transient: "try again", not "your request was wrong". The server also runs a
+  // much shorter lock ceiling than the CLI, because waiting blocks its event loop.
+  const lock = path.join(tmpDir, 'requests.json.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner'), `999999\n${Date.now()}\n`);   // fresh, so not stale
+  try {
+    const started = Date.now();
+    const res = await fetch(`${base}/api/requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'pr-review', prId: '4242' }),
+    });
+    const waited = Date.now() - started;
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get('retry-after'), '1');
+    assert.match((await res.json()).error, /timed out waiting for a lock/);
+    assert.ok(waited < 6000, `the server must fail fast, waited ${waited}ms`);
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+});
+
+test('Z-1: every write route answers 503 on a lock timeout, not 400', async () => {
+  // handleFeatureStatus and handleFeatureActivity caught EUSER themselves and reported 400, so the
+  // central lockTimeout->503 mapping never saw them: a write that merely collided with the CLI was
+  // reported as a bad request. Genuine bad input must still be 400.
+  ledger.createFeature({ id: 'z1-ws', title: 'Z1' });
+  const lock = path.join(tmpDir, 'features', 'z1-ws.json.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, 'owner'), `999999\n${Date.now()}\n`);
+  try {
+    for (const [route, body] of [
+      ['status', { status: 'done' }],
+      ['activity', { lastActivityBy: 'someone' }],
+    ]) {
+      const res = await fetch(`${base}/api/features/z1-ws/${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      assert.equal(res.status, 503, `${route} must report a lock timeout as transient`);
+      assert.equal(res.headers.get('retry-after'), '1', `${route} must say when to retry`);
+    }
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+
+  const ok = await fetch(`${base}/api/features/z1-ws/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'done' }),
+  });
+  assert.equal(ok.status, 200, 'and it works once the lock clears');
+  const bad = await fetch(`${base}/api/features/z1-ws/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'bogus' }),
+  });
+  assert.equal(bad.status, 400, 'a real validation error is still a bad request');
+});
+
+test('the whole of 127.0.0.0/8 counts as loopback, not just 127.0.0.1', () => {
+  // The documented friendly-hostname recipe binds an lo0 alias (FLOWLEVER_HOST=127.94.41.73). An
+  // exact-string loopback check called that "remote", which would have made the API read-only and
+  // refused the runner for a setup this project tells you to use. (Binding a 127.x alias needs
+  // `ifconfig lo0 alias` root privileges, so the predicate is asserted directly.)
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
+  const start = src.indexOf('function isLoopbackHost');
+  const end = src.indexOf('const IS_LOOPBACK');
+  assert.ok(start > -1 && end > start, 'isLoopbackHost must exist ahead of IS_LOOPBACK');
+  // eslint-disable-next-line no-new-func
+  const isLoopbackHost = new Function(`${src.slice(start, end)}; return isLoopbackHost;`)();
+
+  for (const host of ['127.0.0.1', '127.94.41.73', '127.1.2.3', '127.255.255.254', 'localhost', '::1']) {
+    assert.equal(isLoopbackHost(host), true, `${host} is loopback`);
+  }
+  for (const host of ['0.0.0.0', '192.168.1.5', '10.0.0.1', '128.0.0.1', '27.0.0.1', '127.0.0.999', 'evil.com', '']) {
+    assert.equal(isLoopbackHost(host), false, `${host} is NOT loopback`);
+  }
 });

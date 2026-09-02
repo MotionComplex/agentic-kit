@@ -42,6 +42,14 @@ countered items** against the counter, then stop:
      explaining why (leave `verdict=redirect`) so the user sees your reasoning on the next pass.
 3. Report what you re-drafted / waived per finding and stop. Do **not** run the full 7-dimension sweep
    or ingest a new round. This keeps the per-item refine loop tight. (Skip the rest of this skill.)
+   **If you ever DO need to ingest here** (e.g. you re-fetched sources and want the ledger to
+   recompute readiness for these items) — never call a bare `ingest`. Without an explicit scope,
+   `ingestRound` auto-resolves every OTHER open finding it doesn't see in this narrow batch,
+   silently closing everything outside the redirected items and flipping the readiness gate green
+   on work nobody re-checked. Pass `--scope-fps <fp1>[,<fp2>,...]` restricted to exactly the
+   redirected fps you're re-evaluating (`ingest <id> --file <tmp.json> --scope-fps <fp,...>`) —
+   that is the structural guard `ingestRound` itself enforces; the "don't ingest a round" rule
+   above is the simpler default, not the only thing standing between this loop and that failure.
 
 ## Queued audit (started from the cockpit "+ New spec analysis")
 If you were dispatched by `/flowlever:watch` for an `audit` request (no `featureId` given — the source

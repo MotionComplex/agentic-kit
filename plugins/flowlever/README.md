@@ -95,10 +95,18 @@ confirms you want it to go out now. Details:
 
 ### A claimed fix must point at a real commit
 
-**Fix + reply** and **Fix only** promise a code change, so the ledger refuses to mark such an item done
-without the sha of the pushed commit carrying it. `finding posted` hard-errors; the runner is told to
-either supply `--sha` or `finding cancel` the item. There is no path where a reply says "Fixed" and the
-branch doesn't contain the change.
+**Fix + reply** and **Fix only** promise a code change, so on a **`pr-respond`** workspace the ledger
+refuses to mark such an item done without the sha of the pushed commit carrying it. `finding posted`
+hard-errors; the runner is told to either supply `--sha` or `finding cancel` the item.
+
+**What this does and does not guarantee.** The sha is recorded and checked for *shape* (7–40 hex
+characters) — it is **not** verified against the repository, because the ledger has no checkout to ask.
+So a fabricated but well-formed sha (`deadbeef`) passes, and `finding unbacked` then reads that finding
+as delivered. The guard turns "claim a fix and say nothing" into "claim a fix and invent a commit id",
+which is a real change in cost and leaves a machine-checkable record — but it is a bookkeeping guard,
+not proof. The verification that closes that gap lives in the runner, which has the checkout:
+`/flowlever:watch` re-checks each unbacked candidate against the branch and reopens the ones that
+never landed.
 
 This is a bookkeeping guard, and it earned its place. The ledger used to record *no* link between a
 finding and the commit that fixed it, so a delivered fix and a missing one looked identical. An audit
@@ -115,7 +123,10 @@ agent — can audit it, and confident wrong conclusions are as likely as correct
   **`⚠ fix not pushed`** chip plus a workspace banner offering to reopen it.
 - `node src/cli.js finding unbacked` audits the whole ledger for them; `/flowlever:watch` runs it every
   pass, checks each against the branch, and reopens the ones that genuinely never landed.
-- Spec workspaces are exempt (their proof of delivery is `appliedAt`, not a git sha).
+- **Scope:** `pr-respond` only — that is the flow where *you* are the PR author and owe the commit. A
+  `pr-review` workspace is you reviewing someone else's PR, where a suggested diff is a comment for
+  *their* author to commit, so no sha is owed. Spec workspaces prove delivery with `appliedAt`. An
+  unrecognised or unreadable workspace kind fails **closed** (gate on).
 
 **A Post can never silently look done.** Clicking Post in the cockpit writes nothing — the browser can't
 reach Azure DevOps. It marks the items **“Posting…”** and queues an `apply` job; only the runner can
@@ -228,13 +239,19 @@ load anchor "com.apple" from "/etc/pf.anchors/com.apple"
 
 Save as `/etc/pf-flowlever.conf`, apply with `pfctl -f /etc/pf-flowlever.conf && pfctl -e`, and
 add a `RunAtLoad` LaunchDaemon running the same two commands for boot persistence. The server
-itself needs no change — it binds the wildcard interface and ignores the Host header.
+itself needs no change for the plain `127.0.0.1 → 127.0.0.1` redirect above — it binds loopback
+(`127.0.0.1`) by default, which the rule already targets, and the server ignores the Host header
+so any hostname that resolves there works.
 
 **pf reflection quirk:** if the `rdr` target is the same IP the rule matches (`127.0.0.1` →
 `127.0.0.1`), direct connections to the target port (`:4173`) start timing out — replies collide
 with the translation state. Fix: redirect to a dedicated loopback alias instead
 (`ifconfig lo0 alias 127.94.41.73` + `rdr … -> 127.94.41.73 port 4173`; add the ifconfig to the
-LaunchDaemon). The server hears it because it binds the wildcard interface.
+LaunchDaemon). **This alias trick DOES need a server change**, because the default loopback bind
+listens on `127.0.0.1` specifically, not every loopback address: set
+`FLOWLEVER_HOST=127.94.41.73` (matching the alias) wherever the server is started. The whole of
+`127.0.0.0/8` counts as loopback, so an alias like this is treated exactly like `127.0.0.1`: no
+startup warning, and the API stays fully writable.
 
 **Keep the server up:** the cockpit dies with the session that started it. A user-level
 `KeepAlive` LaunchAgent running `node app/src/cli.js start --no-open` (with `FLOWLEVER_DATA` set)
@@ -245,6 +262,76 @@ makes `flowlever.test` always-on and restarts the server if it crashes.
 Ledger state (features, findings, rounds, requests, briefs) lives **per-user** in `~/.flowlever`,
 so it's shared across repositories and kept out of the plugin. Override the location with the
 `FLOWLEVER_DATA` environment variable — every skill honors it.
+
+## Environment variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `FLOWLEVER_DATA` | Where the ledger (features/ledger/rounds/requests/config/briefs) lives. | Unset: `app/data` relative to the app directory (`src/ledger.js`'s `DATA_DIR`). Every `/flowlever:*` skill and this README explicitly set it to `~/.flowlever` before invoking the CLI, so from the cockpit/skills the effective default is `~/.flowlever`. |
+| `PORT` | HTTP port for the cockpit server / `cli.js start --port`. | `4173` |
+| `FLOWLEVER_HOST` | Bind address for the cockpit server. | `127.0.0.1` (loopback-only — the cockpit has no authentication, so anything else is reachable by anyone who can hit the port). A non-loopback value prints a startup warning and makes the API **read-only**: every mutation answers 403 unless paired with `FLOWLEVER_ALLOW_REMOTE_WRITES=1`. |
+| `FLOWLEVER_ALLOW_REMOTE_WRITES` | Opt-in to allow **any** write — queue a job, decide a finding, start the runner — while `FLOWLEVER_HOST` is non-loopback. Guarding only the runner was not enough: the job queue is itself a write surface, so anyone reaching the port could enqueue work your next local runner would dutifully execute. | Unset (reads allowed, all mutations 403). Set to `1` only if you accept that anyone reaching the port can change your review data and trigger ADO writes. `FLOWLEVER_ALLOW_REMOTE_RUNNER=1` is still honoured as the older, narrower name. |
+| `FLOWLEVER_LOCK_WAIT_MS` | How long a write waits for a contended file lock before failing with a retryable 503. | `10000` for the CLI and the runner; **the server overrides this to `1500`** because a wait there blocks every other request. A write costs ~5 ms, so this is a safety net, not an expected latency. Setting the variable overrides BOTH — raising it also raises the server's worst-case stall to the value you choose. |
+| `FLOWLEVER_FSYNC_DIR` | Also fsync the containing **directory** after each write, making the rename itself crash-durable. | Unset. Measured cost: 5.16 → 10.05 ms per write, and that time is spent holding a lock, so it is off by default. `tmp`+rename already guarantees a reader never sees a torn file; what this buys is not losing the *last* write in an OS-level crash (you keep the previous good file either way). |
+| `FLOWLEVER_CLAUDE_BIN` | Explicit path to the `claude` binary the runner spawns. | Unset: auto-resolve via `~/.local/bin/claude`, then `command -v claude` in a login shell. |
+| `FLOWLEVER_ADO_PROJECT` | Azure DevOps project `/flowlever:poll` scans. | Unset: derive from the current repo's git remote (skill-level behavior, `skills/poll/SKILL.md`); if neither is available, the pass stops and says so. |
+| `FLOWLEVER_REVIEWER_EMAIL` | Whose PRs/reviews `/flowlever:poll` scans. | Unset: `git config user.email`, else the authenticated ADO identity. |
+| `FLOWLEVER_POLL_CAP` | Max heavy jobs (review/re-review/respond ingests) `/flowlever:poll` enqueues per pass. | `3` — anything over the cap waits for the next pass, logged as deferred, never dropped. |
+
+## Troubleshooting
+
+- **A workspace is missing from the board** — the server could not read its file (truncated,
+  hand-edited, or a name that isn't a valid workspace id). It is skipped rather than taking the whole
+  board down with it, the count is flagged on the `X-FlowLever-Skipped` response header, and
+  `curl localhost:4173/api/diagnostics` names the file and the reason. Fix or remove the file.
+- **A write returns 503 "timed out waiting for a lock"** — another FlowLever process (the CLI, a
+  runner) was writing the same file. It is transient: retry. If nothing is running, the message names
+  the `.lock` directory to delete.
+- **The cockpit hangs for a moment while the CLI or a runner is writing** — expected, and bounded.
+  The ledger is synchronous and every write takes a cross-process lock, so a request that needs a
+  file another process is mid-write on blocks the server's single thread until it clears. Real writes
+  take about 5 ms, so this is normally invisible; a long stall means something is holding a lock.
+  The server caps its own wait at 1.5s (the CLI and the runner use the longer default, since
+  blocking costs them nothing) and then answers 503 with `Retry-After`. Measured worst case for an
+  unrelated request behind a contended write: ~1.5s. It is bounded, not eliminated — that is
+  inherent to a synchronous ledger in a single-threaded server.
+
+- **`node src/cli.js` prints usage instead of doing anything** — that's correct: a bare invocation
+  (or `help`) prints usage and exits 0. Run `node src/cli.js help` to see every command.
+- **`Not logged in · Please run /login` from a scheduled pass** — you're running the poll/watch
+  loop under plain `cron`, which runs outside the GUI login session and can't unlock the macOS
+  Keychain where Claude Code's OAuth token lives. Use a **launchd LaunchAgent** instead (see
+  [Scheduling on macOS](#scheduling-on-macos--use-launchd-not-cron) above); plain cron is fine on
+  Linux, which has no Keychain.
+- **`timed out waiting for a lock on <file> — another FlowLever process is writing it`** — two
+  writers (server, CLI, runner) tried to touch the same file at once and one waited past the 10s
+  timeout. If nothing is actually running (a process crashed mid-write and left a stale
+  `<file>.lock/` directory that hasn't aged out past 30s yet, or genuinely never will because the
+  holder is gone), delete the named `<file>.lock/` directory and retry. If something IS running,
+  just retry — it will very likely have released the lock by then.
+- **`invalid feature id "…"` on an otherwise-normal command** — feature ids must match
+  `[a-z0-9-]{1,64}`; this is checked on every route/command that turns an id into a filename, not
+  just on create, so a typo'd or copy-pasted id (stray whitespace, uppercase, a URL fragment)
+  fails clearly instead of silently reading/writing the wrong file.
+- **`finding posted`/the Post button refuses with "…cannot be marked posted without the commit
+  that carries it"** — the finding's agreed response is a code change and no valid commit sha was
+  given. Apply the fix, commit, push it, then pass `--sha <pushed commit sha>` (7–40 hex chars). If
+  the fix genuinely wasn't made, run `finding cancel <ws> --fps <fp>` instead of forcing a stamp.
+- **The runner button/`/flowlever:watch` won't start ("runner is disabled…")** — the server is
+  bound to a non-loopback `FLOWLEVER_HOST`. Bind loopback (the default), or explicitly set
+  `FLOWLEVER_ALLOW_REMOTE_WRITES=1` if you understand that this grants anyone reaching the port the
+  ability to trigger writes to your Azure DevOps account.
+- **"Could not find the `claude` CLI"** — install it, or point `FLOWLEVER_CLAUDE_BIN` at its full
+  path; the runner refuses to guess.
+- **A clicked notification opens Script Editor instead of the cockpit** — that's the `osascript`
+  fallback; install `terminal-notifier` (`brew install terminal-notifier`) so notification clicks
+  open the cockpit directly (starting the server if needed).
+- **A `.test`/`.local` friendly hostname times out in curl/browsers but resolves in `dscacheutil`**
+  — you used the `.local` TLD, which macOS routes to Bonjour/mDNS at the socket layer. Use `.test`
+  instead (see [Friendly hostname](#friendly-hostname-optional-httpflowlevertest) above).
+- **Anything else server-side** — `GET /api/version` and the cockpit's own staleness banner catch
+  a browser tab running against an older/newer server build than expected; a hard reload (not just
+  restarting the server) usually clears it.
 
 ## The bundled app
 

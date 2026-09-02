@@ -12,10 +12,14 @@ description: >
 # /flowlever:pr-respond — respond to PR feedback, in the cockpit
 
 Bridges the existing `/pr-respond` skill into the cockpit. The **fetch + thread-triage is identical to
-`/pr-respond`** (read it at `~/development/agentic-kit/skills/pr-respond/SKILL.md`: how it finds threads
-awaiting the author's response and reads the current code at each anchor). The difference: each thread
-becomes a finding in a `pr-respond` **workspace**, reviewed in the same stepper, and your decisions are
-posted as replies / applied as code fixes on **Apply**.
+`/pr-respond`** — if this monorepo also has that standalone skill checked out (a sibling of `plugins/`,
+typically at `skills/pr-respond/SKILL.md` relative to the repo root; `${CLAUDE_PLUGIN_ROOT}` won't
+resolve it, since it points inside `plugins/flowlever`), read it there for the fuller methodology
+(how it finds threads awaiting the author's response and reads the current code at each anchor). A
+standalone plugin install won't have it, so don't depend on it: §2 below inlines what you need to
+fetch and triage threads. The difference: each thread becomes a finding in a `pr-respond`
+**workspace**, reviewed in the same stepper, and your decisions are posted as replies / applied as
+code fixes on **Apply**.
 
 ## Review scope (per-run instructions)
 If the request carries `instructions` (the user's free-text scope/focus for this run, e.g. "front-end

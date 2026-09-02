@@ -12,6 +12,36 @@ const { API_VERSION } = require('./version');
 const { generateReport } = require('./report');
 
 const PORT = process.env.PORT !== undefined && process.env.PORT !== '' ? Number(process.env.PORT) : 4173;
+// LOOPBACK BY DEFAULT. `listen(PORT)` with no host binds the unspecified address — every interface —
+// so the cockpit was reachable from the whole LAN with no authentication of any kind, including
+// POST /api/runner, which spawns a Claude session with permission checks disabled that can write
+// comments and code fixes to the user's Azure DevOps account. Binding a hostname of your own
+// (`127.0.0.1 lever` in /etc/hosts) still works against a loopback bind, so nothing is lost.
+// FLOWLEVER_HOST remains as a deliberate, documented opt-out — see the warning in listen().
+const HOST = process.env.FLOWLEVER_HOST !== undefined && process.env.FLOWLEVER_HOST !== ''
+  ? process.env.FLOWLEVER_HOST
+  : '127.0.0.1';
+// The WHOLE of 127.0.0.0/8 is loopback, not just 127.0.0.1 — which matters because the documented
+// friendly-hostname recipe binds an lo0 alias like 127.94.41.73. An exact-string check called that
+// "remote" and would have turned the API read-only and refused the runner for a setup this project
+// tells you to use.
+function isLoopbackHost(host) {
+  if (host === 'localhost' || host === '::1' || host === '[::1]') return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return false;
+  const octets = m.slice(1).map(Number);
+  if (octets.some((o) => o > 255)) return false;
+  return octets[0] === 127;
+}
+const IS_LOOPBACK = isLoopbackHost(HOST);
+// Opting into a non-loopback bind must not silently hand WRITE access to anyone who can reach the
+// port. Guarding only the runner was not enough: the job queue is itself a write surface, so a LAN
+// client could enqueue work the owner's next local runner would dutifully execute, and could stop a
+// runner mid-drain. So on a non-loopback bind, reads are allowed (that is the point of choosing to
+// expose it) and every MUTATION requires an explicit opt-in.
+const ALLOW_REMOTE_WRITES = process.env.FLOWLEVER_ALLOW_REMOTE_WRITES === '1'
+  || process.env.FLOWLEVER_ALLOW_REMOTE_RUNNER === '1';   // the older, narrower name still works
+const ALLOW_REMOTE_RUNNER = ALLOW_REMOTE_WRITES;
 // When this process started — shown next to the version so "restart the server" is verifiable.
 const SERVER_STARTED_AT = new Date().toISOString();
 const WEB_DIR = path.resolve(__dirname, '..', 'web');
@@ -90,7 +120,9 @@ function findingError(f, idx) {
 // ---------- API handlers ----------
 
 function handleFeatureList(res, kindFilter) {
-  let features = ledger.listFeatures() || [];
+  const listed = ledger.listFeatures({ withSkipped: true });
+  let features = listed.features || [];
+  const skipped = listed.skipped || [];
   if (kindFilter) features = features.filter((f) => (f.kind || 'spec') === kindFilter);
   const summaries = features.map((f) => {
     let readiness = null;
@@ -129,6 +161,10 @@ function handleFeatureList(res, kindFilter) {
       stamps: ledger.reviewStamps(f, lastRoundAt),
     };
   });
+  // A workspace file we could not read must not vanish silently. The response body stays an ARRAY
+  // (that is the client contract, and attaching a property to an array is dropped by JSON.stringify
+  // anyway), so the signal rides on a header and the detail is available from /api/diagnostics.
+  if (skipped.length) res.setHeader('X-FlowLever-Skipped', String(skipped.length));
   sendJson(res, 200, summaries);
 }
 
@@ -136,7 +172,9 @@ function handleFeatureList(res, kindFilter) {
 // sorted so the most actionable surface first (most toReview, then most open).
 // toReview = open/reworking findings carrying a proposed change (draft).
 function handleHome(res) {
-  const features = ledger.listFeatures() || [];
+  const listed = ledger.listFeatures({ withSkipped: true });
+  const features = listed.features || [];
+  const skippedWorkspaces = listed.skipped || [];
   const rows = features.map((f) => {
     const findings = (ledger.loadLedger(f.id).findings) || [];
     const counts = { toReview: 0, open: 0, reworking: 0, posted: 0, resolved: 0, waived: 0 };
@@ -172,6 +210,7 @@ function handleHome(res) {
     (b.counts.open - a.counts.open) ||
     (b.counts.reworking - a.counts.reworking) ||
     a.title.localeCompare(b.title));
+  if (skippedWorkspaces.length) res.setHeader('X-FlowLever-Skipped', String(skippedWorkspaces.length));
   sendJson(res, 200, rows);
 }
 
@@ -185,6 +224,14 @@ function handleFeatureDetail(res, id) {
   });
 }
 
+// A handler that catches EUSER itself must still let a LOCK TIMEOUT through as a transient 503,
+// otherwise it reports "your request was wrong" for a write that merely collided with the CLI or the
+// runner. Rethrowing hands it to the central error path, which knows the difference.
+function sendHandlerError(res, err) {
+  if (err && err.lockTimeout) throw err;
+  return sendError(res, err && err.code === 'EUSER' ? euserStatus(err) : 500, err.message);
+}
+
 // Set a workspace's lifecycle status — used by the "Mark review complete" / "Reopen"
 // buttons (status:'done' / status:'reworking').
 async function handleFeatureStatus(req, res, id) {
@@ -194,7 +241,7 @@ async function handleFeatureStatus(req, res, id) {
     const feature = ledger.setFeatureStatus(id, body.status);
     sendJson(res, 200, feature);
   } catch (e) {
-    sendError(res, e.code === 'EUSER' ? 400 : 500, e.message);
+    return sendHandlerError(res, e);
   }
 }
 
@@ -225,7 +272,7 @@ async function handleFeatureActivity(req, res, id) {
     const feature = ledger.setFeatureReview(id, patch);
     sendJson(res, 200, feature);
   } catch (e) {
-    sendError(res, e.code === 'EUSER' ? 400 : 500, e.message);
+    return sendHandlerError(res, e);
   }
 }
 
@@ -342,15 +389,30 @@ async function handleReviewApply(req, res, id) {
 
   const uniq = [...new Set(fps)];
   let findings;
+  let skipped = [];
   // `posted` carries the fix gate: for a finding whose agreed response is a code change the ledger
   // refuses the stamp without the pushed commit's sha (→ EUSER → 400). The browser never sends this
   // status for code fixes (it sends `pending-post` and lets the runner do the real work), so a 400
   // here means something tried to claim a fix it did not push.
-  if (status === 'posted') findings = ledger.markPosted(id, uniq, { by: 'user', sha: body.sha, repo: body.repo, branch: body.branch });
-  else if (status === 'pending-post') findings = ledger.setFindingPending(id, uniq, 'post', { by: 'user' });
-  else if (status === 'pending-apply') findings = ledger.setFindingPending(id, uniq, 'apply', { by: 'user' });
-  else findings = uniq.map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user' }));
-  sendJson(res, 200, { updated: findings.length, status, findings });
+  if (status === 'posted') {
+    const r = ledger.markPosted(id, uniq, { by: 'user', sha: body.sha, repo: body.repo, branch: body.branch, detailed: true });
+    findings = r.updated; skipped = r.skipped;
+  } else if (status === 'pending-post' || status === 'pending-apply') {
+    const kind = status === 'pending-post' ? 'post' : 'apply';
+    const r = ledger.setFindingPending(id, uniq, kind, { by: 'user', detailed: true });
+    findings = r.updated; skipped = r.skipped;
+  } else {
+    // `reworking` here is the finish screen saying "these are in flight", NOT the reviewer
+    // re-triaging them — so their approve/edit decisions must survive. Clearing them sent every
+    // suggestion-only finding back to Undecided and left the export reading "No applicable
+    // changes to export". `resolved` is a real completion, so it supersedes the decision as usual.
+    const keepDecision = status === 'reworking';
+    findings = uniq.map((fp) => ledger.setFindingStatus(id, fp, { status, by: 'user', keepDecision }));
+  }
+  // `skipped` names the findings the bulk operation passed over (already waived/resolved). The
+  // response used to carry only a smaller count, so a reviewer who posted 5 and saw "4 updated"
+  // had no way to learn which one was dropped.
+  sendJson(res, 200, { updated: findings.length, status, findings, skipped });
 }
 
 // Cancel a stuck Post/Apply: clear the in-flight markers so the findings return to the review
@@ -395,10 +457,13 @@ async function handleIngest(req, res, id) {
     const message = findingError(body.findings[i], i);
     if (message) return sendError(res, 400, message);
   }
+  // `scope` marks a PARTIAL pass, so reconciliation doesn't auto-resolve findings this round never
+  // examined. Passed straight through; the ledger validates its shape.
   const { round, stats } = ledger.ingestRound(id, body.findings, {
     note: body.note,
     reopenResolved: Boolean(body.reopenResolved),
     trigger: 'audit',
+    scope: body.scope === undefined ? null : body.scope,
   });
   sendJson(res, 200, { round, stats });
 }
@@ -464,7 +529,20 @@ function handleRunnerGet(res, wantLog) {
 
 const RUNNER_ERROR_STATUS = { EACTION: 400, EBUSY: 409, ENOBIN: 503, ESPAWN: 500, EIDLE: 409, EKILL: 500 };
 
+// Starting the runner spawns a Claude session with permission checks disabled that writes to Azure
+// DevOps. On a loopback bind that is the same trust boundary as the CLI which started the server.
+// On a non-loopback bind it is not: it would hand that capability to anyone who can reach the port.
+function remoteRunnerBlocked(res) {
+  if (IS_LOOPBACK || ALLOW_REMOTE_RUNNER) return false;
+  sendError(res, 403, `The runner is disabled because the server is bound to ${HOST} rather than `
+    + 'loopback, and the cockpit has no authentication. Bind 127.0.0.1 (the default), or set '
+    + 'FLOWLEVER_ALLOW_REMOTE_RUNNER=1 to accept that anyone who can reach this port may write to '
+    + 'your Azure DevOps account.');
+  return true;
+}
+
 async function handleRunnerStart(req, res) {
+  if (remoteRunnerBlocked(res)) return;
   const body = await readJsonBody(req);
   const action = body.action === undefined ? 'watch' : body.action;
   if (typeof action !== 'string') return sendError(res, 400, 'action must be a string');
@@ -498,7 +576,9 @@ function handleReport(res, id) {
 // ---------- static files ----------
 
 function handleStatic(req, res, pathname) {
-  if (req.method !== 'GET') return sendError(res, 405, 'Method not allowed');
+  // HEAD is GET without a body — answering 405 broke the standard contract for no reason.
+  const headOnly = req.method === 'HEAD';
+  if (req.method !== 'GET' && !headOnly) return sendError(res, 405, 'Method not allowed');
   let rel;
   try {
     rel = decodeURIComponent(pathname === '/' ? 'index.html' : pathname.slice(1));
@@ -514,7 +594,8 @@ function handleStatic(req, res, pathname) {
   if (!contentType) return sendError(res, 404, 'Not found');
   fs.readFile(filePath, (err, data) => {
     if (err) return sendError(res, 404, 'Not found');
-    res.writeHead(200, { 'Content-Type': contentType });
+    res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': data.length });
+    if (headOnly) return res.end();
     res.end(data);
   });
 }
@@ -523,9 +604,24 @@ function handleStatic(req, res, pathname) {
 
 async function route(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  const parts = url.pathname.split('/').filter(Boolean).map((p) => decodeURIComponent(p));
+  let parts;
+  try {
+    parts = url.pathname.split('/').filter(Boolean).map((p) => decodeURIComponent(p));
+  } catch {
+    // Malformed percent-encoding (e.g. `%c0%af`) threw here and fell through to the catch-all as a
+    // 500 with a stack in the log. It is bad input, not an internal failure.
+    return sendError(res, 400, 'Bad request path');
+  }
 
   if (parts[0] !== 'api') return handleStatic(req, res, url.pathname);
+
+  // Read-only from a non-loopback bind unless the operator explicitly opted into remote writes.
+  if (!IS_LOOPBACK && !ALLOW_REMOTE_WRITES && req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendError(res, 403, `This cockpit is bound to ${HOST} rather than loopback and has no `
+      + 'authentication, so it is read-only over the network. Run it on 127.0.0.1 (the default) to '
+      + 'make changes, or set FLOWLEVER_ALLOW_REMOTE_WRITES=1 to accept that anyone who can reach '
+      + 'this port may change your review data and post to Azure DevOps.');
+  }
 
   if (parts[1] === 'home' && parts.length === 2 && req.method === 'GET') {
     return handleHome(res);
@@ -577,6 +673,36 @@ async function route(req, res) {
   if (parts[1] === 'version' && parts.length === 2 && req.method === 'GET') {
     return sendJson(res, 200, { apiVersion: API_VERSION, pid: process.pid, startedAt: SERVER_STARTED_AT });
   }
+  // What the server could NOT read, plus the knobs that change its behavior. Exists because a
+  // skipped workspace was otherwise invisible from inside the product: the board simply omitted it
+  // and the inbox stopped nagging, which is quieter than the whole-board error it replaced but no
+  // more honest. The list routes flag the count on X-FlowLever-Skipped and point here for detail.
+  if (parts[1] === 'diagnostics' && parts.length === 2 && req.method === 'GET') {
+    // Loopback (or an explicit opt-in) only: this reports the absolute data path, the bind, and
+    // whether remote writes are on — reconnaissance an unauthenticated remote reader has no business
+    // with, even though it is a GET.
+    if (!IS_LOOPBACK && !ALLOW_REMOTE_WRITES) {
+      return sendError(res, 403, 'Diagnostics are available from loopback only (they report local '
+        + 'paths and the trust-boundary configuration).');
+    }
+    const listed = ledger.listFeatures({ withSkipped: true });
+    return sendJson(res, 200, {
+      dataDir: ledger.DATA_DIR,
+      host: HOST,
+      loopback: IS_LOOPBACK,
+      remoteWritesAllowed: ALLOW_REMOTE_WRITES,
+      lockWaitMs: ledger.configureLocking().waitMs,
+      fsyncDir: process.env.FLOWLEVER_FSYNC_DIR === '1',
+      workspaces: listed.features.length,
+      skippedWorkspaces: listed.skipped,
+    });
+  }
+  // The browser recomputes readiness optimistically after a decision, and used to do it against a
+  // hardcoded copy of the severity weights — which silently drifted the moment anyone edited the
+  // documented config.json. Serve the real one instead.
+  if (parts[1] === 'config' && parts.length === 2 && req.method === 'GET') {
+    return sendJson(res, 200, ledger.loadConfig());
+  }
   if (parts[1] === 'runner' && parts.length === 2) {
     if (req.method === 'GET') return handleRunnerGet(res, url.searchParams.get('log') === '1');
     if (req.method === 'POST') return handleRunnerStart(req, res);
@@ -596,9 +722,16 @@ const server = http.createServer((req, res) => {
     .then(() => route(req, res))
     .catch((err) => {
       if (res.writableEnded) return;
+      // A lock timeout is transient — the right answer is "try again", not "your request was wrong".
+      if (err && err.lockTimeout) {
+        res.setHeader('Retry-After', '1');
+        return sendError(res, 503, err.message);
+      }
       if (err && err.code === 'EUSER') {
-        const status = req.method === 'GET' ? 404 : euserStatus(err);
-        return sendError(res, status, err.message);
+        // euserStatus decides on the MESSAGE, on every method. Forcing 404 for GET made
+        // `GET /api/requests?status=bogus` — a validation error — answer 404, so a client could
+        // not tell "no such resource" from "you sent nonsense".
+        return sendError(res, euserStatus(err), err.message);
       }
       if (err && err.code === 'ETOOBIG') return sendError(res, 413, err.message);
       if (err && err.code === 'EBADJSON') return sendError(res, 400, err.message);
@@ -608,8 +741,19 @@ const server = http.createServer((req, res) => {
 });
 
 ledger.initDataDir();
-server.listen(PORT, () => {
+// A contended lock blocks this process's event loop, so the whole cockpit is unresponsive while a
+// request waits. The CLI and the runner can afford the ledger's generous default; the server cannot,
+// so it fails fast and tells the client to retry. Measured worst case drops from ~10s to ~1.5s.
+ledger.configureLocking({ waitMs: Number(process.env.FLOWLEVER_LOCK_WAIT_MS) > 0
+  ? Number(process.env.FLOWLEVER_LOCK_WAIT_MS)
+  : 1500 });
+server.listen(PORT, HOST, () => {
   console.log(`FlowLever cockpit → http://localhost:${server.address().port}`);
+  if (!IS_LOOPBACK) {
+    console.warn(`WARNING: bound to ${HOST}, not loopback. The cockpit has NO authentication — `
+      + 'anyone who can reach this address can read and change your review data'
+      + `${ALLOW_REMOTE_RUNNER ? ' AND start runner sessions that write to Azure DevOps' : ''}.`);
+  }
 });
 
 module.exports = { server };

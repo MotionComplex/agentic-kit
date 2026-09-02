@@ -18,14 +18,23 @@ Usage: node src/cli.js <command> [args]
   feature add <id> --title "..." [--kind spec|pr-review|pr-respond]   Create a workspace
   feature list [--json]                  List features (with readiness)
   feature show <id> [--json]             Show one feature in detail
-  feature delete <id>                    Delete a workspace (features + ledger + rounds)
+  feature delete <id> --yes              Delete a workspace (features + ledger + rounds).
+                                         --yes is required — the command lists exactly which
+                                         files it would remove and refuses without it.
   feature activity <id> [--responded] [--note "..."] [--at <iso>] [--by "<name>"] | --clear
                                          Mark/clear "author responded" on a posted PR review (runner).
                                          --at/--by record WHEN the counterpart last updated the PR and
                                          who — shown in the cockpit next to when we last reviewed it.
-  source add <featureId> --type confluence|ado|figma --id <id> [--title "..."] [--url <url>]
+  source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--title "..."] [--url <url>]
+  source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title "..."] [--url <url>]
+                                         confluence/ado need --id; figma needs --fileKey (--nodeId
+                                         optional). --itemType (ado only) stores the work-item type.
   ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]
-                                         Ingest an audit round + reconcile ledger
+                                         [--scope-fps <fp>[,<fp>...] | --scope-dimensions <dim>[,<dim>...]]
+                                         Ingest an audit round + reconcile ledger. --scope-fps/
+                                         --scope-dimensions (mutually exclusive) mark this as a
+                                         PARTIAL pass: findings outside the scope are left exactly
+                                         as they were instead of being auto-resolved.
   finding list <featureId> [--status open] [--dimension x] [--severity y] [--json]
   finding edit <featureId> <fp> [--detail "..."] [--suggestion "..."] [--severity blocker|major|minor|info] [--note "..."]
                                          Refine a finding's text/severity (fingerprint stays stable)
@@ -71,6 +80,10 @@ Usage: node src/cli.js <command> [args]
                                          no-ops when an identical queued/running request exists.
                                          poll = a discovery/refresh pass now (--kind narrows it
                                          to one section); the cockpit's "↻ Refresh" button
+  requests claim [--actions a,b] [--json]   Atomically claim the OLDEST queued request
+                                         (optionally filtered to one or more --actions) — the
+                                         compare-and-swap that makes a runner's take exclusive.
+                                         Prints "nothing queued" and exits 0 when the queue is empty.
   requests delete <id>                   Remove a request from the queue
   requests set <id> --status running|done|error [--note "..."] [--wsId <id>]
                                [--phase "..."] [--needs-input|--no-needs-input]
@@ -78,7 +91,8 @@ Usage: node src/cli.js <command> [args]
                                          --phase sets the live step label, --needs-input flags
                                          it as blocked on you (e.g. a 2FA/auth prompt)
   start [--port N] [--no-open]           Launch the cockpit server + open it in the browser
-  demo                                   Seed demo feature
+  demo [--force]                         Seed demo feature. --force is required once any demo
+                                         workspace already exists (it would be deleted + reseeded).
   help                                   Show this help
 
 Severity glyphs: ◆ blocker  ▲ major  ● minor  ○ info`;
@@ -91,7 +105,7 @@ function userError(msg) {
 
 // ---------- arg parsing (hand-rolled) ----------
 
-const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear', 'dedupe']);
+const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear', 'dedupe', 'yes', 'force']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -108,7 +122,13 @@ function parseArgs(argv) {
         flags[body] = true;
       } else {
         const next = argv[i + 1];
-        if (next === undefined) throw userError(`Flag --${body} requires a value`);
+        // A value-taking flag must not silently swallow the NEXT flag as if it were its value —
+        // `finding set ws fp --status --pin` used to store status:'--pin' and drop --pin with no
+        // error. None of this CLI's value flags take a negative-number or dash-prefixed value, so
+        // anything shaped like another `--flag` (or a bare `--`) is unambiguously a missing value.
+        if (next === undefined || next.startsWith('--')) {
+          throw userError(`Flag --${body} requires a value${next !== undefined ? ` (got another flag '${next}')` : ''}`);
+        }
         flags[body] = next;
         i++;
       }
@@ -279,8 +299,17 @@ function cmdFeatureShow({ pos, flags }) {
   }
 }
 
-function cmdFeatureDelete({ pos }) {
+function cmdFeatureDelete({ pos, flags }) {
   const id = need(pos[0], 'feature <id>');
+  ledger.getFeature(id); // EUSER (not found) before the destructive guard, so a typo fails clearly
+  if (!flags.yes) {
+    const files = ['features', 'ledger', 'rounds']
+      .map((sub) => path.join(ledger.DATA_DIR, sub, `${id}.json`))
+      .filter((p) => fs.existsSync(p));
+    throw userError(`This permanently deletes ${files.length} file(s) for "${id}":\n`
+      + files.map((f) => `  ${f}`).join('\n')
+      + `\nPass --yes to confirm: node src/cli.js feature delete ${id} --yes`);
+  }
   ledger.deleteFeature(id);
   console.log(`Deleted feature ${id}`);
 }
@@ -291,13 +320,27 @@ function cmdSourceAdd({ pos, flags }) {
   if (!['confluence', 'ado', 'figma'].includes(type)) {
     throw userError(`--type must be confluence, ado or figma (got '${type}')`);
   }
-  let id = need(flags.id, '--id');
-  if (type === 'ado' && /^\d+$/.test(id)) id = Number(id);
-  const source = { type, id };
+  const source = { type };
+  let label;
+  if (type === 'figma') {
+    // figma sources are keyed by fileKey, not id — ledger.addSource requires it and there was no
+    // route to pass it: this command unconditionally demanded --id, which figma never uses.
+    source.fileKey = need(flags.fileKey, '--fileKey (required for --type figma)');
+    if (flags.nodeId !== undefined) source.nodeId = flags.nodeId;
+    label = `${source.fileKey}${source.nodeId ? `#${source.nodeId}` : ''}`;
+  } else {
+    let id = need(flags.id, '--id');
+    if (type === 'ado' && /^\d+$/.test(id)) id = Number(id);
+    source.id = id;
+    // ledger.addSource maps itemType -> the source's "type" field (the work-item type); this
+    // command used to never read the flag at all, so `--itemType` was accepted and dropped.
+    if (type === 'ado' && flags.itemType !== undefined) source.itemType = flags.itemType;
+    label = id;
+  }
   if (flags.title !== undefined) source.title = flags.title;
   if (flags.url !== undefined) source.url = flags.url;
   ledger.addSource(featureId, source);
-  console.log(`Added ${type} source ${id} to ${featureId}`);
+  console.log(`Added ${type} source ${label} to ${featureId}`);
 }
 
 function cmdIngest({ pos, flags }) {
@@ -305,10 +348,20 @@ function cmdIngest({ pos, flags }) {
   const file = need(flags.file, '--file');
   const findings = extractFindings(readJsonFile(file, 'findings'), file);
   findings.forEach((f, i) => assertValidFinding(f, i));
+  if (flags['scope-fps'] !== undefined && flags['scope-dimensions'] !== undefined) {
+    throw userError('Use either --scope-fps or --scope-dimensions, not both');
+  }
+  let scope = null;
+  if (flags['scope-fps'] !== undefined) {
+    scope = { fps: String(flags['scope-fps']).split(',').map((s) => s.trim()).filter(Boolean) };
+  } else if (flags['scope-dimensions'] !== undefined) {
+    scope = { dimensions: String(flags['scope-dimensions']).split(',').map((s) => s.trim()).filter(Boolean) };
+  }
   const { round, stats } = ledger.ingestRound(featureId, findings, {
     note: flags.note,
     reopenResolved: Boolean(flags['reopen-resolved']),
     trigger: 'audit',
+    scope,
   });
   console.log(`Ingested round ${round.n} for ${featureId}${flags.note ? ` — ${flags.note}` : ''}`);
   console.log(table([
@@ -649,6 +702,24 @@ function cmdRequestsAdd({ flags }) {
   console.log(`Queued ${request.id}  ${request.action}  ${target}${request.title ? ` — ${request.title}` : ''}`);
 }
 
+// The compare-and-swap take: exactly one caller can claim a given queued request, which is what
+// lets a runner drain the queue without a second runner (a scheduled poll, a manually-started
+// watch) picking up and re-executing the same job. Optionally narrowed to a set of --actions.
+function cmdRequestsClaim({ flags }) {
+  const actions = flags.actions !== undefined
+    ? String(flags.actions).split(',').map((s) => s.trim()).filter(Boolean)
+    : null;
+  const request = ledger.claimNextRequest({ actions, by: flags.by });
+  if (!request) {
+    if (flags.json) return printJson(null);
+    console.log('Nothing queued.');
+    return;
+  }
+  if (flags.json) return printJson(request);
+  const target = request.prId ? `PR ${request.prId}` : (request.wsId || request.kind || '—');
+  console.log(`Claimed ${request.id}  ${request.action}  ${target}${request.title ? ` — ${request.title}` : ''}`);
+}
+
 function cmdRequestsDelete({ pos }) {
   const id = need(pos[0], '<id>');
   ledger.deleteRequest(id);
@@ -695,8 +766,19 @@ function cmdCoverageSet({ pos, flags }) {
   console.log(`Coverage updated for ${featureId}: ${coverage.length} entr${coverage.length === 1 ? 'y' : 'ies'}`);
 }
 
-async function cmdDemo() {
+async function cmdDemo({ flags }) {
   const demo = require('./demo.js');
+  // demo.seed() unconditionally rm's features/ledger/rounds for its fixed ids — including
+  // "checkout-redesign" and "pr-482-checkout-api", plausible real workspace names — with no
+  // guard of its own. demo.js is not this unit's to change, so the guard lives here instead.
+  const existing = (demo.DEMO_IDS || []).filter((id) => {
+    try { ledger.getFeature(id); return true; } catch { return false; }
+  });
+  if (existing.length && !flags.force) {
+    throw userError(`This overwrites existing workspace(s): ${existing.join(', ')} — their `
+      + 'features, ledger and round history will be deleted and reseeded. '
+      + 'Pass --force to confirm: node src/cli.js demo --force');
+  }
   const result = await demo.seed();
   const id = result && (result.id || (result.feature && result.feature.id));
   console.log(`Demo data seeded${id ? ` (feature: ${id})` : ''}.`);
@@ -724,10 +806,14 @@ function cmdStart({ flags }) {
 async function run(argv) {
   const { pos, flags } = parseArgs(argv);
   const [a, b] = pos;
-  const cmd = a === 'feature' || a === 'source' || a === 'finding' || a === 'coverage' || a === 'requests'
-    ? `${a} ${b || ''}`.trim()
-    : a;
-  const rest = { pos: pos.slice(cmd.includes(' ') ? 2 : 1), flags };
+  // `a` is undefined on a bare invocation (empty argv) — `cmd` must stay undefined too, so it
+  // falls into the `case undefined` usage handler below instead of `cmd.includes(...)` throwing
+  // before the switch is ever reached (that handler used to be unreachable dead code).
+  const cmd = a === undefined ? undefined
+    : (a === 'feature' || a === 'source' || a === 'finding' || a === 'coverage' || a === 'requests'
+      ? `${a} ${b || ''}`.trim()
+      : a);
+  const rest = { pos: pos.slice(cmd !== undefined && cmd.includes(' ') ? 2 : 1), flags };
 
   ledger.initDataDir();
 
@@ -755,10 +841,11 @@ async function run(argv) {
     case 'coverage set': return cmdCoverageSet(rest);
     case 'requests list': return cmdRequestsList(rest);
     case 'requests add': return cmdRequestsAdd(rest);
+    case 'requests claim': return cmdRequestsClaim(rest);
     case 'requests delete': return cmdRequestsDelete(rest);
     case 'requests set': return cmdRequestsSet(rest);
     case 'start': return cmdStart(rest);
-    case 'demo': return cmdDemo();
+    case 'demo': return cmdDemo(rest);
     case 'help':
     case undefined:
       console.log(USAGE);
