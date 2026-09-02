@@ -1114,6 +1114,7 @@ function stepCard(data, f) {
       f.dimension ? h('span', { class: 'dim-tag' }, f.dimension) : null,
       badge ? h('span', { class: `f-badge f-badge-${badge}` }, badge === 'new' ? 'NEW' : 'REGRESSED') : null,
       duplicateChip(f),
+      notDuplicateChip(f),
       statusChip(f.status),
       verdictChip(f),
       f.locus ? h('code', { class: 'f-locus' }, f.locus) : null));
@@ -4771,6 +4772,7 @@ function findingCard(f) {
       f.dimension ? h('span', { class: 'dim-tag' }, f.dimension) : null,
       badge ? h('span', { class: `f-badge f-badge-${badge}` }, badge === 'new' ? 'NEW' : 'REGRESSED') : null,
       duplicateChip(f),
+      notDuplicateChip(f),
       // A drafted proposal that hasn't been decided yet → a clear "review me" cue.
       (f.draft && f.draft.targetRef && !isReviewed(f) && f.decision === undefined && !isInFlightOrOut(f))
         ? h('span', { class: 'f-review-chip', title: 'A proposed change is ready — open to review' }, '± review')
@@ -4800,6 +4802,14 @@ function duplicateChip(f) {
       onclick: (e) => e.stopPropagation() }, 'DUPLICATE ↗');
   }
   return h('span', { class: 'f-dup-chip', title }, 'DUPLICATE');
+}
+
+/* The other side of the duplicate gate: this finding landed within a few lines of an existing
+ * thread and the review argued it is a different point. Showing the stated reason on the board
+ * makes that judgement reviewable — a weak reason is the tell that it IS a duplicate. */
+function notDuplicateChip(f) {
+  if (f.duplicateOf || !f.notDuplicate) return null;
+  return h('span', { class: 'f-notdup-chip', title: `Near an existing thread; kept as a distinct point — ${f.notDuplicate}` }, 'DISTINCT');
 }
 
 function decisionChip(f) {

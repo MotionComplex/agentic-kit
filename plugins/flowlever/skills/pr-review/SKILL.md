@@ -54,9 +54,21 @@ review the whole diff as usual.
 **Before the first ADO call** (may trigger 2FA/auth):
 `requests set <reqId> --phase "fetching PR #<id> (may need your approval)" --needs-input --note "If a 2FA/auth prompt appears in another window, approve it to continue."`
 Load the ADO MCP tools via ToolSearch, then exactly as `/pr-review`:
-`repo_get_pull_request_by_id` (PR + linked work items), `repo_get_pull_request_changes` /
-`repo_get_pull_request_threads` (diff + existing comments). **Once the first fetch succeeds, clear the
-prompt:** `requests set <reqId> --no-needs-input --phase "fetching linked ticket/spec"`.
+`repo_get_pull_request_by_id` (PR + linked work items), `repo_get_pull_request_changes` (diff) **and
+`repo_get_pull_request_threads` (the comments the PR already carries)**. Both, not either — the diff
+tells you what changed, the threads tell you what has already been said about it. **Once the first
+fetch succeeds, clear the prompt:** `requests set <reqId> --no-needs-input --phase "fetching linked ticket/spec"`.
+
+**Register the existing threads on the workspace before you ingest anything** — `ingest` refuses a
+PR workspace whose threads were never recorded, so this is not optional:
+```
+FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" \
+  threads set <wsId> --file <threads.json>     # or --none if the PR genuinely has no comments
+```
+`threads.json` is `[{ "threadId", "author", "locus", "excerpt?", "url?" }]`, one entry per existing
+thread — **other reviewers' and your own from earlier rounds**. Use the same
+`pr:<id>:<path>:L<line>` grammar for `locus` as findings use, taken from the thread's file anchor
+(omit it for a PR-level comment with no anchor). Deep link: `.../pullRequest/<prId>?discussionId=<threadId>`.
 
 **MANDATORY spec discovery — do NOT skip (this is the whole point of a *spec-aware* review):**
 1. Read the **linked work item** off the PR; fetch its Description + Acceptance Criteria.
@@ -78,9 +90,18 @@ locus (`confluence:<pageId>#<section>`).
 
 ## 3. Map findings → ingest shape
 
-**Duplicate-comment detection (before ingesting):** compare every candidate finding against the
-PR's **existing threads** (`repo_get_pull_request_threads` — other reviewers' comments AND your own
-previously posted ones). Judge by substance, not wording:
+**Duplicate-comment detection (before ingesting) — ENFORCED, not advisory.** `ingest` compares
+every finding's locus against the threads you registered in §2 and **rejects the whole round** if a
+finding lands on an existing thread (same file, within 5 lines) without saying what it is relative
+to that thread. You cannot post a second comment on a point somebody already made by forgetting to
+check. The error names each colliding finding and thread, so a rejection is a to-do list, not a
+puzzle.
+
+That gate is positional and therefore blunt — it catches "same place", not "same point". It cannot
+catch a duplicate anchored 40 lines away, and it will flag two genuinely different points that
+happen to share a line. **You still owe the substantive judgement.** Compare every candidate against
+the PR's existing threads (other reviewers' comments AND your own previously posted ones) and judge
+by substance, not wording:
 - Existing thread already makes the point → **drop the finding** and list it in the run summary as
   `covered by <author>'s thread on <file:line>` — never open a parallel thread for the same point.
   If it is worth keeping visible in the cockpit (e.g. the user should still triage it), ingest it
@@ -93,8 +114,17 @@ previously posted ones). Judge by substance, not wording:
   suggestion as a **reply into that thread** that adds ONLY the increment (open with
   `Adding to <author>'s point:`), not a restatement. On Apply, a thread-locus finding posts via
   thread reply, not a new thread.
+- Genuinely a different point that merely sits near an existing thread → keep it and set
+  **`notDuplicate`** to a one-line reason (`"Oriol is about the null check; this is the swallowed
+  exception"`). This is what clears the positional gate; the cockpit shows a muted DISTINCT chip
+  carrying your reason. It must be a real sentence — a bare `true` is rejected. Do NOT reach for
+  this to make a rejection go away: if the reason you'd write is thin, it IS the duplicate.
 - Your own earlier findings are already reconciled by fingerprint — this check is about threads
   from OTHER surfaces (human reviewers, other tools).
+
+Report the outcome in the run summary: how many findings were dropped as covered, how many were
+re-anchored as thread replies, how many were kept as DISTINCT. "0 duplicates found" on a PR that
+already has comments is a claim worth double-checking before you state it.
 
 For each review finding:
 - `dimension`: reuse the existing set (correctness→`feasibility`/`consistency`, missing-thing→`completeness`,

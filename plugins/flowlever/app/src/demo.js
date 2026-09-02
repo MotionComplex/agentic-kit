@@ -494,6 +494,23 @@ function seedPrReview() {
   f.status = 'auditing';
   L.saveFeature(f);
 
+  // The comments the PR already carried when the review ran. Ingest reconciles against these, so
+  // the review cannot open a second thread on a point a human reviewer already made.
+  L.setPriorThreads(PR_REVIEW_ID, [
+    {
+      threadId: '5511', author: 'Mireia Solà',
+      locus: 'pr:482:src/checkout/validate.ts:42',
+      excerpt: 'Twint is missing from this allow-list — the spec added it to the launch set.',
+      url: 'https://dev.azure.com/demo/_git/shop/pullrequest/482?discussionId=5511',
+    },
+    {
+      threadId: '5512', author: 'Jonas Reber',
+      locus: 'pr:482:src/checkout/validate.ts:60',
+      excerpt: 'Can we return which field failed? The client has nothing to show the user.',
+      url: 'https://dev.azure.com/demo/_git/shop/pullrequest/482?discussionId=5512',
+    },
+  ]);
+
   L.ingestRound(PR_REVIEW_ID, [
     {
       dimension: 'feasibility', severity: 'blocker',
@@ -507,14 +524,23 @@ function seedPrReview() {
       title: 'Twint references rejected by the method allow-list',
       detail: 'The allow-list still reads ["card","paypal"]; a valid Twint order fails validation even though the spec added Twint to the launch set.',
       locus: 'pr:482:src/checkout/validate.ts:42',
-      suggestion: 'Add "twint" to ACCEPTED_METHODS (and a test for it).',
+      suggestion: 'Duplicate of [Mireia Solà\'s comment on validate.ts:42](https://dev.azure.com/demo/_git/shop/pullrequest/482?discussionId=5511) — already being handled there.',
+      // Mireia got here first. Kept visible so it still gets triaged, but it posts as a
+      // cross-reference instead of a second thread saying the same thing.
+      duplicateOf: {
+        label: 'Mireia Solà on validate.ts:42',
+        url: 'https://dev.azure.com/demo/_git/shop/pullrequest/482?discussionId=5511',
+        threadId: '5511',
+      },
     },
     {
       dimension: 'completeness', severity: 'minor',
       title: 'Validation error omits the offending field',
       detail: 'On failure the handler returns a generic "invalid request"; the client cannot tell which field was wrong.',
-      locus: 'pr:482:src/checkout/validate.ts:60',
-      suggestion: 'Include the field name in the 400 body, e.g. { error, field }.',
+      // Jonas asked for this already, but only as a question. This adds the concrete shape, so it
+      // posts as a REPLY into his thread rather than a competing one.
+      locus: 'pr:482:thread:5512',
+      suggestion: 'Adding to Jonas Reber\'s point: include the field name in the 400 body, e.g. { error, field } — the client can then highlight the offending input.',
     },
     {
       dimension: 'testability', severity: 'minor',
@@ -598,6 +624,15 @@ function seedPrRespond() {
   const f = L.getFeature(PR_RESPOND_ID);
   f.status = 'reworking';
   L.saveFeature(f);
+
+  // On pr-respond the reviewer threads ARE the work — each finding is anchored to one by thread
+  // id, so nothing here can collide. Registering them still matters: it records who raised what,
+  // and it is what the ingest gate checks for.
+  L.setPriorThreads(PR_RESPOND_ID, [
+    { threadId: '1', author: 'Mireia Solà', locus: 'pr:470:src/FloorResolver.ts:31', excerpt: 'What happens when airportOperatingStartTime is unset?' },
+    { threadId: '2', author: 'Jonas Reber', locus: 'pr:470:test/floor.test.ts:12', excerpt: 'Is the DST boundary covered?' },
+    { threadId: '3', author: 'Lena Fischer', locus: 'pr:470:src/FloorResolver.ts:58', excerpt: 'This branch reads inverted to me.' },
+  ]);
 
   L.ingestRound(PR_RESPOND_ID, [
     {

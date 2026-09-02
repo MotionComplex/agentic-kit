@@ -190,6 +190,9 @@ test('POST /features/:id/activity records the real PR-update time; summaries exp
 
 test('POST /review/cancel releases stranded in-flight findings and drops the dead job', async () => {
   ledger.createFeature({ id: 'srv-stuck', title: 'Stuck', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('srv-stuck', []);
   ledger.ingestRound('srv-stuck', [
     mkFinding({ title: 'SS1', locus: 'pr:7:a.ts:L1' }),
     mkFinding({ title: 'SS2', locus: 'pr:7:b.ts:L2' }),
@@ -715,6 +718,9 @@ test('review/apply reports which findings it skipped', async () => {
 
 test('posting an agreed code fix over HTTP refuses a missing or malformed sha', async () => {
   ledger.createFeature({ id: 'gate-api', title: 'Gate', kind: 'pr-respond' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('gate-api', []);
   ledger.ingestRound('gate-api', [mkFinding({ title: 'G1', locus: 'pr:1:a.cs:1' })]);
   const fp = ledger.loadLedger('gate-api').findings[0].fp;
   ledger.setFindingDraft('gate-api', fp, { before: 'old', after: 'new' });

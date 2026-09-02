@@ -80,6 +80,42 @@ label required). The cockpit renders an amber DUPLICATE chip linking to `url`; t
 should be the generic cross-reference (`Duplicate of [<label>](<url>) — already being handled
 there.`), never a second full answer. Validated on ingest and via `setFindingDetails`.
 
+### The duplicate gate — a PR review cannot restate what a reviewer already said
+`duplicateOf` used to be purely descriptive: a review that *noticed* a duplicate could mark it, and a
+review that simply never looked produced a finding indistinguishable from any other. The rule lived
+only as prose in the review skill, so its failure mode was invisible. Both halves are now structural,
+enforced in `ingestRound` for `pr-review` / `pr-respond` workspaces (`spec` workspaces are untouched —
+they have no PR comments to collide with):
+
+**1. The threads must have been fetched.** `features/<id>.json` carries `priorThreads`:
+`null` (never recorded) or `{ recordedAt, threads: [{ threadId, author, locus, excerpt, url, status }] }`.
+Ingest **refuses** while it is `null`. Recording an empty array is allowed and satisfies the gate — it
+asserts *the PR genuinely has no comments*, which is a different claim from never having looked. A
+feature file written before this field existed normalizes to `null`, i.e. it fails closed.
+Set via `setPriorThreads(featureId, threads)` / `threads set <id> --file <json> | --none`.
+
+**2. A finding on an existing thread must say what it is.** For each incoming finding, the locus is
+compared against every registered thread anchor: same file (tail-matched, case-insensitive, so ADO's
+`/src/Foo.cs` matches a finding's `src/Foo.cs`) and line ranges overlapping or within
+`THREAD_PROXIMITY_LINES` (5) of each other. A collision is rejected unless the finding carries one of:
+- **`duplicateOf`** → the same point, kept visible as a cross-reference;
+- a **`pr:<id>:thread:<threadId>`** locus → an increment, posted as a reply into that thread;
+- **`notDuplicate: "<reason>"`** → a genuinely different point that happens to sit nearby. Must be a
+  non-empty string; a bare `true` is rejected, because silencing the gate has to say something. The
+  cockpit shows a muted DISTINCT chip carrying the reason, so the judgement stays reviewable.
+
+The rejection lists every colliding finding with the author and thread it lands on, and **writes
+nothing** — no round is consumed, so a rejected ingest can be corrected and retried.
+
+The check is positional, so it is deliberately blunt: it catches "same place", not "same point". It
+cannot see a duplicate anchored far from the original, and it will flag two distinct points that share
+a line. It closes the *silent* failure — the review that never checked — and leaves the substantive
+judgement where it belongs, in the skill.
+
+`parseLocus` accepts `pr:<id>:<path>:L<line>`, `pr:<id>:<path>:L<a>-<b>`, the bare-number
+`pr:<id>:<path>:<line>`, and `pr:<id>:thread:<id>`. The `L` is optional only under a `pr:` prefix —
+otherwise `ado:42695` would read as line 42695 of a file named `ado`.
+
 For PR kinds a finding's **`suggestion` IS the proposed PR comment / reply body** — the cockpit shows it
 as "Proposed comment" / "Proposed reply" and the decision row is comment triage rather than spec rework:
 - **pr-review** → **Approve** (will post) · **Edit comment** · **Dismiss** (won't post). "Edit comment"
@@ -219,6 +255,10 @@ posted finding manually at any time (Mark resolved / Reopen — reopening drops 
     "ado":        [ { "id": 42695, "type": "User Story", "title": "...", "url": "https://...", "state": "New", "lastFetched": null } ],
     "figma":      [ { "fileKey": "abc123", "nodeId": "1:23", "title": "Checkout flow v3", "url": "https://...", "lastFetched": null } ]
   },
+  "priorThreads": null,             // PR kinds: the comments the PR ALREADY carries. null = never
+                                    // fetched (ingest refuses); { recordedAt, threads: [] } = a
+                                    // positive "this PR has no comments". See "The duplicate gate".
+                                    // threads[]: { threadId, author, locus, excerpt, url, status }
   "specSections": [                 // extracted outline of the spec, used by coverage matrix
     { "key": "goals", "title": "Goals & Non-goals" },
     { "key": "flow-payment", "title": "Payment flow" }
@@ -534,6 +574,12 @@ source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--tit
 source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title ...] [--url ...]
                                           confluence/ado are keyed by --id; figma is keyed by
                                           --fileKey (--nodeId optional) — figma has no --id.
+threads set <featureId> --file threads.json | --none
+                                          record the comment threads the PR already carries.
+                                          REQUIRED before `ingest` on a pr-review/pr-respond
+                                          workspace; --none asserts the PR has no comments.
+                                          entries: { threadId, author, locus?, excerpt?, url? }
+threads list <featureId> [--json]         show recorded threads, or that none were recorded
 ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]
                     [--scope-fps <fp>[,<fp>...] | --scope-dimensions <dim>[,<dim>...]]
                                           audit round ingest + reconcile. The --scope-* flags

@@ -1368,6 +1368,15 @@ body.modal-open { overflow: hidden; }
 }
 a.f-dup-chip:hover { border-color: var(--major); filter: brightness(1.15); }
 
+/* Quieter sibling of the DUPLICATE chip: near an existing thread, argued distinct. Muted on
+   purpose — it's a note that a judgement was made, not a warning. */
+.f-notdup-chip {
+  display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  color: var(--fg-mute); background: var(--panel-3); border: 1px solid var(--line-soft);
+  cursor: help;
+}
+
 /* ============================== done disclosure (active-first lists) ============================== */
 
 .section-lists { display: flex; flex-direction: column; gap: 16px; }

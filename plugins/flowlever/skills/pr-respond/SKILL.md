@@ -51,6 +51,17 @@ Via the ADO MCP: `repo_list_pull_request_threads` → filter to **active** threa
 `requests set <reqId> --no-needs-input --phase "reading code at thread anchors"`. Read the current code at
 each thread's anchor so the proposed response reflects the latest state.
 
+**Register the thread set on the workspace before ingesting** — `ingest` refuses a `pr-respond`
+workspace whose threads were never recorded. Record **all** of them (not just the ones awaiting
+your reply): the already-answered ones are what stop a later round re-raising a settled point.
+```
+FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" \
+  threads set <wsId> --file <threads.json>     # or --none if the PR has no comments at all
+```
+`threads.json` is `[{ "threadId", "author", "locus", "excerpt?", "url?" }]`. Findings here are
+anchored to `pr:<id>:thread:<threadId>` anyway, so they never trip the positional gate — the
+registration is what makes "who already said what" available to this round and the next.
+
 ## 3. Map threads → ingest shape
 
 **Duplicate-thread detection (do this FIRST, across the whole thread set):** reviewers often raise

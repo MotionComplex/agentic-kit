@@ -183,6 +183,9 @@ test('scope by fps, and a malformed scope is rejected', () => {
 
 function seedAgreedFix(id, title = 'Fix it', locus = 'pr:1:a.cs:9') {
   ledger.createFeature({ id, title: `WS ${id}`, kind: 'pr-respond' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [mkFinding({ title, locus })]);
   const fp = ledger.fingerprint(id, 'consistency', title, locus);
   ledger.setFindingDraft(id, fp, { before: 'old', after: 'new' });
@@ -508,6 +511,9 @@ test('R-3: the fix gate applies to pr-respond only, not to reviewing someone els
   // the agreement now durable there was no accidental way out — the finding stranded in "Posting…".
   const seed = (id, kind) => {
     ledger.createFeature({ id, title: id, kind });
+    // Not a duplicate-detection test: assert up front that this PR carries no comments,
+    // which is what the ingest gate requires a PR workspace to have established.
+    ledger.setPriorThreads(id, []);
     ledger.ingestRound(id, [mkFinding({ title: 'Suggested change', locus: 'a.cs:1' })]);
     const fp = ledger.loadLedger(id).findings[0].fp;
     ledger.setFindingDraft(id, fp, { before: 'old', after: 'new' });
@@ -533,6 +539,9 @@ test('R-4: clearing or neutering the draft does not disarm the gate or blind the
   // deleting the draft instead of by changing the status.
   const id = 'r4-cleared';
   ledger.createFeature({ id, title: 'Cleared', kind: 'pr-respond' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [mkFinding({ title: 'Fix me', locus: 'b.cs:2' })]);
   const fp = ledger.loadLedger(id).findings[0].fp;
   ledger.setFindingDraft(id, fp, { before: 'old', after: 'new' });
@@ -547,6 +556,9 @@ test('R-4: clearing or neutering the draft does not disarm the gate or blind the
   // A draft edited down to a no-op is likewise still an agreed fix.
   const id2 = 'r4-noop';
   ledger.createFeature({ id: id2, title: 'Noop', kind: 'pr-respond' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id2, []);
   ledger.ingestRound(id2, [mkFinding({ title: 'Noop draft', locus: 'c.cs:3' })]);
   const fp2 = ledger.loadLedger(id2).findings[0].fp;
   ledger.setFindingDraft(id2, fp2, { before: 'same', after: 'same' });
@@ -596,6 +608,9 @@ test('R-8d: resolvedInRound follows the same max rule as the round number', () =
 test('R-8e: markPosted skips closed findings instead of stamping them, and says which', () => {
   const id = 'r8e';
   ledger.createFeature({ id, title: 'Skip', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [
     mkFinding({ title: 'live', locus: 's:1' }),
     mkFinding({ title: 'waived', locus: 's:2' }),
@@ -656,6 +671,9 @@ test('X-3: an unrecognised workspace kind fails CLOSED on the fix gate', () => {
   // the opposite of what its own comment claimed.
   const id = 'x3-unknown';
   ledger.createFeature({ id, title: 'Unknown kind', kind: 'pr-respond' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [mkFinding({ title: 'Fix', locus: 'k:1' })]);
   const fp = ledger.loadLedger(id).findings[0].fp;
   ledger.setFindingDraft(id, fp, { before: 'a', after: 'b' });

@@ -29,6 +29,15 @@ Usage: node src/cli.js <command> [args]
   source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title "..."] [--url <url>]
                                          confluence/ado need --id; figma needs --fileKey (--nodeId
                                          optional). --itemType (ado only) stores the work-item type.
+  threads set <featureId> --file threads.json | --none
+                                         Record the comment threads the PR ALREADY carries (other
+                                         reviewers' and your own). Required before "ingest" on a
+                                         pr-review/pr-respond workspace: ingest refuses findings
+                                         that land on an existing thread unless each says what it
+                                         is relative to it (duplicateOf / thread locus /
+                                         notDuplicate). --none asserts the PR has no comments.
+                                         Entries: { threadId, author, locus?, excerpt?, url? }.
+  threads list <featureId> [--json]      Show the recorded threads (or that none were recorded).
   ingest <featureId> --file findings.json [--reopen-resolved] [--note "..."]
                                          [--scope-fps <fp>[,<fp>...] | --scope-dimensions <dim>[,<dim>...]]
                                          Ingest an audit round + reconcile ledger. --scope-fps/
@@ -341,6 +350,52 @@ function cmdSourceAdd({ pos, flags }) {
   if (flags.url !== undefined) source.url = flags.url;
   ledger.addSource(featureId, source);
   console.log(`Added ${type} source ${label} to ${featureId}`);
+}
+
+// Register the comment threads a PR already carries, so `ingest` can refuse findings that
+// restate them. --none is the explicit "I looked, there were no comments" — it is NOT the same
+// as never running this, which ingest rejects.
+function cmdThreadsSet({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  if (Boolean(flags.none) === (flags.file !== undefined)) {
+    throw userError('Use either --file <json> or --none, not both and not neither');
+  }
+  let threads = [];
+  if (!flags.none) {
+    const file = flags.file;
+    const data = readJsonFile(file, 'threads');
+    threads = Array.isArray(data) ? data : data && data.threads;
+    if (!Array.isArray(threads)) {
+      throw userError(`'${file}' must be a JSON array of threads or { "threads": [...] }`);
+    }
+  }
+  let recorded;
+  try {
+    recorded = ledger.setPriorThreads(featureId, threads);
+  } catch (err) {
+    throw userError(err.message);
+  }
+  const anchored = recorded.threads.filter((t) => t.locus).length;
+  console.log(`Recorded ${recorded.threads.length} existing thread(s) for ${featureId}`
+    + (recorded.threads.length ? ` — ${anchored} anchored to a file:line` : ' (PR has no comments)'));
+}
+
+function cmdThreadsList({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const feature = ledger.getFeature(featureId);
+  if (flags.json) return printJson(feature.priorThreads);
+  if (feature.priorThreads === null) {
+    console.log(`No existing PR threads recorded for ${featureId}.`);
+    if (ledger.PR_KINDS.includes(feature.kind)) {
+      console.log('Ingest will refuse this workspace until they are — run `threads set` first.');
+    }
+    return;
+  }
+  const { threads, recordedAt } = feature.priorThreads;
+  console.log(`${threads.length} existing thread(s) for ${featureId}${recordedAt ? ` (recorded ${recordedAt})` : ''}`);
+  if (threads.length) {
+    console.log(table(threads.map((t) => [`  ${t.threadId}`, t.author, t.locus || '(no file anchor)'])));
+  }
 }
 
 function cmdIngest({ pos, flags }) {
@@ -810,7 +865,7 @@ async function run(argv) {
   // falls into the `case undefined` usage handler below instead of `cmd.includes(...)` throwing
   // before the switch is ever reached (that handler used to be unreachable dead code).
   const cmd = a === undefined ? undefined
-    : (a === 'feature' || a === 'source' || a === 'finding' || a === 'coverage' || a === 'requests'
+    : (a === 'feature' || a === 'source' || a === 'finding' || a === 'coverage' || a === 'requests' || a === 'threads'
       ? `${a} ${b || ''}`.trim()
       : a);
   const rest = { pos: pos.slice(cmd !== undefined && cmd.includes(' ') ? 2 : 1), flags };
@@ -824,6 +879,8 @@ async function run(argv) {
     case 'feature delete': return cmdFeatureDelete(rest);
     case 'feature activity': return cmdFeatureActivity(rest);
     case 'source add': return cmdSourceAdd(rest);
+    case 'threads set': return cmdThreadsSet(rest);
+    case 'threads list': return cmdThreadsList(rest);
     case 'ingest': return cmdIngest(rest);
     case 'finding list': return cmdFindingList(rest);
     case 'finding set': return cmdFindingSet(rest);

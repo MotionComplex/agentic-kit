@@ -38,6 +38,9 @@ after(() => {
 test('C-9: a posted, unaddressed blocker never contradicts the READY badge', () => {
   const id = 'c9-posted-blocker';
   ledger.createFeature({ id, title: 'C9 Posted Blocker', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [mkFinding()]);
   const [fp] = ledger.loadLedger(id).findings.map((f) => f.fp);
   ledger.markPosted(id, [fp]);
@@ -107,6 +110,9 @@ test('clean workspace (resolved + waived, nothing open) reports READY coherently
 test('genuinely open (untouched) blocker reports NOT READY with no shadow blockers', () => {
   const id = 'open-blocker';
   ledger.createFeature({ id, title: 'Open Blocker', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [mkFinding({ title: 'still open boom' })]);
 
   const ready = ledger.readiness(id);
@@ -128,6 +134,9 @@ test('genuinely open (untouched) blocker reports NOT READY with no shadow blocke
 test('posted, applied, and pending findings are each labeled distinctly on the board', () => {
   const id = 'mixed-lanes';
   ledger.createFeature({ id, title: 'Mixed Lanes', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [
     mkFinding({ title: 'posted one', severity: 'major', locus: 'a' }),
     mkFinding({ title: 'applied one', severity: 'major', locus: 'b' }),

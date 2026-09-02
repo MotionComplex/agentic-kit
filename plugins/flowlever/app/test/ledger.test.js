@@ -308,6 +308,9 @@ test('setFindingStatus: waive requires reason; transitions append history', () =
 
 test('markPosted: stamps postedAt, keeps finding reworking (open→reworking), idempotent', () => {
   ledger.createFeature({ id: 'posted', title: 'Posted', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('posted', []);
   ledger.ingestRound('posted', [
     mkFinding({ title: 'P1', locus: 'pr:9:a.ts:L1' }),
     mkFinding({ title: 'P2', locus: 'pr:9:b.ts:L2', severity: 'minor' }),
@@ -358,6 +361,9 @@ test('reopening a posted finding drops the postedAt stamp', () => {
 
 test('setFindingDecision: stores approve/edit, clears on null, validates, cleared by status change', () => {
   ledger.createFeature({ id: 'dec', title: 'Decisions', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('dec', []);
   ledger.ingestRound('dec', [mkFinding({ title: 'D1', locus: 'pr:1:a.ts:L1' })]);
   const fp = ledger.loadLedger('dec').findings[0].fp;
 
@@ -378,6 +384,9 @@ test('setFindingDecision: stores approve/edit, clears on null, validates, cleare
 
 test('markPosted anchors review.lastPostedAt; setFeatureReview flips/clears authorResponded', () => {
   ledger.createFeature({ id: 'wait', title: 'Waiting', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('wait', []);
   ledger.ingestRound('wait', [mkFinding({ title: 'W1', locus: 'pr:2:a.ts:L1' })]);
   const fp = ledger.loadLedger('wait').findings[0].fp;
 
@@ -406,6 +415,9 @@ test('markPosted anchors review.lastPostedAt; setFeatureReview flips/clears auth
 
 function mkFixWorkspace(id) {
   ledger.createFeature({ id, title: id, kind: 'pr-respond' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads(id, []);
   ledger.ingestRound(id, [
     mkFinding({ dimension: 'consistency', title: 'Raise the log level', locus: `pr:9:thread:1` }),
     mkFinding({ dimension: 'completeness', title: 'Reply-only question', locus: `pr:9:thread:2` }),
@@ -501,6 +513,9 @@ test('setFindingFixCommit validates the sha shape', () => {
 
 test('setFindingDecision accepts fix-only (apply the fix, post no reply) and still rejects junk', () => {
   ledger.createFeature({ id: 'fixonly', title: 'Fix only', kind: 'pr-respond' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('fixonly', []);
   ledger.ingestRound('fixonly', [mkFinding({ title: 'FO1', locus: 'pr:13:thread:1' })]);
   const fp = ledger.loadLedger('fixonly').findings[0].fp;
 
@@ -516,6 +531,9 @@ test('setFindingDecision accepts fix-only (apply the fix, post no reply) and sti
 
 test('clearFindingPending releases a stranded in-flight marker without claiming a write', () => {
   ledger.createFeature({ id: 'stuck', title: 'Stuck post', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('stuck', []);
   ledger.ingestRound('stuck', [
     mkFinding({ title: 'S1', locus: 'pr:9:a.ts:L1' }),
     mkFinding({ title: 'S2', locus: 'pr:9:b.ts:L2' }),
@@ -548,6 +566,9 @@ test('clearFindingPending releases a stranded in-flight marker without claiming 
 
 test('clearFindingPending keeps the decision so a retry can re-post the same items', () => {
   ledger.createFeature({ id: 'stuck-dec', title: 'Stuck decisions', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('stuck-dec', []);
   ledger.ingestRound('stuck-dec', [mkFinding({ title: 'D1', locus: 'pr:11:a.ts:L1' })]);
   const fp = ledger.loadLedger('stuck-dec').findings[0].fp;
 
@@ -562,12 +583,18 @@ test('clearFindingPending keeps the decision so a retry can re-post the same ite
 
 test('clearFindingPending throws EUSER for an unknown fp', () => {
   ledger.createFeature({ id: 'stuck-unknown', title: 'Unknown', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('stuck-unknown', []);
   ledger.ingestRound('stuck-unknown', [mkFinding({ title: 'U1', locus: 'pr:12:a.ts:L1' })]);
   assert.throws(() => ledger.clearFindingPending('stuck-unknown', ['nope']), (e) => e.code === 'EUSER');
 });
 
 test('setFeatureReview records lastActivityAt/lastActivityBy independently of the responded flag', () => {
   ledger.createFeature({ id: 'stamps-ws', title: 'Stamps', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('stamps-ws', []);
   // stamp-only: no --responded equivalent, just "the PR moved at T, by X"
   ledger.setFeatureReview('stamps-ws', { lastActivityAt: '2026-08-17T09:42:11Z', lastActivityBy: 'Oriol Puig' });
   let rev = ledger.getFeature('stamps-ws').review;
@@ -627,6 +654,9 @@ test('addRequest supports the poll (manual refresh) action + optional kind scope
 
 test('setFeatureStatus: marks done, reopens, validates the enum', () => {
   ledger.createFeature({ id: 'lifecycle', title: 'Lifecycle', kind: 'pr-review' });
+  // Not a duplicate-detection test: assert up front that this PR carries no comments,
+  // which is what the ingest gate requires a PR workspace to have established.
+  ledger.setPriorThreads('lifecycle', []);
   assert.equal(ledger.getFeature('lifecycle').status, 'draft');
   assert.equal(ledger.setFeatureStatus('lifecycle', 'done').status, 'done');
   assert.equal(ledger.getFeature('lifecycle').status, 'done');

@@ -17,6 +17,15 @@ const KINDS = ['spec', 'pr-review', 'pr-respond'];
 // review/flow is finished — the cockpit shows it as completed and the inbox stops nagging.
 const FEATURE_STATUSES = ['draft', 'auditing', 'reworking', 'ready', 'implementing', 'done'];
 const SOURCE_TYPES = ['confluence', 'ado', 'figma'];
+// Workspace kinds whose findings are posted back as PR comments, and therefore have to be
+// reconciled against the comments a PR already carries before anything is ingested.
+const PR_KINDS = ['pr-review', 'pr-respond'];
+// How near an incoming finding has to sit to an existing thread's anchor to count as landing on
+// the same place. Reviewers rarely anchor to the exact same line — a comment on the guard clause
+// and a comment on the `if` above it are the same conversation — so the window is deliberately
+// wider than an exact match, and narrow enough that two unrelated points in one function don't
+// collapse into each other.
+const THREAD_PROXIMITY_LINES = 5;
 const COVERAGE_STATUSES = ['covered', 'partial', 'uncovered', 'orphan'];
 const DRAFT_FORMATS = ['text', 'gherkin', 'markdown'];
 const REVIEW_STATUSES = ['accepted', 'rejected', 'edited'];
@@ -387,6 +396,10 @@ function createFeature({ id, title, kind = 'spec' }) {
     createdAt: ts,
     updatedAt: ts,
     sources: { confluence: [], ado: [], figma: [] },
+    // null = the PR's existing comment threads were never fetched. Distinct from a recorded
+    // empty list, which asserts the PR genuinely had no comments. Ingest refuses to run on a
+    // PR workspace while this is null, so "I never looked" can't pass for "there was nothing".
+    priorThreads: null,
     specSections: [],
     coverage: [],
     notes: '',
@@ -416,6 +429,14 @@ function normalizeFeature(feature, idFromPath = null) {
     if (!Array.isArray(sources[t])) sources[t] = [];
   }
   feature.sources = sources;
+  // Anything that isn't a well-formed record collapses to null — "not recorded". A workspace
+  // written before this field existed therefore reads as never-fetched rather than as a PR with
+  // no comments, which is the safe direction: it fails the ingest gate instead of silently
+  // waving every duplicate through.
+  const pt = feature.priorThreads;
+  feature.priorThreads = pt && typeof pt === 'object' && !Array.isArray(pt) && Array.isArray(pt.threads)
+    ? { recordedAt: pt.recordedAt ?? null, threads: pt.threads.filter((t) => t && typeof t === 'object' && !Array.isArray(t)) }
+    : null;
   if (!Array.isArray(feature.specSections)) feature.specSections = [];
   if (!Array.isArray(feature.coverage)) feature.coverage = [];
   return feature;
@@ -571,6 +592,104 @@ function addSource(featureId, { type, ...fields }) {
   });
 }
 
+// ---------- prior PR threads (duplicate-comment enforcement) ----------
+
+// Record the comment threads a PR already carries — other reviewers' and our own from earlier
+// rounds — so ingest can refuse findings that restate them. Passing an empty array is a positive
+// assertion that the PR had no comments; it satisfies the gate. `threads` entries:
+//   { threadId, author, locus, excerpt?, url?, status? }
+// `locus` uses the same `pr:<id>:<path>:L<line>` grammar as a finding, so the two are directly
+// comparable; a thread ADO reports without a file anchor (a PR-level comment) may omit it.
+function setPriorThreads(featureId, threads) {
+  if (!Array.isArray(threads)) throw euser('threads must be an array');
+  const clean = threads.map((t, i) => {
+    if (!t || typeof t !== 'object' || Array.isArray(t)) throw euser(`thread[${i}] must be an object`);
+    if (t.threadId === undefined || t.threadId === null || String(t.threadId).trim() === '') {
+      throw euser(`thread[${i}].threadId is required`);
+    }
+    if (typeof t.author !== 'string' || t.author.trim() === '') {
+      throw euser(`thread[${i}].author is required (who already made the point)`);
+    }
+    for (const opt of ['locus', 'excerpt', 'url', 'status']) {
+      if (t[opt] !== undefined && t[opt] !== null && typeof t[opt] !== 'string') {
+        throw euser(`thread[${i}].${opt} must be a string when provided`);
+      }
+    }
+    return {
+      threadId: String(t.threadId),
+      author: t.author.trim(),
+      locus: t.locus ?? null,
+      excerpt: t.excerpt ?? '',
+      url: t.url ?? null,
+      status: t.status ?? null,
+    };
+  });
+  return mutateFeature(featureId, (feature) => {
+    feature.priorThreads = { recordedAt: now(), threads: clean };
+    return feature.priorThreads;
+  });
+}
+
+// Split a locus into the parts worth comparing. Understands the finding grammars:
+//   pr:<id>:<path>:L<line>       → { path, from, to }
+//   pr:<id>:<path>:L<a>-<b>      → { path, from: a, to: b }
+//   pr:<id>:<path>:<line>        → same; the bare-number form is used in practice too
+//   pr:<id>:thread:<threadId>    → { threadId }
+// and degrades to { path, from: null } for anything else (spec loci, a file with no line), which
+// simply won't collide with a PR thread anchor.
+//
+// The `L` is optional ONLY under a `pr:` prefix. Without it, `ado:42695` would read as line 42695
+// of a file called "ado" — a phantom anchor on spec loci. Requiring either the prefix or the `L`
+// keeps the bare-number convenience without inventing positions for non-PR loci.
+function parseLocus(locus) {
+  const s = String(locus || '');
+  const thread = /^pr:[^:]+:thread:(.+)$/.exec(s);
+  if (thread) return { threadId: thread[1], path: null, from: null, to: null };
+  const anchored = /^(?:(pr:[^:]+:)|)(.*?):(?:L(\d+)|(\d+))(?:-(\d+))?$/.exec(s);
+  if (anchored && (anchored[1] !== undefined || anchored[3] !== undefined)) {
+    const from = Number(anchored[3] ?? anchored[4]);
+    const to = anchored[5] === undefined ? from : Number(anchored[5]);
+    return { threadId: null, path: normalizePath(anchored[2]), from: Math.min(from, to), to: Math.max(from, to) };
+  }
+  return { threadId: null, path: normalizePath(s.replace(/^pr:[^:]+:/, '')), from: null, to: null };
+}
+
+// Compare paths by their tail, case-insensitively: ADO reports thread anchors as `/src/Foo.cs`
+// while a review finding usually writes `src/Foo.cs`. Matching on the normalized string would
+// call those two different files and let every duplicate through.
+function normalizePath(p) {
+  const s = String(p || '').replace(/\\/g, '/').replace(/^\.?\//, '').toLowerCase();
+  return s === '' ? null : s;
+}
+
+// Which already-existing threads does this finding land on? Same file, and line ranges that
+// overlap or sit within THREAD_PROXIMITY_LINES of each other. A thread with no file anchor can't
+// collide positionally — it's a PR-level comment — so it never matches here.
+function threadCollisions(locus, threads) {
+  const a = parseLocus(locus);
+  if (!a.path || a.from === null) return [];
+  return (threads || []).filter((t) => {
+    if (!t.locus) return false;
+    const b = parseLocus(t.locus);
+    if (!b.path || b.from === null) return false;
+    if (b.path !== a.path && !b.path.endsWith(`/${a.path}`) && !a.path.endsWith(`/${b.path}`)) return false;
+    return a.from - THREAD_PROXIMITY_LINES <= b.to && b.from - THREAD_PROXIMITY_LINES <= a.to;
+  });
+}
+
+// A finding is allowed to sit on top of an existing thread only when the review has said, in the
+// data, what it's doing about it:
+//   - duplicateOf         → it's the same point, kept visible as a cross-reference
+//   - pr:…:thread:<id>    → it's an increment, and Apply will post it as a reply in that thread
+//   - notDuplicate: "…"   → the reviewer looked and judged it a genuinely different point
+// Anything else is the failure this gate exists to catch: a second thread restating a point
+// somebody already made.
+function unreconciledAgainstThreads(finding, threads) {
+  if (finding.duplicateOf || finding.notDuplicate) return [];
+  if (parseLocus(finding.locus).threadId) return [];
+  return threadCollisions(finding.locus, threads);
+}
+
 // ---------- ledger / rounds stores ----------
 
 // Repair the SHAPE of a persisted ledger so a legacy or truncated file degrades instead of
@@ -660,6 +779,14 @@ function validateIngestFinding(f) {
   }
   if (f.duplicateOf !== undefined && f.duplicateOf !== null) {
     validateDuplicateOf(f.duplicateOf);
+  }
+  // The escape hatch from the thread-collision gate: a stated reason why this finding is a
+  // different point from the thread it happens to land near. Non-empty on purpose — "true"
+  // would let the gate be silenced without anyone saying anything.
+  if (f.notDuplicate !== undefined && f.notDuplicate !== null) {
+    if (typeof f.notDuplicate !== 'string' || f.notDuplicate.trim() === '') {
+      throw euser('notDuplicate must be a non-empty string explaining why this is a different point');
+    }
   }
   return f;
 }
@@ -773,15 +900,50 @@ function inScope(finding, scope) {
 }
 
 function ingestRound(featureId, findings, { note = '', reopenResolved = false, trigger = 'audit', scope = null } = {}) {
-  getFeature(featureId); // EUSER if missing
+  const feature = getFeature(featureId); // EUSER if missing
   if (!Array.isArray(findings)) throw euser('findings must be an array');
   findings.forEach(validateIngestFinding);
+  assertReconciledAgainstPriorThreads(feature, findings);
   const normScope = normalizeScope(scope);
 
   const config = loadConfig();
   return withFileLock(ledgerPath(featureId), () => ingestRoundLocked(featureId, findings, {
     note, reopenResolved, trigger, scope: normScope, config,
   }));
+}
+
+// The duplicate-comment gate. Until now "don't restate what another reviewer already said" was
+// only an instruction in the review skill, and the failure mode was invisible: a finding the
+// review DROPPED as a duplicate showed up in the run summary, but one it simply never noticed
+// looked exactly like an ordinary finding. This makes both halves of that check structural —
+// you cannot ingest a PR review without having fetched the PR's threads, and you cannot ingest
+// a finding sitting on an existing thread without saying what it is relative to that thread.
+// Spec workspaces are unaffected: they have no PR comments to collide with.
+function assertReconciledAgainstPriorThreads(feature, findings) {
+  if (!PR_KINDS.includes(feature.kind)) return;
+  if (feature.priorThreads === null) {
+    throw euser(
+      `workspace "${feature.id}" is a ${feature.kind} but its existing PR comment threads were never recorded — `
+      + 'fetch them with repo_get_pull_request_threads and register them '
+      + `("flowlever threads set ${feature.id} --file <json>", or --none if the PR genuinely has no comments) `
+      + 'before ingesting. Without them a review cannot tell which points other reviewers already made.',
+    );
+  }
+  const threads = feature.priorThreads.threads;
+  if (threads.length === 0) return;
+  const clashes = [];
+  for (const f of findings) {
+    for (const t of unreconciledAgainstThreads(f, threads)) {
+      clashes.push(`  "${f.title}" (${f.locus})\n    already covered by ${t.author} on thread ${t.threadId}${t.locus ? ` (${t.locus})` : ''}`);
+    }
+  }
+  if (clashes.length === 0) return;
+  throw euser(
+    `${clashes.length} finding(s) land on PR comment threads that already exist:\n${clashes.join('\n')}\n`
+    + 'For each one, either drop it, or say what it is relative to that thread: set `duplicateOf` to keep it '
+    + 'visible as a cross-reference, use locus `pr:<id>:thread:<threadId>` to post it as a reply that adds only '
+    + 'the increment, or set `notDuplicate: "<why this is a different point>"` if it genuinely is one.',
+  );
 }
 
 function ingestRoundLocked(featureId, findings, { note, reopenResolved, trigger, scope, config }) {
@@ -842,6 +1004,7 @@ function ingestRoundLocked(featureId, findings, { note, reopenResolved, trigger,
         locus: incoming.locus,
         suggestion: incoming.suggestion ?? '',
         duplicateOf: incoming.duplicateOf ?? null,
+        notDuplicate: incoming.notDuplicate ?? null,
         status: 'open',
         statusReason: null,
         pinned: false,
@@ -860,6 +1023,7 @@ function ingestRoundLocked(featureId, findings, { note, reopenResolved, trigger,
       existing.detail = incoming.detail ?? existing.detail;
       existing.suggestion = incoming.suggestion ?? existing.suggestion;
       existing.duplicateOf = incoming.duplicateOf ?? existing.duplicateOf ?? null;
+      existing.notDuplicate = incoming.notDuplicate ?? existing.notDuplicate ?? null;
       existing.updatedAt = at;
       stats.stillOpen += 1;
     } else {
@@ -1792,6 +1956,12 @@ module.exports = {
   listFeatures,
   saveFeature,
   addSource,
+  PR_KINDS,
+  THREAD_PROXIMITY_LINES,
+  setPriorThreads,
+  parseLocus,
+  threadCollisions,
+  unreconciledAgainstThreads,
   setFeatureStatus,
   setFeatureReview,
   reviewStamps,
