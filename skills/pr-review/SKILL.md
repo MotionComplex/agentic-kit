@@ -192,6 +192,17 @@ Use **[Conventional Comments](https://conventionalcomments.org/)** labels:
 - `question` — something the reviewer needs the author to answer/clarify.
 - `nitpick` — trivial, non-blocking preference (style, naming, wording).
 
+**Length: ≤300 characters, ≤2 sentences.** Label, then the ask, then at most one clause of
+consequence — in that order, so the ask never waits behind a paragraph of reasoning. `body` **is**
+the comment that gets posted, so this budget governs it directly: reasoning that does not fit
+belongs in the review document's surrounding prose, which the author never receives as a thread —
+not appended to `body`. Say it once, use plain words for technical specifics, and split a comment
+that needs more than 300 characters into two findings rather than stacking points on one anchor.
+See [Length][cc-length] in the code-review convention for the full rule, the measured cost of
+skipping it, and a worked example.
+
+[cc-length]: ../../conventions/code-review.md#length
+
 Also produce, separately:
 - **Summary** — 2–4 sentences, overall recommendation.
 - **Requirements coverage** — `[x]` met, `[~]` partial, `[ ]` missing, each with file anchor.

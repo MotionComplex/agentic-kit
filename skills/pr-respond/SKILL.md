@@ -426,12 +426,16 @@ acknowledgments, refutations, or questions. Style guide:
   the reviewer. Other Conventional Comments labels are optional on responses.
 - **Acknowledge nits.** A simple "Done." or "Will fix in a follow-up — out of scope here" is
   fine for `nitpick` replies.
+- **Keep it short: ≤300 characters, ≤2 sentences.** Answer first, say it once, plain words for
+  technical specifics — the same budget the reviewer's own comment was held to. See
+  [Length][cc-length] in the code-review convention for the full rule and a worked example.
 - **No emojis or thank-yous as filler.** "Thanks!" alone is noise. If you actually want to
   acknowledge a particularly useful catch, say what specifically was useful.
 
 See also: [Conventional Comments code-review.md][cc] — same conventions the reviewer used.
 
 [cc]: ../../conventions/code-review.md
+[cc-length]: ../../conventions/code-review.md#length
 
 ---
 

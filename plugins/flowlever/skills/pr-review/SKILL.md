@@ -130,9 +130,11 @@ For each review finding:
 - `dimension`: reuse the existing set (correctness→`feasibility`/`consistency`, missing-thing→`completeness`,
   spec-mismatch→`consistency`, unclear→`ambiguity`, test gap→`testability`, DoR/process→`dor`,
   design→`design-match`). Severity per `/pr-review` calibration (blocker = must-fix before merge).
-- `title`: a stable **label, ≤60 chars** — this is what the cockpit's rail and summary rows show,
-  so it must survive truncation. Name the defect, don't argue it ("Retry loop has no ceiling", not
-  "The retry loop never stops because retryCount is compared after the increment").
+- `title`: a stable **label, ≤60 chars** — this is a FlowLever ledger field (what the cockpit's
+  rail and summary rows show), not part of the posted PR comment, so it isn't in the code-review
+  convention's Length rule below; it must survive truncation on its own terms. Name the defect,
+  don't argue it ("Retry loop has no ceiling", not "The retry loop never stops because retryCount
+  is compared after the increment").
 - `detail`: what's wrong + why, quoting the relevant diff hunk. This is the **evidence**, collapsed
   behind "Why this was raised" in the cockpit — so write it for the reader who is *not* yet convinced
   by the comment, and do not repeat the ask that already appears in `suggestion`.
@@ -154,8 +156,11 @@ For each review finding:
   `issue (blocking): Cap retries — `if (retryCount >= MAX_RETRIES) return;` — or a persistently failing endpoint retries forever.`
   · `nitpick: rename `buf` → `baseBuffer` to match the deployed FTD field name.`
 
-  **Length is a hard rule: ≤300 characters, ≤2 sentences.** Label, then the ask, then at most one
-  clause of consequence — in that order, so the author knows what to do from the first line. Then stop.
+  **Length is a hard rule: ≤300 characters, ≤2 sentences.** Sourced from the Length section of
+  `conventions/code-review.md` (this monorepo's canonical comment convention — inlined in full
+  below so a standalone plugin install, which won't have that file, still gets the whole rule).
+  Label, then the ask, then at most one clause of consequence — in that order, so the author knows
+  what to do from the first line. Then stop.
   - **The ask goes first, not last.** Never build to it through a paragraph of reasoning; the reasoning
     belongs in `detail`. If the comment opens with "`x` loops over `y`, which is…", it is a `detail`
     that lost its way.
