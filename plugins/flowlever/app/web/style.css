@@ -1049,7 +1049,7 @@ body.modal-open { overflow: hidden; }
 @media (min-width: 900px) { .step-kbd-hint { display: block; } }
 .step-exit { margin-left: auto; }
 
-.step-layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }
+.step-layout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
 
 /* item rail */
 .step-rail {
@@ -1073,7 +1073,12 @@ body.modal-open { overflow: hidden; }
 .rail-item.decided.dec-redirect .rail-mark { background: var(--major); }
 .rail-item.decided.dec-fixonly .rail-mark, .rail-item.decided.dec-fix-only .rail-mark { background: var(--ready); }
 .rail-sev { flex: none; font-size: 11px; }
-.rail-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Two lines, not one truncated one: finding titles are labels but still run past the rail's
+ * width, and a rail of "A canvas with no eleme…" fragments is not navigable. */
+.rail-label {
+  flex: 1; min-width: 0; overflow: hidden; line-height: 1.35;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+}
 
 /* the focused step card */
 .step-card {
@@ -1090,6 +1095,39 @@ body.modal-open { overflow: hidden; }
 .step-titlerow h2 { font-size: 18px; margin: 0; line-height: 1.3; letter-spacing: -0.01em; flex: 1; min-width: 0; }
 .step-tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .step-detail { font-size: 13.5px; color: var(--fg-dim); line-height: 1.65; margin: 0; }
+
+/* "Why this was raised" — the collapsed detail. Reads as a quiet affordance, not a section. */
+.step-why { margin: 0; }
+.step-why > summary {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer; width: fit-content;
+  font-size: 11.5px; font-weight: 600; letter-spacing: .3px; color: var(--fg-mute);
+  padding: 3px 0; list-style: none;
+}
+.step-why > summary::-webkit-details-marker { display: none; }
+.step-why > summary::before { content: '▸'; font-size: 12px; transition: transform 120ms ease; }
+.step-why[open] > summary::before { transform: rotate(90deg); }
+.step-why > summary:hover { color: var(--fg-dim); }
+.step-why[open] > summary { margin-bottom: 4px; }
+
+/* Review prose rendered as markdown. `.md` carries the report view's document chrome
+ * (panel background, border, 28px/32px padding) — inline in a card that reads as a second
+ * box nested inside the first, so the inline variants drop the chrome and tighten the
+ * block rhythm to card scale. */
+/* Doubled class on each selector so these beat the `.report-body, .md` panel rule, which
+ * is a single class declared later in this file. */
+.md.md-prose, .md.step-detail, .md.f-detail, .md.rm-detail {
+  background: none; border: 0; border-radius: 0; padding: 0;
+  font-size: 13px; line-height: 1.6;
+}
+.md.md-prose > *:first-child, .md.step-detail > *:first-child,
+.md.f-detail > *:first-child, .md.rm-detail > *:first-child { margin-top: 0; }
+.md.md-prose > *:last-child, .md.step-detail > *:last-child,
+.md.f-detail > *:last-child, .md.rm-detail > *:last-child { margin-bottom: 0; }
+.md.md-prose p, .md.step-detail p, .md.f-detail p, .md.rm-detail p { margin: 7px 0; }
+.md.md-prose ul, .md.md-prose ol { padding-left: 18px; margin: 7px 0; }
+.md.md-prose pre, .md.step-detail pre { margin: 7px 0; }
+
+.note-add-btn { font-size: 11.5px; padding: 4px 10px; color: var(--fg-mute); }
 .step-section-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-mute); font-weight: 640; margin-bottom: 8px; }
 .step-diffwrap { display: flex; flex-direction: column; gap: 8px; }
 .step-diffhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

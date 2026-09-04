@@ -841,9 +841,11 @@ function decisionActions(kind) {
       quickDismiss: true,
       helper: 'Approved comments are posted only when you click Post — nothing is sent until then.',
       tagLabels: { accept: 'Will post', edit: 'Edited', waive: 'Dismissed', undecided: 'Undecided' },
+      // The card is already headed "Proposed comment" — repeating the noun in every button
+      // only widened them. Labels stay one word each so the k/a/e/w hint reads the same.
       buttons: [
-        { kind: 'accept', label: '✓ Approve comment', cls: 'dec-accept' },
-        { kind: 'edit', label: '✎ Edit comment', cls: 'dec-edit' },
+        { kind: 'accept', label: '✓ Approve', cls: 'dec-accept' },
+        { kind: 'edit', label: '✎ Edit', cls: 'dec-edit' },
         { kind: 'waive', label: '✕ Dismiss', cls: 'dec-waive' },
       ],
     };
@@ -868,11 +870,15 @@ function decisionActions(kind) {
       ],
     };
   }
+  // Spec: the act is APPLYING a change to Confluence/ADO, and the finish screen has always
+  // called it that ("Apply as proposed" / DEC_LABEL "Apply"). The button said "Accept", so one
+  // act carried two names across two screens; it now says Apply everywhere. Glyphs match the
+  // PR kinds' hairline set rather than mixing in colour emoji.
   return {
     label: 'Decision',
     buttons: [
-      { kind: 'accept', label: '✅ Accept', cls: 'dec-accept' },
-      { kind: 'edit', label: '✏️ Edit', cls: 'dec-edit' },
+      { kind: 'accept', label: '✓ Apply', cls: 'dec-accept' },
+      { kind: 'edit', label: '✎ Edit', cls: 'dec-edit' },
       { kind: 'redirect', label: '⤳ Redirect', cls: 'dec-redirect' },
       { kind: 'waive', label: '⊘ Waive', cls: 'dec-waive' },
       { kind: 'skip', label: '⏭ Skip', cls: 'dec-skip' },
@@ -1129,13 +1135,25 @@ function stepCard(data, f) {
         h('p', {}, f.note))
     : null;
 
+  // The detail argues WHY the finding was raised; the proposed comment already carries the ask.
+  // Roughly half the comment's vocabulary also appears in the detail, so showing both in full
+  // made every decision cost ~1,350 characters of part-duplicate prose. Collapsed by default:
+  // decide from title + comment, open this only when the comment does not convince you.
+  const whyEl = f.detail
+    ? h('details', { class: 'step-why' },
+        h('summary', {}, 'Why this was raised'),
+        mdBlock(f.detail, 'step-detail'))
+    : null;
+
+  // Decision BEFORE the diff. It used to sit last, which on a card with a draft put it ~87%
+  // down a 1,500px card — off-screen, so approving cost a scroll to the bottom and back.
   return h('div', { class: `step-card ${verdict !== 'proposed' ? `rm-frame-${verdict}` : ''}`.trim() },
     head,
-    f.detail ? h('p', { class: 'step-detail' }, f.detail) : null,
+    whyEl,
     suggestionSection(kind, f),
     noteEl,
-    diffSection,
-    decisionRow(data, f));
+    decisionRow(data, f),
+    diffSection);
 }
 
 /* The "Proposed comment" / "Suggestion" block — editable inline when the user
@@ -1147,7 +1165,8 @@ function suggestionSection(kind, f) {
   const cls = kind === 'spec' ? 'f-suggestion' : 'f-suggestion proposed-comment';
   return h('div', { class: cls },
     h('span', { class: 'f-suglabel' }, suggestionLabel(kind)),
-    h('p', {}, body || h('span', { class: 'meta-dim' }, '(no comment text yet — use Edit comment)')));
+    body ? mdBlock(body, 'md-prose')
+      : h('p', {}, h('span', { class: 'meta-dim' }, '(no comment text yet — use Edit)')));
 }
 
 function commentEditForm(kind, f) {
@@ -1170,7 +1189,7 @@ function commentEditForm(kind, f) {
     const form = h('div', { class: 'comment-edit' },
       f.suggestion ? h('div', { class: 'f-suggestion' },
         h('span', { class: 'f-suglabel' }, 'Suggestion'),
-        h('p', {}, f.suggestion)) : null,
+        mdBlock(f.suggestion, 'md-prose')) : null,
       h('span', { class: 'f-suglabel' }, decKind === 'redirect' ? 'Your counter / answer' : 'Your note / answer'),
       ta,
       h('div', { class: 'comment-edit-actions' },
@@ -4209,7 +4228,7 @@ function reviewFrame(f) {
   // kind-aware decision row. Spec findings keep the pure diff-review body.
   const bodyKids = [];
   if (isPr) {
-    if (f.detail) bodyKids.push(h('p', { class: 'rm-detail' }, f.detail));
+    if (f.detail) bodyKids.push(mdBlock(f.detail, 'rm-detail'));
     bodyKids.push(suggestionSection(kind, f));
     if (hasDraft) bodyKids.push(...reviewBodyKids(f));
     bodyKids.push(decisionRow(data, f));
@@ -4309,6 +4328,22 @@ function reviewNoteSection(f) {
       }, '↻ Send counter & re-audit')
     : null;
 
+  // The note only matters once you disagree — its own placeholder says so ("Wrong target?
+  // Reject and say where/how…"). Rendered open on every card it cost ~100px of the card's
+  // height for the rarest action, so it now appears with the verdict that needs it (or when
+  // a note already exists), and stays one click away otherwise.
+  const body = h('div', { class: 'review-note-body' });
+  if (verdict !== 'proposed' || draftNote(f).trim()) {
+    body.append(ta);
+    if (reauditBtn) body.append(reauditBtn);
+  } else {
+    body.append(h('button', {
+      class: 'btn note-add-btn', type: 'button',
+      title: 'Leave a note for the agent without changing the verdict',
+      onclick: (e) => { e.stopPropagation(); body.replaceChildren(ta); ta.focus(); },
+    }, '＋ Add note'));
+  }
+
   return h('div', { class: 'review-note', onclick: stop },
     h('div', { class: 'review-note-head' },
       h('span', { class: 'f-suglabel' }, 'Note to the agent / counter-proposal'),
@@ -4316,8 +4351,7 @@ function reviewNoteSection(f) {
         mkV('proposed'), mkV('redirect'), mkV('reject')),
       saved,
     ),
-    ta,
-    reauditBtn,
+    body,
   );
 }
 
@@ -4884,10 +4918,10 @@ function findingBody(f) {
     : null;
 
   return h('div', { class: 'f-body', onclick: stop },
-    f.detail ? h('p', { class: 'f-detail' }, f.detail) : null,
+    f.detail ? mdBlock(f.detail, 'f-detail') : null,
     f.suggestion ? h('div', { class: 'f-suggestion' },
       h('span', { class: 'f-suglabel' }, 'suggestion'),
-      h('p', {}, f.suggestion)) : null,
+      mdBlock(f.suggestion, 'md-prose')) : null,
     f.draft ? reviewTrigger(f) : null,
     h('div', { class: 'f-meta' }, meta),
     history ? h('div', { class: 'f-histwrap' }, h('span', { class: 'f-suglabel' }, 'history'), history) : null,
@@ -5244,6 +5278,17 @@ async function copyReport() {
 
 /* ---- minimal markdown renderer (headings, bold/em/code, links, lists,
  * tables, fenced code, hr, blockquote). DOM-built ⇒ XSS-safe. ---- */
+
+/* Review prose (a finding's detail, and the proposed comment/reply) IS markdown — it is
+ * written as markdown and Azure DevOps renders it as markdown. Dumping it into a text node
+ * showed `identifiers` with their backticks and swallowed lists, so the reviewer previewed
+ * something that did not match what the author would receive. Every prose surface routes
+ * through here instead, reusing the renderer the report view already uses. */
+function mdBlock(src, cls) {
+  const el = renderMarkdown(src);
+  if (cls) el.className = `md ${cls}`;
+  return el;
+}
 
 function renderMarkdown(md) {
   const root = h('div', { class: 'md' });

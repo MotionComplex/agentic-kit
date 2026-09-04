@@ -130,7 +130,12 @@ For each review finding:
 - `dimension`: reuse the existing set (correctness→`feasibility`/`consistency`, missing-thing→`completeness`,
   spec-mismatch→`consistency`, unclear→`ambiguity`, test gap→`testability`, DoR/process→`dor`,
   design→`design-match`). Severity per `/pr-review` calibration (blocker = must-fix before merge).
-- `title`: stable one-line. `detail`: what's wrong + why, quoting the relevant diff hunk.
+- `title`: a stable **label, ≤60 chars** — this is what the cockpit's rail and summary rows show,
+  so it must survive truncation. Name the defect, don't argue it ("Retry loop has no ceiling", not
+  "The retry loop never stops because retryCount is compared after the increment").
+- `detail`: what's wrong + why, quoting the relevant diff hunk. This is the **evidence**, collapsed
+  behind "Why this was raised" in the cockpit — so write it for the reader who is *not* yet convinced
+  by the comment, and do not repeat the ask that already appears in `suggestion`.
 - `locus`: **`pr:<id>:<path>:L<line>`** (or `L<start>-<end>`). The line is the **new-file (right-side)
   line number of the exact code the comment is about**, read from the diff (`@@ … +<start>,<count> @@`
   counting down the new side) — never eyeballed/estimated. Point at the line whose content matches the
@@ -148,6 +153,25 @@ For each review finding:
   `ambiguity`→`question`, minor style→`nitpick`. Examples:
   `issue (blocking): Cap retries — `if (retryCount >= MAX_RETRIES) return;` — or a persistently failing endpoint retries forever.`
   · `nitpick: rename `buf` → `baseBuffer` to match the deployed FTD field name.`
+
+  **Length is a hard rule: ≤300 characters, ≤2 sentences.** Label, then the ask, then at most one
+  clause of consequence — in that order, so the author knows what to do from the first line. Then stop.
+  - **The ask goes first, not last.** Never build to it through a paragraph of reasoning; the reasoning
+    belongs in `detail`. If the comment opens with "`x` loops over `y`, which is…", it is a `detail`
+    that lost its way.
+  - **Say it once.** If a sentence restates something the previous sentence or `detail` already said,
+    cut it. Prose that reruns the same point is the single biggest cost a reviewer pays per finding.
+  - **No essays, no scene-setting, no meta.** Drop "That is the failure mode this set exists to
+    remove", "It is worth noting that", and anything recapping the PR's purpose back to its author.
+  - **Plain words for technical things.** Stay precise — keep the identifier, the file, the number —
+    but say "this passes when the list is empty" rather than "this exhibits a vacuous-pass boundary
+    condition". Precision is in the specifics, not the register.
+  - **Split, don't stack.** A comment that needs more than 300 characters is almost always two
+    findings (e.g. "this check is vacuous" + "portalled roots escape it") — file them separately, each
+    on its own `locus`. One comment, one ask.
+  - Over budget and genuinely inseparable? Keep the ask in `suggestion` and move every supporting
+    sentence into `detail`. `suggestion` is what your colleague reads in Azure DevOps; treat its
+    length as their time.
 Where you have a concrete code change, attach a **draft** so it shows as a red/green diff in the stepper:
 `setFindingDraft(wsId, fp, { target: "<path>:L<line>", format: "text", before: "<current code>", after: "<suggested code>" })`
 (via a small node script using `require("${CLAUDE_PLUGIN_ROOT}/app/src/ledger.js")`, or a future CLI cmd).
