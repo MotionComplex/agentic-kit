@@ -661,8 +661,9 @@ function reviewWait(data) {
 
 /* Build the review-flow decision map from PERSISTED finding state, so a decision taken on
  * ANY surface (board modal or the stepper) shows everywhere and survives a page refresh:
- * a waived finding reads as Dismissed, a stored `decision` as Approve/Edit, the rest
- * Undecided. The in-memory flow map is just a cache hydrated from this. */
+ * a waived finding reads as Dismissed, a stored `decision` as Approve/Edit, an explicit
+ * redirect/reject verdict as its own kind, the rest Undecided. The in-memory flow map is
+ * just a cache hydrated from this. */
 function hydrateDecisions(findings) {
   const d = {};
   for (const f of findings || []) {
@@ -677,7 +678,15 @@ function hydrateDecisions(findings) {
       const rv = f.draft && f.draft.review;
       if (!rv) continue;
       if (rv.verdict === 'redirect') { d[f.fp] = { kind: 'redirect', reason: rv.note || '' }; continue; }
-      if (rv.verdict === 'reject') continue;   // an explicit "don't apply" stays undecided here
+      // A `reject` verdict is the reviewer explicitly saying "don't apply this proposed
+      // change" — that IS a decision, not an absence of one. Leaving it out of `d` (as this
+      // used to) made it fall back to Undecided everywhere flowDecisionKind() is read, which
+      // meant approveAllRemaining's undecidedFlowFps() scooped it up and silently rewrote a
+      // considered Reject back to `proposed` + accepted hunks. Recording it as its own kind
+      // here — the same move already made for `redirect` two lines up — fixes it at the one
+      // place every consumer (undecided set, finish tally, rail marks, triage tags) reads from,
+      // instead of teaching each consumer a second, separate notion of "decided".
+      if (rv.verdict === 'reject') { d[f.fp] = { kind: 'reject', reason: rv.note || '' }; continue; }
       const hunkDecs = rv.hunks || {};
       const statuses = draftStats(f).hunks.map((hk) => (hunkDecs[String(hk.id)] || {}).status);
       if (statuses.length && statuses.every((s) => s === 'accepted' || s === 'edited')) {
@@ -840,7 +849,12 @@ function decisionActions(kind) {
       editsComment: true,
       quickDismiss: true,
       helper: 'Approved comments are posted only when you click Post — nothing is sent until then.',
-      tagLabels: { accept: 'Will post', edit: 'Edited', waive: 'Dismissed', undecided: 'Undecided' },
+      // `reject` is missing here for the same reason DEC_PILL['pr-review'] needed it (app.js:~903):
+      // hydrateDecisions now records a `reject` verdict as its own decided kind, so decisionRow's
+      // `cfg.tagLabels[decKind] || cfg.tagLabels.undecided` falls through to the literal word
+      // "Undecided" for a card that is very much decided — the reviewer's own reject verdict,
+      // shown right above it as a red banner, contradicted by its own triage tag.
+      tagLabels: { accept: 'Will post', edit: 'Edited', waive: 'Dismissed', reject: 'Rejected', undecided: 'Undecided' },
       // The card is already headed "Proposed comment" — repeating the noun in every button
       // only widened them. Labels stay one word each so the k/a/e/w hint reads the same.
       buttons: [
@@ -855,9 +869,13 @@ function decisionActions(kind) {
       label: 'Decision',
       helper: 'Replies and fixes are sent only when you click Post — nothing is sent until then. '
         + '“Fix only” pushes the fix and resolves the thread without writing a reply.',
+      // `reject` added alongside `redirect` above for the same reason pr-review's tagLabels
+      // needed it: hydrateDecisions can hand this surface a `reject`-kind decision purely from a
+      // draft verdict, with no dedicated button behind it, so leaving it out of a kind-keyed
+      // label map is a silent "Undecided" mislabel, not a compile error.
       tagLabels: {
         accept: 'Will reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply',
-        redirect: 'Push back', skip: 'Skipped', undecided: 'Undecided',
+        redirect: 'Push back', reject: 'Rejected', skip: 'Skipped', undecided: 'Undecided',
       },
       buttons: [
         { kind: 'accept', label: '↩ Reply', cls: 'dec-accept' },
@@ -886,8 +904,19 @@ function decisionActions(kind) {
   };
 }
 
-const DEC_LABEL = { accept: 'Apply', edit: 'With edits', 'fix-only': 'Fix, no reply', redirect: 'Redirect', waive: 'Waive', skip: 'Skip' };
-const RAIL_MARK = { accept: '✓', edit: '✎', 'fix-only': '✎', redirect: '⤳', waive: '⊘', skip: '–' };
+// `reject` sits next to `redirect` in both maps below for the same reason: hydrateDecisions can
+// derive either kind purely from a draft verdict (no dedicated decide() button backs it), so
+// wherever `redirect` is wired into a shared, kind-agnostic display map, `reject` needs the same
+// entry or it silently falls back to an unstyled/blank rendering (or the wrong glyph) for a state
+// that is now genuinely "decided".
+const DEC_LABEL = { accept: 'Apply', edit: 'With edits', 'fix-only': 'Fix, no reply', redirect: 'Redirect', reject: 'Reject', waive: 'Waive', skip: 'Skip' };
+// `reject` uses the hairline `⊗` here, not the colour '🚫' emoji used elsewhere (VERDICT_GLYPH,
+// the verdict buttons): every other mark in this set (✓ ✎ ⤳ ⊘ –) is a plain glyph that inherits
+// `.rail-mark`'s `color`, so it renders crisp against the red dec-reject background. An emoji
+// carries its own fixed colours regardless of CSS `color` and rendered as a dark blob on that red
+// chip instead of a mark — the exact inconsistency the comment above `decisionActions` (app.js:
+// ~884-885) already calls out for this set.
+const RAIL_MARK = { accept: '✓', edit: '✎', 'fix-only': '✎', redirect: '⤳', reject: '⊗', waive: '⊘', skip: '–' };
 
 async function renderReviewFlow(id, finish) {
   current.view = 'review-flow'; current.id = id; current.tab = 'review';
@@ -1329,7 +1358,47 @@ function decisionRow(data, f) {
     : row;
 }
 
+/* Undo a `reject`/`redirect` decision by resetting the draft verdict itself back to `proposed`,
+ * through the same endpoint the verdict control uses (setVerdict/reviewNoteSection, app.js:
+ * ~4549/~4517) — preserving `draft.review.note`, since that's the reviewer's own written
+ * rationale and Undo only withdraws the decision, not their words. Without this, undecide()
+ * only ever cleared the LOCAL state.flow.decisions entry and the (irrelevant, for these two
+ * kinds) top-level `decision` field, leaving the ledger's `verdict` still `reject`/`redirect`
+ * while the card read "Undecided" — exactly the gap `approveAllRemaining`'s undecidedFlowFps()
+ * swept into a silent approve (NEW-1). Reports failure via markPersisted/toast, same as every
+ * other persist helper here, so a dropped write shows "not saved — retry" instead of the UI and
+ * ledger quietly disagreeing. */
+async function resetVerdictToProposed(fp) {
+  const f = findFinding(fp);
+  if (!f || !f.draft) { markPersisted(fp, true); return true; }
+  const prev = f.draft.review ? structuredClone(f.draft.review) : undefined;
+  const cur = f.draft.review || {};
+  f.draft.review = { ...cur, hunks: cur.hunks || {}, verdict: 'proposed', updatedAt: new Date().toISOString() };
+  reviewRefresh();
+  try {
+    await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}/draft/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verdict: 'proposed' }),
+    });
+    markPersisted(fp, true);
+    return true;
+  } catch (e) {
+    // The write failed, so the ledger still holds the old verdict — roll the local copy back to
+    // match it rather than let the UI claim a reset that didn't happen.
+    if (prev === undefined) delete f.draft.review; else f.draft.review = prev;
+    toast(`Could not clear the ${prev && prev.verdict} verdict: ${e.message} — it will show as "not saved" until you retry`);
+    markPersisted(fp, false);
+    reviewRefresh();
+    return false;
+  }
+}
+
 async function undecide(f) {
+  const wasDec = state.flow.decisions[f.fp];
+  // `reject`/`redirect` are decided purely via draft.review.verdict (hydrateDecisions, app.js:
+  // ~689) — there is no top-level `decision` field backing them, so the `{decision:null}` POST
+  // below is a no-op for these two kinds and Undo needs the extra step below to actually undo.
+  const verdictDerived = wasDec && (wasDec.kind === 'reject' || wasDec.kind === 'redirect');
   delete state.flow.decisions[f.fp];
   state.flow.waiving = null;
   state.flow.editingComment = null;
@@ -1343,6 +1412,7 @@ async function undecide(f) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    if (verdictDerived && !(await resetVerdictToProposed(f.fp))) return;   // already toasted + flagged + re-rendered
     await loadDetail(current.id, true);
   } catch (e) {
     toast(`Could not clear decision: ${e.message}`);
@@ -1523,8 +1593,12 @@ function markPersisted(fp, ok) {
 /* Persist a triage decision (approve/edit, or null to clear) onto the finding so the board,
  * stepper and Post screen stay in sync and it survives a refresh. Optimistic, then reloads.
  * Returns whether the server actually accepted it — callers must not advance/report success
- * on a false return (U-2). */
-async function persistDecisionField(fp, decision) {
+ * on a false return (U-2).
+ * `reload:false` skips the loadDetail() round-trip this call would otherwise do on its own —
+ * used by approveAllRemaining, which persists many findings and would otherwise turn one bulk
+ * action into N sequential GETs; that caller does exactly one reload itself once every write
+ * has settled. Every other caller keeps the default (reload after this one write) unchanged. */
+async function persistDecisionField(fp, decision, { reload = true } = {}) {
   const cur = findFinding(fp);
   if (cur) { if (decision) cur.decision = decision; else delete cur.decision; }
   try {
@@ -1532,12 +1606,12 @@ async function persistDecisionField(fp, decision) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ decision }),
     });
-    await loadDetail(current.id, true);
+    if (reload) await loadDetail(current.id, true);
     markPersisted(fp, true);
     return true;
   } catch (e) {
     toast(`Could not save decision: ${e.message} — it will show as "not saved" until you retry`);
-    try { await loadDetail(current.id, true); } catch { /* keep optimistic */ }
+    if (reload) { try { await loadDetail(current.id, true); } catch { /* keep optimistic */ } }
     markPersisted(fp, false);
     return false;
   }
@@ -1571,20 +1645,26 @@ async function persistWaive(fp, reason) {
  * disturbing the reviewer's position. */
 async function retryPersist(fp) {
   const dec = state.flow.decisions[fp];
-  if (!dec) return;
-  if (dec.kind === 'accept') await persistDecisionField(fp, 'approve');
-  else if (dec.kind === 'fix-only') await persistDecisionField(fp, 'fix-only');
-  else if (dec.kind === 'waive') await persistWaive(fp, dec.reason || 'dismissed');
-  else { delete state.flow.persistFailed[fp]; }   // decisions with no direct persist call (edit/redirect/skip)
+  const f = findFinding(fp);
+  if (dec && dec.kind === 'accept') await persistDecisionField(fp, 'approve');
+  else if (dec && dec.kind === 'fix-only') await persistDecisionField(fp, 'fix-only');
+  else if (dec && dec.kind === 'waive') await persistWaive(fp, dec.reason || 'dismissed');
+  // undecide() already deleted `dec` before this can fail (NEW-1: resetVerdictToProposed rolls
+  // f.draft.review back to its pre-reset verdict on failure) — so the only signal left that an
+  // Undo's verdict-reset is what needs retrying is the rolled-back verdict itself.
+  else if (!dec && f && ['reject', 'redirect'].includes(draftVerdict(f))) await resetVerdictToProposed(fp);
+  else { delete state.flow.persistFailed[fp]; }   // decisions with no direct persist call (edit/redirect/reject/skip)
   reviewRefresh();
 }
 
 /* Accept the whole proposal: mark every hunk accepted + verdict proposed, in one
- * merged POST. Optimistic, then reconciled from the server. */
-async function acceptAll(f) {
+ * merged POST. Optimistic, then reconciled from the server.
+ * `reload:false` (see persistDecisionField above) — approveAllRemaining calls this once per
+ * undecided finding and does its own single reload afterward instead of one per finding. */
+async function acceptAll(f, { reload = true } = {}) {
   // Suggestion-only finding (no code-diff draft): the approval is the decision —
   // there's nothing to persist server-side until the Post step.
-  if (!f.draft) { reviewRefresh(); return; }
+  if (!f.draft) { if (reload) reviewRefresh(); return; }
   const { hunks } = draftStats(f);
   const hunkObj = {};
   for (const hk of hunks) hunkObj[String(hk.id)] = { status: 'accepted', at: new Date().toISOString() };
@@ -1592,18 +1672,106 @@ async function acceptAll(f) {
   if (cur && cur.draft) {
     cur.draft.review = { ...(cur.draft.review || {}), hunks: hunkObj, verdict: 'proposed', updatedAt: new Date().toISOString() };
   }
-  reviewRefresh();
+  if (reload) reviewRefresh();
   try {
     const body = hunks.length ? { hunks: hunkObj, verdict: 'proposed' } : { verdict: 'proposed' };
     await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(f.fp)}/draft/review`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    await loadDetail(current.id, true);
+    if (reload) await loadDetail(current.id, true);
   } catch (e) {
     toast(`Accept failed: ${e.message}`);
-    try { await loadDetail(current.id, true); } catch { /* keep optimistic state */ }
+    if (reload) { try { await loadDetail(current.id, true); } catch { /* keep optimistic state */ } }
   }
-  reviewRefresh();
+  if (reload) reviewRefresh();
+}
+
+/* A finding is "currently undecided" iff nothing was ever recorded for it in
+ * state.flow.decisions — NOT flowDecisionKind(fp) === 'skip'. flowDecisionKind() falls back to
+ * 'skip' for exactly this empty case, but pr-respond/spec workspaces also have a real, explicit
+ * Skip button that calls setFlowDecision(fp, 'skip') and lands in the SAME 'skip' bucket. Treating
+ * that as "undecided" would let approveAllRemaining silently overturn a reviewer's considered
+ * Skip — the same mistake the unit exists to rule out for Dismiss/Edit/Redirect/Waive. Checking
+ * the decisions map directly is the only way to tell "never touched" apart from "decided: skip". */
+function undecidedFlowFps() {
+  return (state.flow.items || []).filter((fp) => !state.flow.decisions[fp]);
+}
+
+/* Bulk-clear an obvious batch of PR-review findings in one confirmed action, instead of costing
+ * one visit per finding through the stepper (U-2: no bulk action existed anywhere in the app).
+ * Mirrors decide()'s 'accept' branch exactly — same setFlowDecision + persistDecisionField(approve)
+ * + acceptAll(hunks/verdict) a single Approve click makes — so a reload hydrates these findings
+ * back to 'accept' via hydrateDecisions() the same way it would for any one-at-a-time approval.
+ * The only difference from N single Approves is that every write here passes reload:false and the
+ * function does ONE loadDetail() at the end: there is no bulk decision-write endpoint on the
+ * server (only /review/apply, which bulk-sets finding *status* for the post/apply hand-off, not
+ * the `decision` field an Approve writes), and standing up a new endpoint just to collapse a
+ * handful of requests into one wasn't worth the added server surface for this unit.
+ * Never touches an already-decided finding: only undecidedFlowFps() is ever passed to
+ * setFlowDecision here. It must NEVER be called except from the confirmed step in
+ * approveAllControl — this posts nothing (no /review/apply, no enqueueApply), it only records
+ * decisions the separate, explicit Post click still has to act on. */
+async function approveAllRemaining(data) {
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  if (kind !== 'pr-review') return;   // scoped to pr-review's Approve/Edit/Dismiss triage
+  const fps = undecidedFlowFps();
+  if (!fps.length) return;
+  state.flow.bulkApproving = true;
+  // try/finally: if anything in here throws unexpectedly (the initial render below,
+  // setFlowDecision, a later render, whatever), bulkApproving must still come back down. Without
+  // it the control is stuck reading "Approving…" — disabled, dead — until the page is reloaded,
+  // over one bad write. The initial renderFlowInto() call used to sit OUTSIDE this try, so a
+  // throw during THAT render left bulkApproving stuck true with the finally never reached.
+  try {
+    renderFlowInto();
+    for (const fp of fps) setFlowDecision(fp, 'accept');   // optimistic, same as a single Approve
+    await Promise.allSettled(fps.map(async (fp) => {
+      const ok = await persistDecisionField(fp, 'approve', { reload: false });
+      if (!ok) return;   // markPersisted(fp, false) already flagged it — the "not saved" retry picks it up
+      const f = findFinding(fp);
+      if (f) await acceptAll(f, { reload: false });
+    }));
+    try { await loadDetail(current.id, true); } catch { /* per-item persistFailed flags already stand */ }
+  } finally {
+    state.flow.bulkApproving = false;
+    state.flow.confirmApproveAll = false;
+    renderFlowInto();
+  }
+}
+
+/* The finish screen's bulk-triage control: sits under the tallies row (a triage action, reviewed
+ * alongside the counts it changes) and deliberately far from postActionEl's Post button below —
+ * this decides findings, it never sends anything, and must not be mistaken for the posting step.
+ * Renders nothing when there is nothing undecided, so it can never read as an invitation to
+ * "approve" a batch that's already been triaged. Requires an inline two-step confirm (matching
+ * stepWaiveForm's pattern) before it writes anything, because a single click here can approve
+ * many PR comments that a LATER click posts for real — window.confirm is banned in this app, so
+ * the confirmation is built the same way every other one here is: with h(). */
+function approveAllControl(data) {
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  if (kind !== 'pr-review') return null;
+  const fps = undecidedFlowFps();
+  if (!fps.length) return null;
+  const n = fps.length;
+  if (state.flow.confirmApproveAll) {
+    const busy = !!state.flow.bulkApproving;
+    return h('div', { class: 'approve-all-confirm' },
+      h('span', { class: 'approve-all-confirm-msg' }, `Approve ${n} remaining?`),
+      h('button', {
+        class: 'btn btn-accent', type: 'button', disabled: busy, 'aria-busy': busy ? 'true' : 'false',
+        onclick: () => approveAllRemaining(data),
+      }, busy ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : null, busy ? ' Approving…' : 'Yes'),
+      h('button', {
+        class: 'btn', type: 'button', disabled: busy,
+        onclick: () => { state.flow.confirmApproveAll = false; renderFlowInto(); },
+      }, 'Cancel'));
+  }
+  return h('button', {
+    class: 'btn approve-all-btn', type: 'button',
+    title: 'Approve every finding below still marked Undecided. It never touches a finding you '
+      + 'already Dismissed, Edited, or otherwise decided. Nothing is posted — Post stays a separate click.',
+    onclick: () => { state.flow.confirmApproveAll = true; renderFlowInto(); },
+  }, `✓ Approve ${n} remaining`);
 }
 
 /* ---- finish: the decision summary ---- */
@@ -1613,24 +1781,30 @@ function flowDecisionKind(fp) {
   return (dec && dec.kind) || 'skip';
 }
 
-/* Per-kind labels for the finish-screen decision tallies + summary pills. */
+/* Per-kind labels for the finish-screen decision tallies + summary pills.
+ * `reject` gets its own column/pill in every kind here — same reasoning as DEC_LABEL/RAIL_MARK
+ * above: hydrateDecisions now records a `reject` verdict as its own decided kind (mirroring
+ * `redirect`), so without an entry here it would either mis-render as the literal string
+ * "reject" (pill falls back to the raw key) or vanish from the tally row entirely while still
+ * counting toward the reviewed total — both read as a miscount on the one screen this bug was
+ * about. */
 const FINISH_TALLIES = {
   spec: [
     ['accept', 'Apply as proposed'], ['edit', 'Apply with edits'],
-    ['redirect', 'Redirect'], ['waive', 'Waive'], ['skip', 'Skipped'],
+    ['redirect', 'Redirect'], ['reject', 'Reject'], ['waive', 'Waive'], ['skip', 'Skipped'],
   ],
   'pr-review': [
-    ['accept', 'Approved'], ['edit', 'Edited'], ['waive', 'Dismissed'], ['skip', 'Undecided'],
+    ['accept', 'Approved'], ['edit', 'Edited'], ['reject', 'Rejected'], ['waive', 'Dismissed'], ['skip', 'Undecided'],
   ],
   'pr-respond': [
     ['accept', 'Reply'], ['edit', 'Fix + reply'], ['fix-only', 'Fix, no reply'],
-    ['redirect', 'Push back'], ['skip', 'Skipped'],
+    ['redirect', 'Push back'], ['reject', 'Rejected'], ['skip', 'Skipped'],
   ],
 };
 const DEC_PILL = {
   spec: DEC_LABEL,
-  'pr-review': { accept: 'Approved', edit: 'Edited', redirect: 'Redirect', waive: 'Dismissed', skip: 'Undecided' },
-  'pr-respond': { accept: 'Reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply', redirect: 'Push back', waive: 'Dismissed', skip: 'Skipped' },
+  'pr-review': { accept: 'Approved', edit: 'Edited', redirect: 'Redirect', reject: 'Rejected', waive: 'Dismissed', skip: 'Undecided' },
+  'pr-respond': { accept: 'Reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply', redirect: 'Push back', reject: 'Rejected', waive: 'Dismissed', skip: 'Skipped' },
 };
 
 /* The PR number for a pr-review/pr-respond workspace, read off the title (#482)
@@ -1648,7 +1822,7 @@ function finishView(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
   const kind = (data.feature && data.feature.kind) || 'spec';
   const isPr = kind === 'pr-review' || kind === 'pr-respond';
-  const counts = { accept: 0, edit: 0, redirect: 0, waive: 0, skip: 0 };
+  const counts = { accept: 0, edit: 0, redirect: 0, reject: 0, waive: 0, skip: 0 };
   const byTarget = new Map();
   for (const fp of state.flow.items) {
     const f = findings.find((x) => x.fp === fp);
@@ -1669,7 +1843,11 @@ function finishView(data) {
     h('h1', {}, isPr ? 'Triage summary' : 'Decision summary'),
     h('p', { class: 'view-sub' }, `${plural(state.flow.items.length, many.replace(/s$/, ''), many)} reviewed · ${data.feature.title || current.id}`),
     h('div', { class: 'finish-tallies' },
-      tallySpecs.map(([k, label]) => tally(k, label, counts[k] || 0))));
+      tallySpecs.map(([k, label]) => tally(k, label, counts[k] || 0))),
+    // Sits under the tallies it acts on — a triage row, not a posting control. See
+    // approveAllControl's own comment for why it must stay far from postActionEl's Post button.
+    // Renders no node at all (approveAllControl returns null) when nothing is left to approve.
+    approveAllControl(data));
 
   const pillMap = DEC_PILL[kind] || DEC_LABEL;
   const groups = [...byTarget.entries()].map(([target, rows]) => h('div', { class: 'finish-group' },
@@ -1951,8 +2129,21 @@ function postActionEl(data) {
   // If a job is waiting and nothing is draining the queue, put the run control right next to the
   // status line — this is the screen the user is staring at while wondering why nothing happens.
   const needsRunner = !!latest && (latest.status === 'queued' || latest.status === 'running') && !runnerBusy();
+  // The dead end this replaces: a fresh pr-review workspace showed "Post 0 comments to PR #5843"
+  // — true, but it hands the reviewer nowhere to go. The disabled button (web/app.js:1931-ish,
+  // unchanged here) is correct; only the label above it was silent about what to do next. Only
+  // swap it in the actual dead end — postN===0 because nothing is decided yet, not because a post
+  // already ran or everything was dismissed (posted/errored/stalled/unconfirmed all have their own
+  // honest status line already, via statusLine above). pr-review gets the pointer to Approve-all
+  // (approveAllControl, above the groups) since that's the escape hatch; pr-respond has no such
+  // control, so it only names the count.
+  const undecidedN = undecidedFlowFps().length;
+  const deadEnd = postN === 0 && undecidedN > 0 && !posted && !errored && !stalled && !unconfirmed;
+  const sectionLabel = deadEnd
+    ? `${plural(undecidedN, 'finding', 'findings')} still undecided — decide them${kind === 'pr-review' ? ', or approve all above' : ''}`
+    : `${verb} — nothing is sent until you click this`;
   return h('div', { class: 'finish-post' },
-    h('div', { class: 'step-section-label' }, `${verb} — nothing is sent until you click this`),
+    h('div', { class: 'step-section-label' }, sectionLabel),
     h('div', { class: 'finish-post-row' },
       btn,
       statusLine,
@@ -1999,6 +2190,14 @@ async function persistTriage(data) {
   for (const fp of state.flow.items) {
     const k = flowDecisionKind(fp);
     if (k === 'skip') continue;                       // undecided → leave open
+    // A rejected finding must never ride the post set. `reject` only became a decision kind when
+    // hydrateDecisions started recognising the verdict (so the bulk approve-all could not silently
+    // overturn it) — and that promotion made it fall through to the `else` below, which marks
+    // items pending-post and hands them to the runner. The reviewer said "don't apply this at
+    // all"; posting a comment off the back of that is the loudest possible way to get it wrong,
+    // and the Post button never counted it, so the button and the write disagreed. Leave it open,
+    // exactly as it behaved before `reject` was a kind.
+    if (k === 'reject') continue;
     if (k === 'waive') waiveItems.push({ fp, reason: (state.flow.decisions[fp] && state.flow.decisions[fp].reason) || 'dismissed' });
     else postFps.push(fp);                             // accept / edit / redirect → posting back
   }
@@ -2195,6 +2394,17 @@ function route() {
   if (state.modalFp) closeModal();   // never leave a modal open across navigation
   stopPolling();                     // each view (re)starts its own requests poll after it loads
   state.flow.active = false;         // the stepper owns this flag only while on the review route
+  // The finish screen's bulk-approve confirm must never survive a navigation away from it: leaving
+  // the finish screen (a tab click, the back button) and coming straight back to the SAME feature
+  // re-renders finishView without re-running initFlow's fresh-state reset (that only fires on a
+  // feature switch), so a left-behind `true` here would re-arm the confirm and leave a bulk write
+  // one click away instead of the two clicks it promises. Same idea as clearing `active` above.
+  state.flow.confirmApproveAll = false;
+  // Its higher-stakes sibling needs the exact same reset and for the exact same reason: Apply
+  // writes to real ADO work-item fields / Confluence sections, not just to the local ledger, so a
+  // `confirmApply` left `true` across a navigate-away-and-back is one click — not two — from that
+  // write. Verified live: Apply → "Write N changes … now?" → switch tabs → back → still armed.
+  state.flow.confirmApply = false;
   const hash = location.hash || '#/';
   const m = hash.match(/^#\/feature\/([^/]+)(?:\/(findings|coverage|timeline|report|review))?(?:\/(finish))?\/?$/);
   if (m) {

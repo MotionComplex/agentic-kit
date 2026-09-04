@@ -1001,3 +1001,119 @@ test('the whole of 127.0.0.0/8 counts as loopback, not just 127.0.0.1', () => {
     assert.equal(isLoopbackHost(host), false, `${host} is NOT loopback`);
   }
 });
+
+test('U2: approveAllRemaining only ever touches currently-undecided findings', () => {
+  // No bulk-decision endpoint exists server-side (only /review/apply, which bulk-sets finding
+  // *status* for the post/apply hand-off — not the `decision` field a single Approve writes), so
+  // this whole unit lives client-side. Assert the source-level guarantee that matters most: a
+  // reviewer's considered Dismiss/Edit/Redirect/Waive/Skip can never be silently overturned by the
+  // bulk action, and it never posts.
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const undecidedBody = fnBody(ui, 'function undecidedFlowFps(');
+  // Must read the decisions map directly, not go through flowDecisionKind() — that helper falls
+  // back to 'skip' both for "never decided" AND for an explicit Skip (pr-respond/spec have a real
+  // Skip button), so using it here would let a bulk approve overturn a considered Skip.
+  assert.ok(/!state\.flow\.decisions\[/.test(undecidedBody),
+    'undecidedFlowFps must test the decisions map directly, not flowDecisionKind()');
+  assert.ok(!/flowDecisionKind/.test(undecidedBody),
+    'undecidedFlowFps must not go through flowDecisionKind() — it collapses "never decided" and "explicit Skip" into one bucket');
+
+  const bulkBody = fnBody(ui, 'async function approveAllRemaining(');
+  assert.ok(/undecidedFlowFps\(\)/.test(bulkBody),
+    'approveAllRemaining must source its target fps from undecidedFlowFps(), not from every flow item');
+  // The previous version of this guard only blacklisted `.map`/`.forEach`/`.filter` called on
+  // `state.flow.items`, so a `for..of state.flow.items`, a classic indexed `for` loop, a
+  // `for..in`, `state.flow.items[i]`, `...state.flow.items`, or `Object.keys(state.flow.items)`
+  // all sailed straight through it untouched. A reviewer proved this concretely with a `for..of`
+  // mutation that iterated every item and flipped an already-Dismissed finding to Approved —
+  // the suite stayed green at 208/208. There is no syntax-form denylist that reliably covers
+  // every one of those (and whatever's invented next); the only real invariant is that this
+  // function has no legitimate reason to reference `state.flow.items` AT ALL — undecidedFlowFps()
+  // is the sole approved way in. So assert the literal string is simply absent from the body.
+  assert.ok(!/state\.flow\.items/.test(bulkBody),
+    'approveAllRemaining must never reference state.flow.items directly (by .map/.forEach/.filter, '
+    + 'for..of, a classic for(;;), for..in, indexing, spread, Object.keys, or any other traversal) '
+    + '— undecidedFlowFps() must be the only way it reads the undecided set');
+  assert.ok(!/enqueueApply|postBack\(|\/review\/apply/.test(bulkBody),
+    'approveAllRemaining must never post or enqueue a post — Post stays a separate, explicit click');
+});
+
+/* Guarding the one path in the UI that causes a write to somebody else's pull request.
+ *
+ * `reject` became a decision kind so the bulk approve-all could not silently overturn a
+ * considered rejection. That promotion had a consequence nothing caught: flowDecisionKind() now
+ * returns 'reject' instead of falling back to 'skip', so in persistTriage the finding stopped
+ * hitting the `continue` and fell through to the `else` that pushes items into the post set and
+ * marks them pending-post for the runner. A finding the reviewer explicitly rejected would have
+ * been posted as a comment — while the Post button, which counts only accept/edit, said nothing
+ * about it. The whole suite stayed green through that, so the invariant gets its own test. */
+test('U2: persistTriage never carries a rejected or undecided finding into the post set', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'async function persistTriage(');
+
+  // Both non-decisions must bail BEFORE the branch that fills postFps.
+  const elseIdx = body.indexOf('postFps.push');
+  assert.ok(elseIdx > 0, 'persistTriage still builds a postFps set');
+  const beforePush = body.slice(0, elseIdx);
+  for (const kind of ['skip', 'reject']) {
+    const guard = new RegExp(`k === '${kind}'\\s*\\)\\s*continue;`);
+    assert.ok(guard.test(beforePush),
+      `persistTriage must skip '${kind}' before anything reaches postFps.push — `
+      + `a '${kind}' finding must never be handed to the runner to post`);
+  }
+
+  // And a rejected finding must not be quietly re-labelled as a dismissal either: Dismiss waives
+  // the finding, Reject only refuses the proposed change. Conflating them loses the distinction
+  // the reviewer drew.
+  assert.ok(!/waiveItems\.push[^;]*'reject'/.test(body),
+    'a reject must not be recorded as a waive — they are different reviewer intents');
+});
+
+test('U2: the approve-all control requires an inline confirm before it can act', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'function approveAllControl(');
+  assert.ok(!/window\.confirm|window\.alert/.test(body),
+    'must not use window.confirm/alert — this app builds confirms with h()');
+  assert.ok(/confirmApproveAll/.test(body),
+    'the write must be gated behind a two-step confirm flag, like stepWaiveForm');
+  assert.ok(/approveAllRemaining\(/.test(body),
+    'the confirmed branch must be able to actually call approveAllRemaining');
+  // Renders nothing when nothing is undecided, so it can never invite approving an already-clear
+  // batch. The previous version of this check just tested that SOME `return null` existed
+  // ANYWHERE in the body — which the function also does for the unrelated `kind !== 'pr-review'`
+  // early return, so a reviewer could delete the actual "nothing undecided → render nothing"
+  // guard entirely and this test kept passing. Anchor on the specific guard, not the substring.
+  assert.ok(/const fps = undecidedFlowFps\(\);/.test(body),
+    'approveAllControl must derive its fps from undecidedFlowFps()');
+  assert.ok(/if\s*\(\s*!fps\.length\s*\)\s*return null;/.test(body),
+    'approveAllControl must return null specifically when the undecided-fps set is empty — not '
+    + 'merely contain the text "return null" somewhere else in the function (e.g. the kind guard)');
+});
+
+test('U2: the zero-post label names the remaining work instead of dead-ending', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'function postActionEl(');
+  assert.ok(/still undecided/.test(body),
+    'postActionEl must name the undecided count instead of just restating "Post 0 …"');
+  // The already-correct disabled gate on the Post button (opacity/cursor unaffected) must survive
+  // this unit untouched — only the label above it may change.
+  assert.ok(/disabled: active \|\| \(postN === 0 && !posted && !errored && !stalled && !unconfirmed\)/.test(body),
+    'the existing Post-button disabled condition must not have been changed by this unit');
+});
+
+/* Regression guard for NEW-3: route()'s two confirm resets have no test coverage of their own
+ * today — a reviewer deleted the `confirmApproveAll` reset line entirely and the whole 209-test
+ * suite stayed green, because nothing ever asserted route() clears either flag. Both resets exist
+ * for the identical reason (a confirm armed on the finish screen must not survive navigating away
+ * and back to the SAME feature, since that path skips initFlow's fresh-state reset) and both guard
+ * a real write — confirmApproveAll gates approveAllRemaining, confirmApply gates a live write to
+ * ADO/Confluence — so losing either silently re-arms a "one click from a real write" state. */
+test('NEW-3: route() disarms both finish-screen confirms on every navigation', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'function route(');
+  assert.ok(/state\.flow\.confirmApproveAll\s*=\s*false;/.test(body),
+    'route() must reset state.flow.confirmApproveAll = false on every navigation');
+  assert.ok(/state\.flow\.confirmApply\s*=\s*false;/.test(body),
+    'route() must reset state.flow.confirmApply = false on every navigation — it gates a real '
+    + 'write to ADO/Confluence and is the higher-stakes sibling of confirmApproveAll');
+});
