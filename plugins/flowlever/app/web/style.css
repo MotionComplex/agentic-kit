@@ -1219,7 +1219,14 @@ body.modal-open { overflow: hidden; }
   background: var(--panel); color: var(--fg);
 }
 .comment-edit-ta:focus { outline: none; border-color: var(--accent); }
-.comment-edit-actions { display: flex; gap: 8px; margin-top: 8px; }
+.comment-edit-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+/* Discoverability for the comment-editor save shortcut (U-3), same pattern as .step-kbd-hint:
+ * shown right next to the buttons it duplicates so it's never mistaken for the only way to save. */
+.save-kbd-hint { font-size: 11px; color: var(--fg-mute); white-space: nowrap; }
+.save-kbd-hint kbd {
+  font-family: var(--mono); font-size: 10.5px; background: var(--panel-3); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 5px; color: var(--fg-dim);
+}
 
 .btn-post { font-weight: 640; }
 

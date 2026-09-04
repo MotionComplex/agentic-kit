@@ -1108,6 +1108,66 @@ test('U2: the zero-post label names the remaining work instead of dead-ending', 
  * and back to the SAME feature, since that path skips initFlow's fresh-state reset) and both guard
  * a real write — confirmApproveAll gates approveAllRemaining, confirmApply gates a live write to
  * ADO/Confluence — so losing either silently re-arms a "one click from a real write" state. */
+/* U3: editing a proposed comment/note used to strand the keyboard — Escape cancelled, but
+ * committing meant reaching for the mouse to click "Save & approve" / "Save note". The fix must
+ * (a) let Cmd/Ctrl+Enter submit through the SAME function the button calls, in both the spec and
+ * PR branches, so button and shortcut can never diverge; (b) leave bare Enter alone, since these
+ * are multi-line bodies; and (c) advertise the shortcut next to the buttons it duplicates. */
+test('U3: Cmd/Ctrl+Enter submits the comment editor via the same path as the Save button', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+
+  // The submit chord lives in exactly one place — both textareas wire onkeydown through it — so a
+  // future edit to one branch cannot silently leave the other without a keyboard submit.
+  const keydownBody = fnBody(ui, 'function commentEditTaKeydown(');
+  assert.match(keydownBody, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/,
+    'commentEditTaKeydown must require Cmd OR Ctrl with Enter — accepting either is what makes '
+    + 'this work on macOS and elsewhere without platform sniffing');
+  assert.match(keydownBody, /e\.preventDefault\(\)/,
+    'the chord must preventDefault, or the newline is inserted in addition to submitting');
+  assert.match(keydownBody, /e\.key === 'Escape'/,
+    'Escape must still be handled by the shared handler, so cancel behaviour cannot regress');
+
+  // Bare Enter must never reach a submit call on its own — only the guarded chord above may. If a
+  // regression added an unconditional `if (e.key === 'Enter')` branch, this would catch it.
+  assert.ok(!/e\.key === 'Enter'\)/.test(keydownBody.replace(/e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/, '')),
+    'bare Enter (no modifier) must not be wired to submit — these are multi-line bodies');
+
+  // commentEditTaKeydown must be the ONLY place in the app that binds this chord: if a second,
+  // divergent binding shows up (e.g. someone hand-rolls the condition again on a new textarea)
+  // this count moves, which is the drift this unit exists to prevent.
+  const chordSites = (ui.match(/e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/g) || []).length;
+  assert.equal(chordSites, 1, 'the Cmd/Ctrl+Enter condition must be defined once and reused');
+
+  const formBody = fnBody(ui, 'function commentEditForm(');
+  // Spec branch (note textarea): the button's onclick and the textarea's onkeydown must call the
+  // exact same function reference, not two separate calls into saveSpecNote — otherwise a future
+  // edit to one could change what gets saved without touching the other.
+  assert.match(formBody, /onkeydown:\s*commentEditTaKeydown\(cancel,\s*submitNote\)/,
+    'the spec-branch textarea must route Cmd/Ctrl+Enter through the same submitNote used by the button');
+  assert.match(formBody, /onclick:\s*submitNote\s*\}/,
+    'the "Save note" button must call submitNote, the same function the keyboard shortcut calls');
+
+  // PR branch (proposed-comment textarea): same requirement, via submitComment.
+  assert.match(formBody, /onkeydown:\s*commentEditTaKeydown\(cancel,\s*submitComment\)/,
+    'the PR-branch textarea must route Cmd/Ctrl+Enter through the same submitComment used by the button');
+  assert.match(formBody, /onclick:\s*submitComment\s*\}/,
+    'the "Save & approve" button must call submitComment, the same function the keyboard shortcut calls');
+
+  // Discoverability: the shortcut hint must actually be rendered next to both action rows, not
+  // just exist in code with nothing pointing at it (the U-5 register this unit follows).
+  const hintSites = (formBody.match(/saveKbdHint\(\)/g) || []).length;
+  assert.equal(hintSites, 2, 'saveKbdHint() must be rendered in both the spec and PR action rows');
+
+  // The global decide-loop handler must remain blind to this chord: it already refuses to fire
+  // while any modifier is held, which is what stops Cmd/Ctrl+Enter from also being read as a
+  // one-letter decide-loop key while the editor is open. If that guard is ever narrowed to only
+  // cover a subset of modifiers, this chord would start leaking into the decide loop.
+  const docKeydown = ui.slice(ui.indexOf("document.addEventListener('keydown'"));
+  assert.match(docKeydown, /!e\.metaKey && !e\.ctrlKey && !e\.altKey/,
+    'the decide-loop branch must still exclude all modifier keys, so Cmd/Ctrl+Enter can never '
+    + 'be misread as a one-letter decision');
+});
+
 test('NEW-3: route() disarms both finish-screen confirms on every navigation', () => {
   const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
   const body = fnBody(ui, 'function route(');

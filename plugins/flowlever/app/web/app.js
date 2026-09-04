@@ -1198,6 +1198,32 @@ function suggestionSection(kind, f) {
       : h('p', {}, h('span', { class: 'meta-dim' }, '(no comment text yet — use Edit)')));
 }
 
+/* U-3: submitting an edited comment needs the keyboard, not just the "Save" button — editing a
+ * too-long comment is the single most common action in the stepper, so reaching for the mouse
+ * here breaks the keyboard-driven loop exactly where it is used most. Bare Enter must still insert
+ * a newline (these are multi-line bodies), so the submit chord requires a modifier; either Cmd or
+ * Ctrl is accepted so the same handler works on macOS and elsewhere without platform sniffing. The
+ * glyph shown in the hint is the ONLY platform-specific bit — it is cosmetic, derived once here, and
+ * can never cause the hint to advertise a chord the handler doesn't accept (the handler takes both).
+ */
+const SAVE_SHORTCUT_MOD = /Mac|iPhone|iPod|iPad/.test(navigator.platform || navigator.userAgent || '') ? '⌘' : 'Ctrl';
+const SAVE_SHORTCUT_LABEL = `${SAVE_SHORTCUT_MOD}+Enter`;
+
+function saveKbdHint() {
+  return h('span', { class: 'save-kbd-hint', title: 'Submit without leaving the keyboard' },
+    h('kbd', {}, SAVE_SHORTCUT_LABEL), ' to save');
+}
+
+/* Shared by both textareas below: Escape cancels (unchanged), and Cmd/Ctrl+Enter submits via the
+ * SAME callback the Save button calls, so the button and the shortcut can never diverge. Plain
+ * Enter is left alone so it still inserts a newline. */
+function commentEditTaKeydown(cancel, submit) {
+  return (e) => {
+    if (e.key === 'Escape') { cancel(); return; }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
+  };
+}
+
 function commentEditForm(kind, f) {
   function cancel() { state.flow.editingComment = null; state.flow.editingKind = null; reviewRefresh(); }
 
@@ -1206,13 +1232,14 @@ function commentEditForm(kind, f) {
   // The note persists on the finding (finding.note); the suggestion is left untouched.
   if (kind === 'spec') {
     const decKind = state.flow.editingKind === 'redirect' ? 'redirect' : 'edit';
+    const submitNote = () => saveSpecNote(f.fp, ta.value, decKind);
     const ta = h('textarea', {
       class: 'comment-edit-ta', rows: '4', spellcheck: 'true',
       'aria-label': 'Your note / response',
       placeholder: decKind === 'redirect'
         ? "Why is this the wrong fix, or where/how should it be done instead? (your counter)"
         : "Your note: what to change about the suggestion, or your answer if it asks for clarification.",
-      onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
+      onkeydown: commentEditTaKeydown(cancel, submitNote),
     });
     ta.value = f.note || '';
     const form = h('div', { class: 'comment-edit' },
@@ -1222,25 +1249,28 @@ function commentEditForm(kind, f) {
       h('span', { class: 'f-suglabel' }, decKind === 'redirect' ? 'Your counter / answer' : 'Your note / answer'),
       ta,
       h('div', { class: 'comment-edit-actions' },
-        h('button', { class: 'btn btn-accent', type: 'button', onclick: () => saveSpecNote(f.fp, ta.value, decKind) }, 'Save note'),
-        h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel')));
+        h('button', { class: 'btn btn-accent', type: 'button', onclick: submitNote }, 'Save note'),
+        h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel'),
+        saveKbdHint()));
     requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
     return form;
   }
 
   // PR: the suggestion IS the proposed comment, so editing it inline is the intent.
+  const submitComment = () => saveComment(f.fp, ta.value);
   const ta = h('textarea', {
     class: 'comment-edit-ta', rows: '5', spellcheck: 'true',
     'aria-label': `${suggestionLabel(kind)} — editing`,
-    onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
+    onkeydown: commentEditTaKeydown(cancel, submitComment),
   });
   ta.value = f.suggestion || '';
   const form = h('div', { class: 'comment-edit proposed-comment' },
     h('span', { class: 'f-suglabel' }, `${suggestionLabel(kind)} — editing`),
     ta,
     h('div', { class: 'comment-edit-actions' },
-      h('button', { class: 'btn btn-accent', type: 'button', onclick: () => saveComment(f.fp, ta.value) }, 'Save & approve'),
-      h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel')));
+      h('button', { class: 'btn btn-accent', type: 'button', onclick: submitComment }, 'Save & approve'),
+      h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel'),
+      saveKbdHint()));
   requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
   return form;
 }
