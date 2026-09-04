@@ -136,6 +136,8 @@ a { color: inherit; text-decoration: none; }
 /* ============================== topbar ============================== */
 
 .topbar {
+  /* `top` is overwritten inline by restackBanners() while any .top-banner is up: the banners are
+     sticky at a higher z-index and would otherwise paint over this whole 56px header. */
   position: sticky; top: 0; z-index: 50;
   display: flex; align-items: center; flex-wrap: wrap; row-gap: 6px;
   min-height: 56px; padding: 8px 24px;
@@ -604,6 +606,10 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   border-radius: 5px; padding: 1px 6px;
 }
 .stale-server-dismiss { flex: none; }
+/* #server-unreachable (heartbeat missed HEARTBEAT_FAIL_THRESHOLD times) and #server-restarted
+   (the process behind this tab changed) reuse this same bar: same alert color, same layout, their
+   own ids so all three can be up at once (JS stacks them via restackBanners()/.top-banner). */
+.stale-server-reload { flex: none; }
 
 /* ============================== review scope note ============================== */
 
@@ -1071,6 +1077,10 @@ body.modal-open { overflow: hidden; }
 .rail-item.decided.dec-skip .rail-mark { background: var(--fg-mute); }
 .rail-item.decided.dec-waive .rail-mark { background: var(--major); }
 .rail-item.decided.dec-redirect .rail-mark { background: var(--major); }
+/* Without this the generic `.rail-item.decided .rail-mark` rule above wins and paints a
+ * rejected finding with the same green "done/approved" background as an actual Approve —
+ * exactly the false impression this whole fix exists to prevent. */
+.rail-item.decided.dec-reject .rail-mark { background: var(--blocker); }
 .rail-item.decided.dec-fixonly .rail-mark, .rail-item.decided.dec-fix-only .rail-mark { background: var(--ready); }
 .rail-sev { flex: none; font-size: 11px; }
 /* Two lines, not one truncated one: finding titles are labels but still run past the rail's
@@ -1170,6 +1180,11 @@ body.modal-open { overflow: hidden; }
 .triage-tag.triage-edit { color: var(--edit-fg); border-color: var(--major-line); background: var(--major-soft); }
 .triage-tag.triage-redirect { color: var(--edit-fg); border-color: var(--major-line); background: var(--major-soft); }
 .triage-tag.triage-waive { color: var(--del-fg); border-color: var(--blocker-line); background: var(--blocker-soft); }
+/* Same blocker palette as .dec-pill.dec-reject — without this rule `.triage-reject` fell through
+ * to no color rule at all, so a rejected card's own triage tag rendered identically to a genuinely
+ * undecided one (indistinguishable grey) even after the label text itself was fixed to say
+ * "Rejected" instead of "Undecided". */
+.triage-tag.triage-reject { color: var(--del-fg); border-color: var(--blocker-line); background: var(--blocker-soft); }
 .triage-tag.triage-undecided { color: var(--fg-mute); }
 
 .dec-undo {
@@ -1204,7 +1219,14 @@ body.modal-open { overflow: hidden; }
   background: var(--panel); color: var(--fg);
 }
 .comment-edit-ta:focus { outline: none; border-color: var(--accent); }
-.comment-edit-actions { display: flex; gap: 8px; margin-top: 8px; }
+.comment-edit-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+/* Discoverability for the comment-editor save shortcut (U-3), same pattern as .step-kbd-hint:
+ * shown right next to the buttons it duplicates so it's never mistaken for the only way to save. */
+.save-kbd-hint { font-size: 11px; color: var(--fg-mute); white-space: nowrap; }
+.save-kbd-hint kbd {
+  font-family: var(--mono); font-size: 10.5px; background: var(--panel-3); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 5px; color: var(--fg-dim);
+}
 
 .btn-post { font-weight: 640; }
 
@@ -1238,8 +1260,29 @@ body.modal-open { overflow: hidden; }
 .finish-tally .num { font-family: var(--mono); font-weight: 800; }
 .finish-tally.t-accept { color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft); }
 .finish-tally.t-edit, .finish-tally.t-redirect { color: var(--edit-fg); border-color: var(--major-line); background: var(--major-soft); }
-.finish-tally.t-waive { color: var(--del-fg); border-color: var(--blocker-line); background: var(--blocker-soft); }
+/* Same blocker/del-fg pairing the app already uses for a `reject` verdict everywhere else
+ * (.verdict-btn-reject, .rm-verdict-banner.verdict-reject, .f-verdict-reject). `t-reject` is kept
+ * as its own class rather than folded into `t-waive` — Reject (refusing a proposed change) and
+ * Waive (dismissing the finding) are different reviewer intents and the class names must not
+ * conflate them — but the two currently render pixel-identical: this rule assigns them the exact
+ * same three values on purpose, not merely a similar palette, because there's no visual need yet
+ * to tell them apart on this particular pill. Give `.t-reject` its own values here first if that
+ * ever needs to change. */
+.finish-tally.t-waive, .finish-tally.t-reject { color: var(--del-fg); border-color: var(--blocker-line); background: var(--blocker-soft); }
 .finish-tally.t-skip { color: var(--fg-mute); }
+
+/* Bulk-approve control (U-2): sits right under the tallies it acts on, deliberately styled like
+ * a plain secondary button (not btn-accent) so it doesn't visually compete with the Post button
+ * further down the page — this decides findings, it never sends anything. */
+.approve-all-btn {
+  align-self: flex-start; margin-top: 4px;
+  color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft);
+}
+.approve-all-btn:hover { border-color: var(--ready); background: var(--ready-soft); }
+.approve-all-confirm {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px;
+}
+.approve-all-confirm-msg { font-size: 12px; color: var(--fg-dim); font-weight: 560; }
 
 .finish-group {
   border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel);
@@ -1266,7 +1309,7 @@ body.modal-open { overflow: hidden; }
 .dec-pill.dec-accept { color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft); }
 .dec-pill.dec-edit, .dec-pill.dec-redirect { color: var(--edit-fg); border-color: var(--major-line); background: var(--major-soft); }
 .dec-pill.dec-fixonly, .dec-pill.dec-fix-only, .f-dec-chip.dec-fixonly, .f-dec-chip.dec-fix-only { color: var(--add-fg); border-color: var(--ready-line); background: var(--ready-soft); }
-.dec-pill.dec-waive { color: var(--del-fg); border-color: var(--blocker-line); background: var(--blocker-soft); }
+.dec-pill.dec-waive, .dec-pill.dec-reject { color: var(--del-fg); border-color: var(--blocker-line); background: var(--blocker-soft); }
 .dec-pill.dec-skip { color: var(--fg-mute); }
 
 .finish-actions {

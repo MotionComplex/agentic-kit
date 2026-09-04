@@ -40,6 +40,29 @@ Every review comment must be anchored to a specific file/line range. If a commen
 have a code anchor, it belongs in the PR description or a separate discussion — not as a
 review comment.
 
+## Length
+
+**≤300 characters, ≤2 sentences.** In order: the label, then the ask, then at most one clause
+of consequence — then stop. The ask goes first; never build up to it through a paragraph of
+reasoning.
+
+- **Say it once.** If a sentence restates the previous one, cut it.
+- **No scene-setting.** Don't recap the PR, the file, or the author's own change back to them.
+- **Plain words, precise specifics.** Keep the identifier, file and number exact; write "this
+  passes when the list is empty", not "exhibits a vacuous-pass boundary condition".
+- **Split, don't stack.** A comment needing more than 300 characters is usually two findings —
+  file each on its own anchor.
+
+> `issue: Looking at this part of the diff, the retry loop here doesn't have any kind of
+> ceiling on it, so if the endpoint keeps failing forever, this is going to keep retrying
+> forever too, which could end up hammering the service and making the outage worse instead
+> of better. Probably want some kind of max-attempts check before it loops back around.`
+> — 365 characters; scene-setting first, the ask arrives in sentence two.
+
+> `issue (blocking): Cap retries — `if (retryCount >= MAX_RETRIES) return;` — or a
+> persistently failing endpoint retries forever.`
+> — 126 characters; label, ask, one clause of consequence.
+
 ## Confidence floor
 
 If you're not sure a piece of code is wrong, raise it as a `question`, not an `issue`.

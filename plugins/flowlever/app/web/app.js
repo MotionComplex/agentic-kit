@@ -661,8 +661,9 @@ function reviewWait(data) {
 
 /* Build the review-flow decision map from PERSISTED finding state, so a decision taken on
  * ANY surface (board modal or the stepper) shows everywhere and survives a page refresh:
- * a waived finding reads as Dismissed, a stored `decision` as Approve/Edit, the rest
- * Undecided. The in-memory flow map is just a cache hydrated from this. */
+ * a waived finding reads as Dismissed, a stored `decision` as Approve/Edit, an explicit
+ * redirect/reject verdict as its own kind, the rest Undecided. The in-memory flow map is
+ * just a cache hydrated from this. */
 function hydrateDecisions(findings) {
   const d = {};
   for (const f of findings || []) {
@@ -677,7 +678,15 @@ function hydrateDecisions(findings) {
       const rv = f.draft && f.draft.review;
       if (!rv) continue;
       if (rv.verdict === 'redirect') { d[f.fp] = { kind: 'redirect', reason: rv.note || '' }; continue; }
-      if (rv.verdict === 'reject') continue;   // an explicit "don't apply" stays undecided here
+      // A `reject` verdict is the reviewer explicitly saying "don't apply this proposed
+      // change" — that IS a decision, not an absence of one. Leaving it out of `d` (as this
+      // used to) made it fall back to Undecided everywhere flowDecisionKind() is read, which
+      // meant approveAllRemaining's undecidedFlowFps() scooped it up and silently rewrote a
+      // considered Reject back to `proposed` + accepted hunks. Recording it as its own kind
+      // here — the same move already made for `redirect` two lines up — fixes it at the one
+      // place every consumer (undecided set, finish tally, rail marks, triage tags) reads from,
+      // instead of teaching each consumer a second, separate notion of "decided".
+      if (rv.verdict === 'reject') { d[f.fp] = { kind: 'reject', reason: rv.note || '' }; continue; }
       const hunkDecs = rv.hunks || {};
       const statuses = draftStats(f).hunks.map((hk) => (hunkDecs[String(hk.id)] || {}).status);
       if (statuses.length && statuses.every((s) => s === 'accepted' || s === 'edited')) {
@@ -840,7 +849,12 @@ function decisionActions(kind) {
       editsComment: true,
       quickDismiss: true,
       helper: 'Approved comments are posted only when you click Post — nothing is sent until then.',
-      tagLabels: { accept: 'Will post', edit: 'Edited', waive: 'Dismissed', undecided: 'Undecided' },
+      // `reject` is missing here for the same reason DEC_PILL['pr-review'] needed it (app.js:~903):
+      // hydrateDecisions now records a `reject` verdict as its own decided kind, so decisionRow's
+      // `cfg.tagLabels[decKind] || cfg.tagLabels.undecided` falls through to the literal word
+      // "Undecided" for a card that is very much decided — the reviewer's own reject verdict,
+      // shown right above it as a red banner, contradicted by its own triage tag.
+      tagLabels: { accept: 'Will post', edit: 'Edited', waive: 'Dismissed', reject: 'Rejected', undecided: 'Undecided' },
       // The card is already headed "Proposed comment" — repeating the noun in every button
       // only widened them. Labels stay one word each so the k/a/e/w hint reads the same.
       buttons: [
@@ -855,9 +869,13 @@ function decisionActions(kind) {
       label: 'Decision',
       helper: 'Replies and fixes are sent only when you click Post — nothing is sent until then. '
         + '“Fix only” pushes the fix and resolves the thread without writing a reply.',
+      // `reject` added alongside `redirect` above for the same reason pr-review's tagLabels
+      // needed it: hydrateDecisions can hand this surface a `reject`-kind decision purely from a
+      // draft verdict, with no dedicated button behind it, so leaving it out of a kind-keyed
+      // label map is a silent "Undecided" mislabel, not a compile error.
       tagLabels: {
         accept: 'Will reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply',
-        redirect: 'Push back', skip: 'Skipped', undecided: 'Undecided',
+        redirect: 'Push back', reject: 'Rejected', skip: 'Skipped', undecided: 'Undecided',
       },
       buttons: [
         { kind: 'accept', label: '↩ Reply', cls: 'dec-accept' },
@@ -886,8 +904,19 @@ function decisionActions(kind) {
   };
 }
 
-const DEC_LABEL = { accept: 'Apply', edit: 'With edits', 'fix-only': 'Fix, no reply', redirect: 'Redirect', waive: 'Waive', skip: 'Skip' };
-const RAIL_MARK = { accept: '✓', edit: '✎', 'fix-only': '✎', redirect: '⤳', waive: '⊘', skip: '–' };
+// `reject` sits next to `redirect` in both maps below for the same reason: hydrateDecisions can
+// derive either kind purely from a draft verdict (no dedicated decide() button backs it), so
+// wherever `redirect` is wired into a shared, kind-agnostic display map, `reject` needs the same
+// entry or it silently falls back to an unstyled/blank rendering (or the wrong glyph) for a state
+// that is now genuinely "decided".
+const DEC_LABEL = { accept: 'Apply', edit: 'With edits', 'fix-only': 'Fix, no reply', redirect: 'Redirect', reject: 'Reject', waive: 'Waive', skip: 'Skip' };
+// `reject` uses the hairline `⊗` here, not the colour '🚫' emoji used elsewhere (VERDICT_GLYPH,
+// the verdict buttons): every other mark in this set (✓ ✎ ⤳ ⊘ –) is a plain glyph that inherits
+// `.rail-mark`'s `color`, so it renders crisp against the red dec-reject background. An emoji
+// carries its own fixed colours regardless of CSS `color` and rendered as a dark blob on that red
+// chip instead of a mark — the exact inconsistency the comment above `decisionActions` (app.js:
+// ~884-885) already calls out for this set.
+const RAIL_MARK = { accept: '✓', edit: '✎', 'fix-only': '✎', redirect: '⤳', reject: '⊗', waive: '⊘', skip: '–' };
 
 async function renderReviewFlow(id, finish) {
   current.view = 'review-flow'; current.id = id; current.tab = 'review';
@@ -1169,6 +1198,32 @@ function suggestionSection(kind, f) {
       : h('p', {}, h('span', { class: 'meta-dim' }, '(no comment text yet — use Edit)')));
 }
 
+/* U-3: submitting an edited comment needs the keyboard, not just the "Save" button — editing a
+ * too-long comment is the single most common action in the stepper, so reaching for the mouse
+ * here breaks the keyboard-driven loop exactly where it is used most. Bare Enter must still insert
+ * a newline (these are multi-line bodies), so the submit chord requires a modifier; either Cmd or
+ * Ctrl is accepted so the same handler works on macOS and elsewhere without platform sniffing. The
+ * glyph shown in the hint is the ONLY platform-specific bit — it is cosmetic, derived once here, and
+ * can never cause the hint to advertise a chord the handler doesn't accept (the handler takes both).
+ */
+const SAVE_SHORTCUT_MOD = /Mac|iPhone|iPod|iPad/.test(navigator.platform || navigator.userAgent || '') ? '⌘' : 'Ctrl';
+const SAVE_SHORTCUT_LABEL = `${SAVE_SHORTCUT_MOD}+Enter`;
+
+function saveKbdHint() {
+  return h('span', { class: 'save-kbd-hint', title: 'Submit without leaving the keyboard' },
+    h('kbd', {}, SAVE_SHORTCUT_LABEL), ' to save');
+}
+
+/* Shared by both textareas below: Escape cancels (unchanged), and Cmd/Ctrl+Enter submits via the
+ * SAME callback the Save button calls, so the button and the shortcut can never diverge. Plain
+ * Enter is left alone so it still inserts a newline. */
+function commentEditTaKeydown(cancel, submit) {
+  return (e) => {
+    if (e.key === 'Escape') { cancel(); return; }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
+  };
+}
+
 function commentEditForm(kind, f) {
   function cancel() { state.flow.editingComment = null; state.flow.editingKind = null; reviewRefresh(); }
 
@@ -1177,13 +1232,14 @@ function commentEditForm(kind, f) {
   // The note persists on the finding (finding.note); the suggestion is left untouched.
   if (kind === 'spec') {
     const decKind = state.flow.editingKind === 'redirect' ? 'redirect' : 'edit';
+    const submitNote = () => saveSpecNote(f.fp, ta.value, decKind);
     const ta = h('textarea', {
       class: 'comment-edit-ta', rows: '4', spellcheck: 'true',
       'aria-label': 'Your note / response',
       placeholder: decKind === 'redirect'
         ? "Why is this the wrong fix, or where/how should it be done instead? (your counter)"
         : "Your note: what to change about the suggestion, or your answer if it asks for clarification.",
-      onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
+      onkeydown: commentEditTaKeydown(cancel, submitNote),
     });
     ta.value = f.note || '';
     const form = h('div', { class: 'comment-edit' },
@@ -1193,25 +1249,28 @@ function commentEditForm(kind, f) {
       h('span', { class: 'f-suglabel' }, decKind === 'redirect' ? 'Your counter / answer' : 'Your note / answer'),
       ta,
       h('div', { class: 'comment-edit-actions' },
-        h('button', { class: 'btn btn-accent', type: 'button', onclick: () => saveSpecNote(f.fp, ta.value, decKind) }, 'Save note'),
-        h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel')));
+        h('button', { class: 'btn btn-accent', type: 'button', onclick: submitNote }, 'Save note'),
+        h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel'),
+        saveKbdHint()));
     requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
     return form;
   }
 
   // PR: the suggestion IS the proposed comment, so editing it inline is the intent.
+  const submitComment = () => saveComment(f.fp, ta.value);
   const ta = h('textarea', {
     class: 'comment-edit-ta', rows: '5', spellcheck: 'true',
     'aria-label': `${suggestionLabel(kind)} — editing`,
-    onkeydown: (e) => { if (e.key === 'Escape') cancel(); },
+    onkeydown: commentEditTaKeydown(cancel, submitComment),
   });
   ta.value = f.suggestion || '';
   const form = h('div', { class: 'comment-edit proposed-comment' },
     h('span', { class: 'f-suglabel' }, `${suggestionLabel(kind)} — editing`),
     ta,
     h('div', { class: 'comment-edit-actions' },
-      h('button', { class: 'btn btn-accent', type: 'button', onclick: () => saveComment(f.fp, ta.value) }, 'Save & approve'),
-      h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel')));
+      h('button', { class: 'btn btn-accent', type: 'button', onclick: submitComment }, 'Save & approve'),
+      h('button', { class: 'btn', type: 'button', onclick: cancel }, 'Cancel'),
+      saveKbdHint()));
   requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
   return form;
 }
@@ -1329,7 +1388,47 @@ function decisionRow(data, f) {
     : row;
 }
 
+/* Undo a `reject`/`redirect` decision by resetting the draft verdict itself back to `proposed`,
+ * through the same endpoint the verdict control uses (setVerdict/reviewNoteSection, app.js:
+ * ~4549/~4517) — preserving `draft.review.note`, since that's the reviewer's own written
+ * rationale and Undo only withdraws the decision, not their words. Without this, undecide()
+ * only ever cleared the LOCAL state.flow.decisions entry and the (irrelevant, for these two
+ * kinds) top-level `decision` field, leaving the ledger's `verdict` still `reject`/`redirect`
+ * while the card read "Undecided" — exactly the gap `approveAllRemaining`'s undecidedFlowFps()
+ * swept into a silent approve (NEW-1). Reports failure via markPersisted/toast, same as every
+ * other persist helper here, so a dropped write shows "not saved — retry" instead of the UI and
+ * ledger quietly disagreeing. */
+async function resetVerdictToProposed(fp) {
+  const f = findFinding(fp);
+  if (!f || !f.draft) { markPersisted(fp, true); return true; }
+  const prev = f.draft.review ? structuredClone(f.draft.review) : undefined;
+  const cur = f.draft.review || {};
+  f.draft.review = { ...cur, hunks: cur.hunks || {}, verdict: 'proposed', updatedAt: new Date().toISOString() };
+  reviewRefresh();
+  try {
+    await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(fp)}/draft/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verdict: 'proposed' }),
+    });
+    markPersisted(fp, true);
+    return true;
+  } catch (e) {
+    // The write failed, so the ledger still holds the old verdict — roll the local copy back to
+    // match it rather than let the UI claim a reset that didn't happen.
+    if (prev === undefined) delete f.draft.review; else f.draft.review = prev;
+    toast(`Could not clear the ${prev && prev.verdict} verdict: ${e.message} — it will show as "not saved" until you retry`);
+    markPersisted(fp, false);
+    reviewRefresh();
+    return false;
+  }
+}
+
 async function undecide(f) {
+  const wasDec = state.flow.decisions[f.fp];
+  // `reject`/`redirect` are decided purely via draft.review.verdict (hydrateDecisions, app.js:
+  // ~689) — there is no top-level `decision` field backing them, so the `{decision:null}` POST
+  // below is a no-op for these two kinds and Undo needs the extra step below to actually undo.
+  const verdictDerived = wasDec && (wasDec.kind === 'reject' || wasDec.kind === 'redirect');
   delete state.flow.decisions[f.fp];
   state.flow.waiving = null;
   state.flow.editingComment = null;
@@ -1343,6 +1442,7 @@ async function undecide(f) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    if (verdictDerived && !(await resetVerdictToProposed(f.fp))) return;   // already toasted + flagged + re-rendered
     await loadDetail(current.id, true);
   } catch (e) {
     toast(`Could not clear decision: ${e.message}`);
@@ -1523,8 +1623,12 @@ function markPersisted(fp, ok) {
 /* Persist a triage decision (approve/edit, or null to clear) onto the finding so the board,
  * stepper and Post screen stay in sync and it survives a refresh. Optimistic, then reloads.
  * Returns whether the server actually accepted it — callers must not advance/report success
- * on a false return (U-2). */
-async function persistDecisionField(fp, decision) {
+ * on a false return (U-2).
+ * `reload:false` skips the loadDetail() round-trip this call would otherwise do on its own —
+ * used by approveAllRemaining, which persists many findings and would otherwise turn one bulk
+ * action into N sequential GETs; that caller does exactly one reload itself once every write
+ * has settled. Every other caller keeps the default (reload after this one write) unchanged. */
+async function persistDecisionField(fp, decision, { reload = true } = {}) {
   const cur = findFinding(fp);
   if (cur) { if (decision) cur.decision = decision; else delete cur.decision; }
   try {
@@ -1532,12 +1636,12 @@ async function persistDecisionField(fp, decision) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ decision }),
     });
-    await loadDetail(current.id, true);
+    if (reload) await loadDetail(current.id, true);
     markPersisted(fp, true);
     return true;
   } catch (e) {
     toast(`Could not save decision: ${e.message} — it will show as "not saved" until you retry`);
-    try { await loadDetail(current.id, true); } catch { /* keep optimistic */ }
+    if (reload) { try { await loadDetail(current.id, true); } catch { /* keep optimistic */ } }
     markPersisted(fp, false);
     return false;
   }
@@ -1571,20 +1675,26 @@ async function persistWaive(fp, reason) {
  * disturbing the reviewer's position. */
 async function retryPersist(fp) {
   const dec = state.flow.decisions[fp];
-  if (!dec) return;
-  if (dec.kind === 'accept') await persistDecisionField(fp, 'approve');
-  else if (dec.kind === 'fix-only') await persistDecisionField(fp, 'fix-only');
-  else if (dec.kind === 'waive') await persistWaive(fp, dec.reason || 'dismissed');
-  else { delete state.flow.persistFailed[fp]; }   // decisions with no direct persist call (edit/redirect/skip)
+  const f = findFinding(fp);
+  if (dec && dec.kind === 'accept') await persistDecisionField(fp, 'approve');
+  else if (dec && dec.kind === 'fix-only') await persistDecisionField(fp, 'fix-only');
+  else if (dec && dec.kind === 'waive') await persistWaive(fp, dec.reason || 'dismissed');
+  // undecide() already deleted `dec` before this can fail (NEW-1: resetVerdictToProposed rolls
+  // f.draft.review back to its pre-reset verdict on failure) — so the only signal left that an
+  // Undo's verdict-reset is what needs retrying is the rolled-back verdict itself.
+  else if (!dec && f && ['reject', 'redirect'].includes(draftVerdict(f))) await resetVerdictToProposed(fp);
+  else { delete state.flow.persistFailed[fp]; }   // decisions with no direct persist call (edit/redirect/reject/skip)
   reviewRefresh();
 }
 
 /* Accept the whole proposal: mark every hunk accepted + verdict proposed, in one
- * merged POST. Optimistic, then reconciled from the server. */
-async function acceptAll(f) {
+ * merged POST. Optimistic, then reconciled from the server.
+ * `reload:false` (see persistDecisionField above) — approveAllRemaining calls this once per
+ * undecided finding and does its own single reload afterward instead of one per finding. */
+async function acceptAll(f, { reload = true } = {}) {
   // Suggestion-only finding (no code-diff draft): the approval is the decision —
   // there's nothing to persist server-side until the Post step.
-  if (!f.draft) { reviewRefresh(); return; }
+  if (!f.draft) { if (reload) reviewRefresh(); return; }
   const { hunks } = draftStats(f);
   const hunkObj = {};
   for (const hk of hunks) hunkObj[String(hk.id)] = { status: 'accepted', at: new Date().toISOString() };
@@ -1592,18 +1702,106 @@ async function acceptAll(f) {
   if (cur && cur.draft) {
     cur.draft.review = { ...(cur.draft.review || {}), hunks: hunkObj, verdict: 'proposed', updatedAt: new Date().toISOString() };
   }
-  reviewRefresh();
+  if (reload) reviewRefresh();
   try {
     const body = hunks.length ? { hunks: hunkObj, verdict: 'proposed' } : { verdict: 'proposed' };
     await api(`/api/features/${encodeURIComponent(current.id)}/findings/${encodeURIComponent(f.fp)}/draft/review`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    await loadDetail(current.id, true);
+    if (reload) await loadDetail(current.id, true);
   } catch (e) {
     toast(`Accept failed: ${e.message}`);
-    try { await loadDetail(current.id, true); } catch { /* keep optimistic state */ }
+    if (reload) { try { await loadDetail(current.id, true); } catch { /* keep optimistic state */ } }
   }
-  reviewRefresh();
+  if (reload) reviewRefresh();
+}
+
+/* A finding is "currently undecided" iff nothing was ever recorded for it in
+ * state.flow.decisions — NOT flowDecisionKind(fp) === 'skip'. flowDecisionKind() falls back to
+ * 'skip' for exactly this empty case, but pr-respond/spec workspaces also have a real, explicit
+ * Skip button that calls setFlowDecision(fp, 'skip') and lands in the SAME 'skip' bucket. Treating
+ * that as "undecided" would let approveAllRemaining silently overturn a reviewer's considered
+ * Skip — the same mistake the unit exists to rule out for Dismiss/Edit/Redirect/Waive. Checking
+ * the decisions map directly is the only way to tell "never touched" apart from "decided: skip". */
+function undecidedFlowFps() {
+  return (state.flow.items || []).filter((fp) => !state.flow.decisions[fp]);
+}
+
+/* Bulk-clear an obvious batch of PR-review findings in one confirmed action, instead of costing
+ * one visit per finding through the stepper (U-2: no bulk action existed anywhere in the app).
+ * Mirrors decide()'s 'accept' branch exactly — same setFlowDecision + persistDecisionField(approve)
+ * + acceptAll(hunks/verdict) a single Approve click makes — so a reload hydrates these findings
+ * back to 'accept' via hydrateDecisions() the same way it would for any one-at-a-time approval.
+ * The only difference from N single Approves is that every write here passes reload:false and the
+ * function does ONE loadDetail() at the end: there is no bulk decision-write endpoint on the
+ * server (only /review/apply, which bulk-sets finding *status* for the post/apply hand-off, not
+ * the `decision` field an Approve writes), and standing up a new endpoint just to collapse a
+ * handful of requests into one wasn't worth the added server surface for this unit.
+ * Never touches an already-decided finding: only undecidedFlowFps() is ever passed to
+ * setFlowDecision here. It must NEVER be called except from the confirmed step in
+ * approveAllControl — this posts nothing (no /review/apply, no enqueueApply), it only records
+ * decisions the separate, explicit Post click still has to act on. */
+async function approveAllRemaining(data) {
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  if (kind !== 'pr-review') return;   // scoped to pr-review's Approve/Edit/Dismiss triage
+  const fps = undecidedFlowFps();
+  if (!fps.length) return;
+  state.flow.bulkApproving = true;
+  // try/finally: if anything in here throws unexpectedly (the initial render below,
+  // setFlowDecision, a later render, whatever), bulkApproving must still come back down. Without
+  // it the control is stuck reading "Approving…" — disabled, dead — until the page is reloaded,
+  // over one bad write. The initial renderFlowInto() call used to sit OUTSIDE this try, so a
+  // throw during THAT render left bulkApproving stuck true with the finally never reached.
+  try {
+    renderFlowInto();
+    for (const fp of fps) setFlowDecision(fp, 'accept');   // optimistic, same as a single Approve
+    await Promise.allSettled(fps.map(async (fp) => {
+      const ok = await persistDecisionField(fp, 'approve', { reload: false });
+      if (!ok) return;   // markPersisted(fp, false) already flagged it — the "not saved" retry picks it up
+      const f = findFinding(fp);
+      if (f) await acceptAll(f, { reload: false });
+    }));
+    try { await loadDetail(current.id, true); } catch { /* per-item persistFailed flags already stand */ }
+  } finally {
+    state.flow.bulkApproving = false;
+    state.flow.confirmApproveAll = false;
+    renderFlowInto();
+  }
+}
+
+/* The finish screen's bulk-triage control: sits under the tallies row (a triage action, reviewed
+ * alongside the counts it changes) and deliberately far from postActionEl's Post button below —
+ * this decides findings, it never sends anything, and must not be mistaken for the posting step.
+ * Renders nothing when there is nothing undecided, so it can never read as an invitation to
+ * "approve" a batch that's already been triaged. Requires an inline two-step confirm (matching
+ * stepWaiveForm's pattern) before it writes anything, because a single click here can approve
+ * many PR comments that a LATER click posts for real — window.confirm is banned in this app, so
+ * the confirmation is built the same way every other one here is: with h(). */
+function approveAllControl(data) {
+  const kind = (data.feature && data.feature.kind) || 'spec';
+  if (kind !== 'pr-review') return null;
+  const fps = undecidedFlowFps();
+  if (!fps.length) return null;
+  const n = fps.length;
+  if (state.flow.confirmApproveAll) {
+    const busy = !!state.flow.bulkApproving;
+    return h('div', { class: 'approve-all-confirm' },
+      h('span', { class: 'approve-all-confirm-msg' }, `Approve ${n} remaining?`),
+      h('button', {
+        class: 'btn btn-accent', type: 'button', disabled: busy, 'aria-busy': busy ? 'true' : 'false',
+        onclick: () => approveAllRemaining(data),
+      }, busy ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : null, busy ? ' Approving…' : 'Yes'),
+      h('button', {
+        class: 'btn', type: 'button', disabled: busy,
+        onclick: () => { state.flow.confirmApproveAll = false; renderFlowInto(); },
+      }, 'Cancel'));
+  }
+  return h('button', {
+    class: 'btn approve-all-btn', type: 'button',
+    title: 'Approve every finding below still marked Undecided. It never touches a finding you '
+      + 'already Dismissed, Edited, or otherwise decided. Nothing is posted — Post stays a separate click.',
+    onclick: () => { state.flow.confirmApproveAll = true; renderFlowInto(); },
+  }, `✓ Approve ${n} remaining`);
 }
 
 /* ---- finish: the decision summary ---- */
@@ -1613,24 +1811,30 @@ function flowDecisionKind(fp) {
   return (dec && dec.kind) || 'skip';
 }
 
-/* Per-kind labels for the finish-screen decision tallies + summary pills. */
+/* Per-kind labels for the finish-screen decision tallies + summary pills.
+ * `reject` gets its own column/pill in every kind here — same reasoning as DEC_LABEL/RAIL_MARK
+ * above: hydrateDecisions now records a `reject` verdict as its own decided kind (mirroring
+ * `redirect`), so without an entry here it would either mis-render as the literal string
+ * "reject" (pill falls back to the raw key) or vanish from the tally row entirely while still
+ * counting toward the reviewed total — both read as a miscount on the one screen this bug was
+ * about. */
 const FINISH_TALLIES = {
   spec: [
     ['accept', 'Apply as proposed'], ['edit', 'Apply with edits'],
-    ['redirect', 'Redirect'], ['waive', 'Waive'], ['skip', 'Skipped'],
+    ['redirect', 'Redirect'], ['reject', 'Reject'], ['waive', 'Waive'], ['skip', 'Skipped'],
   ],
   'pr-review': [
-    ['accept', 'Approved'], ['edit', 'Edited'], ['waive', 'Dismissed'], ['skip', 'Undecided'],
+    ['accept', 'Approved'], ['edit', 'Edited'], ['reject', 'Rejected'], ['waive', 'Dismissed'], ['skip', 'Undecided'],
   ],
   'pr-respond': [
     ['accept', 'Reply'], ['edit', 'Fix + reply'], ['fix-only', 'Fix, no reply'],
-    ['redirect', 'Push back'], ['skip', 'Skipped'],
+    ['redirect', 'Push back'], ['reject', 'Rejected'], ['skip', 'Skipped'],
   ],
 };
 const DEC_PILL = {
   spec: DEC_LABEL,
-  'pr-review': { accept: 'Approved', edit: 'Edited', redirect: 'Redirect', waive: 'Dismissed', skip: 'Undecided' },
-  'pr-respond': { accept: 'Reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply', redirect: 'Push back', waive: 'Dismissed', skip: 'Skipped' },
+  'pr-review': { accept: 'Approved', edit: 'Edited', redirect: 'Redirect', reject: 'Rejected', waive: 'Dismissed', skip: 'Undecided' },
+  'pr-respond': { accept: 'Reply', edit: 'Fix + reply', 'fix-only': 'Fix, no reply', redirect: 'Push back', reject: 'Rejected', waive: 'Dismissed', skip: 'Skipped' },
 };
 
 /* The PR number for a pr-review/pr-respond workspace, read off the title (#482)
@@ -1648,7 +1852,7 @@ function finishView(data) {
   const findings = (data.ledger && data.ledger.findings) || [];
   const kind = (data.feature && data.feature.kind) || 'spec';
   const isPr = kind === 'pr-review' || kind === 'pr-respond';
-  const counts = { accept: 0, edit: 0, redirect: 0, waive: 0, skip: 0 };
+  const counts = { accept: 0, edit: 0, redirect: 0, reject: 0, waive: 0, skip: 0 };
   const byTarget = new Map();
   for (const fp of state.flow.items) {
     const f = findings.find((x) => x.fp === fp);
@@ -1669,7 +1873,11 @@ function finishView(data) {
     h('h1', {}, isPr ? 'Triage summary' : 'Decision summary'),
     h('p', { class: 'view-sub' }, `${plural(state.flow.items.length, many.replace(/s$/, ''), many)} reviewed · ${data.feature.title || current.id}`),
     h('div', { class: 'finish-tallies' },
-      tallySpecs.map(([k, label]) => tally(k, label, counts[k] || 0))));
+      tallySpecs.map(([k, label]) => tally(k, label, counts[k] || 0))),
+    // Sits under the tallies it acts on — a triage row, not a posting control. See
+    // approveAllControl's own comment for why it must stay far from postActionEl's Post button.
+    // Renders no node at all (approveAllControl returns null) when nothing is left to approve.
+    approveAllControl(data));
 
   const pillMap = DEC_PILL[kind] || DEC_LABEL;
   const groups = [...byTarget.entries()].map(([target, rows]) => h('div', { class: 'finish-group' },
@@ -1951,8 +2159,21 @@ function postActionEl(data) {
   // If a job is waiting and nothing is draining the queue, put the run control right next to the
   // status line — this is the screen the user is staring at while wondering why nothing happens.
   const needsRunner = !!latest && (latest.status === 'queued' || latest.status === 'running') && !runnerBusy();
+  // The dead end this replaces: a fresh pr-review workspace showed "Post 0 comments to PR #5843"
+  // — true, but it hands the reviewer nowhere to go. The disabled button (web/app.js:1931-ish,
+  // unchanged here) is correct; only the label above it was silent about what to do next. Only
+  // swap it in the actual dead end — postN===0 because nothing is decided yet, not because a post
+  // already ran or everything was dismissed (posted/errored/stalled/unconfirmed all have their own
+  // honest status line already, via statusLine above). pr-review gets the pointer to Approve-all
+  // (approveAllControl, above the groups) since that's the escape hatch; pr-respond has no such
+  // control, so it only names the count.
+  const undecidedN = undecidedFlowFps().length;
+  const deadEnd = postN === 0 && undecidedN > 0 && !posted && !errored && !stalled && !unconfirmed;
+  const sectionLabel = deadEnd
+    ? `${plural(undecidedN, 'finding', 'findings')} still undecided — decide them${kind === 'pr-review' ? ', or approve all above' : ''}`
+    : `${verb} — nothing is sent until you click this`;
   return h('div', { class: 'finish-post' },
-    h('div', { class: 'step-section-label' }, `${verb} — nothing is sent until you click this`),
+    h('div', { class: 'step-section-label' }, sectionLabel),
     h('div', { class: 'finish-post-row' },
       btn,
       statusLine,
@@ -1999,6 +2220,14 @@ async function persistTriage(data) {
   for (const fp of state.flow.items) {
     const k = flowDecisionKind(fp);
     if (k === 'skip') continue;                       // undecided → leave open
+    // A rejected finding must never ride the post set. `reject` only became a decision kind when
+    // hydrateDecisions started recognising the verdict (so the bulk approve-all could not silently
+    // overturn it) — and that promotion made it fall through to the `else` below, which marks
+    // items pending-post and hands them to the runner. The reviewer said "don't apply this at
+    // all"; posting a comment off the back of that is the loudest possible way to get it wrong,
+    // and the Post button never counted it, so the button and the write disagreed. Leave it open,
+    // exactly as it behaved before `reject` was a kind.
+    if (k === 'reject') continue;
     if (k === 'waive') waiveItems.push({ fp, reason: (state.flow.decisions[fp] && state.flow.decisions[fp].reason) || 'dismissed' });
     else postFps.push(fp);                             // accept / edit / redirect → posting back
   }
@@ -2195,6 +2424,17 @@ function route() {
   if (state.modalFp) closeModal();   // never leave a modal open across navigation
   stopPolling();                     // each view (re)starts its own requests poll after it loads
   state.flow.active = false;         // the stepper owns this flag only while on the review route
+  // The finish screen's bulk-approve confirm must never survive a navigation away from it: leaving
+  // the finish screen (a tab click, the back button) and coming straight back to the SAME feature
+  // re-renders finishView without re-running initFlow's fresh-state reset (that only fires on a
+  // feature switch), so a left-behind `true` here would re-arm the confirm and leave a bulk write
+  // one click away instead of the two clicks it promises. Same idea as clearing `active` above.
+  state.flow.confirmApproveAll = false;
+  // Its higher-stakes sibling needs the exact same reset and for the exact same reason: Apply
+  // writes to real ADO work-item fields / Confluence sections, not just to the local ledger, so a
+  // `confirmApply` left `true` across a navigate-away-and-back is one click — not two — from that
+  // write. Verified live: Apply → "Write N changes … now?" → switch tabs → back → still armed.
+  state.flow.confirmApply = false;
   const hash = location.hash || '#/';
   const m = hash.match(/^#\/feature\/([^/]+)(?:\/(findings|coverage|timeline|report|review))?(?:\/(finish))?\/?$/);
   if (m) {
@@ -2840,42 +3080,65 @@ function pendingJobCard(job) {
     job.instructions ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
 }
 
-/* One shared poller. `scope` lets a re-render (e.g. the finish screen) reuse the
- * running interval instead of resetting it; `token` invalidates in-flight fetches
- * after stopPolling so a late response can't clobber a newer view. */
-const poller = { timer: null, token: 0, scope: null, fn: null };
+/* One shared requests poll. `scope` lets a re-render (e.g. the finish screen) reuse the running
+ * registration instead of resetting it; `token` invalidates in-flight fetches after stopPolling so
+ * a late response can't clobber a newer view.
+ *
+ * There is deliberately NO timer in here. The app's single interval is appTick() below, started
+ * once at boot and never torn down, and startPolling/stopPolling only register/unregister which
+ * callback that ticker feeds. When the heartbeat rode a timer owned by this poller, an outage
+ * killed the very thing meant to report it: route() calls stopPolling() before rendering and every
+ * view re-arms the poller only at the END of its async render, after an `await api(...)` that
+ * throws while the server is down. So a cold load with the server down left no timer at all
+ * (failure count stuck at 1, no banner, for the life of the tab), navigating during an outage
+ * froze the count so the banner could neither trip nor clear when the server came back, and the
+ * views with no poller of their own — the guide, and the review stepper, the one surface holding
+ * unposted decisions — could never raise it at all. */
+const poller = { token: 0, scope: null, fn: null };
 
 function stopPolling() {
-  if (poller.timer) clearInterval(poller.timer);
-  poller.timer = null;
   poller.fn = null;
   poller.scope = null;
   poller.token++;
 }
 
 function startPolling(scope, fn) {
-  if (poller.scope === scope && poller.timer) { poller.fn = fn; return; }
+  if (poller.scope === scope && poller.fn) { poller.fn = fn; return; }
   stopPolling();
   poller.scope = scope;
   poller.fn = fn;
-  const token = poller.token;
-  const tick = async () => {
-    if (token !== poller.token) return;
-    let reqs;
-    try { reqs = await api('/api/requests'); } catch { return; /* transient — keep last view */ }
-    if (token !== poller.token || !poller.fn) return;
-    // The runner's liveness rides the same tick: every surface that shows a job also wants to know
-    // whether anything is draining it, and one extra tiny GET beats a second interval. The
-    // server-version check rides along too (C-18) — a tab left open across an upgrade re-checks
-    // instead of only ever trusting the verdict from page load.
-    await refreshRunner();
-    if (token !== poller.token || !poller.fn) return;
-    poller.fn(Array.isArray(reqs) ? reqs : []);
-    renderRunnerZones();
-    checkServerVersion();
-  };
-  tick();
-  poller.timer = setInterval(tick, 4000);
+  // Poll once immediately so a freshly rendered view doesn't sit a whole tick behind the queue.
+  pollRequestsTick(poller.token);
+}
+
+/* The per-view half of a tick: the requests queue plus the runner's liveness, handed to whichever
+ * view is registered right now. Re-checks the token at every await boundary, because a navigation
+ * mid-flight must not let a stale view's callback paint over the new one. */
+async function pollRequestsTick(token) {
+  if (token !== poller.token || !poller.fn) return;
+  let reqs;
+  // A failed /api/requests is transient here — keep the last view rather than blanking it. It is
+  // no longer the heartbeat's problem either: appTick() has already run checkHeartbeat() before
+  // calling this, so "the server is gone" is reported by the heartbeat, not inferred from here.
+  try { reqs = await api('/api/requests'); } catch { return; }
+  if (token !== poller.token || !poller.fn) return;
+  // The runner's liveness rides the same tick: every surface that shows a job also wants to know
+  // whether anything is draining it, and one extra tiny GET beats a second interval.
+  await refreshRunner();
+  if (token !== poller.token || !poller.fn) return;
+  poller.fn(Array.isArray(reqs) ? reqs : []);
+  renderRunnerZones();
+}
+
+/* The app's one and only ticker body (see the single setInterval at the bottom of the file). Order
+ * matters: the heartbeat runs FIRST and UNCONDITIONALLY, on every tick, no matter what any view is
+ * or isn't doing, because the failure it detects — the server not answering — is precisely the
+ * condition under which every view-owned mechanism stops running. Only then does the currently
+ * registered view get its requests poll. Both halves are guarded so a throw in one cannot stop the
+ * timer the whole app now depends on. */
+async function appTick() {
+  try { await checkHeartbeat(); } catch { /* a bug in the heartbeat must not kill the only timer */ }
+  try { await pollRequestsTick(poller.token); } catch { /* nor may a bug in a view's callback */ }
 }
 
 /* Force an out-of-band refresh right after an enqueue, so the queued row shows
@@ -5454,32 +5717,203 @@ document.addEventListener('keydown', (e) => {
 
 /* ============================== boot ============================== */
 
+/* Multiple sticky top banners (#stale-server, #server-unreachable, #server-restarted) can be up at
+ * once — a restart, for instance, clears the unreachable one but immediately raises the restart
+ * one. `position: sticky; top: 0` siblings don't stack themselves (they all pin to the same spot
+ * and the later one in the DOM just paints over the earlier one), so after any banner is
+ * shown/hidden this walks the survivors in document order and gives each one a top offset equal to
+ * the combined height of the banners above it. */
+function restackBanners() {
+  let offset = 0;
+  document.querySelectorAll('.top-banner').forEach((el) => {
+    el.style.top = `${offset}px`;
+    offset += el.offsetHeight;
+  });
+  // The banners sit at z-index 100 and the nav (.topbar, style.css) is sticky at z-index 50, so a
+  // full stack of three — measured at 148px against a 56px header — painted over the entire nav
+  // and made it unclickable. Push the nav down by exactly the stack's height instead, and hand the
+  // offset back to the stylesheet (top: 0) once the last banner is gone.
+  const topbar = document.querySelector('.topbar');
+  if (topbar) topbar.style.top = offset ? `${offset}px` : '';
+}
+
+/* Debounce for the unreachable banner: only trip it after this many CONSECUTIVE failed heartbeats
+ * (~8s at the 4s tick interval) so one dropped request doesn't cry wolf, while a real outage is
+ * still caught within a couple of ticks — this is the number called out in the diagnosis (a tab
+ * that sat open for ~20 hours with no way to tell the server was gone). */
+const HEARTBEAT_FAIL_THRESHOLD = 2;
+
+/* Heartbeat state. Deliberately module-level and OUTSIDE `poller`, which route() unregisters on
+ * every navigation: "is the server even there" has to survive that, or clicking around during a
+ * real outage would keep resetting the failure count and the debounce would never trip. */
+const heartbeat = {
+  fails: 0,          // consecutive failed/errored /api/version checks
+  lastOkAt: null,    // ISO stamp of the last time the server answered — drives "unreachable since…"
+  startedAt: null,   // the server's own SERVER_STARTED_AT, from the first successful check; a LATER
+                      // check reporting a different value means the process restarted underneath us
+};
+
+/* One request to the cheapest endpoint the server has (GET /api/version, src/server.js — "matched
+ * first, must answer even when everything else about the build is mismatched") answers three
+ * independent questions, each with its own banner:
+ *   1. Is the server there at all? → #server-unreachable, after HEARTBEAT_FAIL_THRESHOLD misses.
+ *   2. Did it restart since we last asked? → #server-restarted (the app.js/style.css this tab is
+ *      running may now be stale — the server sends no ETag/Cache-Control, so nothing else notices).
+ *   3. Does its API version match what this page was built for? → #stale-server (pre-existing).
+ * Runs on every tick of the app-level ticker — never on a view's poller, which is exactly what an
+ * outage takes down first; see the comment on `poller` for the failure that taught us that. */
+/* The timeout is the whole point, not a nicety. A DEAD process on loopback refuses instantly and
+ * any bare fetch catches it — but the outage that motivated this heartbeat was a WEDGED one: the
+ * listen socket still accepted, headers came back, and the event loop never ran, so a fetch with no
+ * deadline simply never settles. Without a deadline `fails` stays at 0 for as long as the server is
+ * wedged and the tab keeps looking healthy — the exact bug, reproduced with SIGSTOP. 3s is twice
+ * the ~1.5s worst case the server can legitimately block for behind a contended ledger write, so a
+ * merely slow cockpit is not reported as gone. This also bounds how many ticks can pile up. */
+const HEARTBEAT_TIMEOUT_MS = 3000;
+
+async function checkHeartbeat() {
+  let res;
+  let body = null;
+  try {
+    res = await fetch('/api/version', { signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS) });
+    if (res.ok) body = await res.json();
+  } catch {
+    onHeartbeatFail();   // refused, aborted at the deadline, or malformed body — all "not answering"
+    return;
+  }
+  if (!res.ok && res.status !== 404) {
+    onHeartbeatFail();   // a 5xx (or similar) is a real heartbeat failure, not just a thrown fetch
+    return;
+  }
+  onHeartbeatOk();
+  if (!res.ok) {
+    // A 404 is not a failed heartbeat — the server answered, so the two concerns stay separate —
+    // but it is conclusive evidence the SERVER is the stale side: it predates /api/version
+    // entirely, which is also what a different process squatting the port looks like. Pass the
+    // missing version through as `null` so checkVersionMismatch still renders the "server predates
+    // the version check" banner (and refreshes it if one is already up). Treating this as healthy,
+    // as an earlier cut of the heartbeat did, hid an old binary behind a green-looking tab.
+    checkVersionMismatch(null);
+    return;
+  }
+  checkRestart(body && body.startedAt);
+  checkVersionMismatch(body && body.apiVersion);
+}
+
+function onHeartbeatFail() {
+  heartbeat.fails += 1;
+  if (heartbeat.fails >= HEARTBEAT_FAIL_THRESHOLD) showUnreachableBanner();
+}
+
+function onHeartbeatOk() {
+  const wasUnreachable = heartbeat.fails >= HEARTBEAT_FAIL_THRESHOLD;
+  heartbeat.fails = 0;
+  heartbeat.lastOkAt = new Date().toISOString();
+  if (!wasUnreachable) return;
+  clearUnreachableBanner();
+  // Whatever view is open may be showing minutes (or, per the incident that motivated this, hours)
+  // of stale data gathered while the server was gone — don't let it linger now that it's back.
+  refreshCurrentView();
+}
+
+function showUnreachableBanner() {
+  const since = heartbeat.lastOkAt ? ` Last reached ${fmtAgo(heartbeat.lastOkAt)}.` : '';
+  const msg = `${since} Still retrying every few seconds — this banner clears on its own once it is back.`;
+  // Built ONCE, on the transition into the unreachable state, and only text-patched afterwards.
+  // This runs on every failed tick for as long as the outage lasts, and a freshly inserted
+  // role="alert" is re-announced by screen readers each time it appears: rebuilding the node every
+  // 4s would have meant roughly 18,000 announcements across the ~20-hour outage that motivated the
+  // banner. Only the "last reached …" age actually changes, so only that changes here.
+  const existing = $('#server-unreachable');
+  if (existing) {
+    // Only write when the wording actually changed. This is a role="alert" region, so an
+    // assistive technology may re-announce on any subtree mutation — and `fmtAgo` returns "just
+    // now" for the first minute and only ~80 distinct values across a day, so an unconditional
+    // write re-announced an identical sentence every 4s for the length of the outage.
+    const msgEl = existing.querySelector('.server-unreachable-msg');
+    if (msgEl && msgEl.textContent !== msg) {
+      msgEl.textContent = msg;
+      restackBanners();   // the age text can wrap, so the bar's height (and the stack) may shift
+    }
+    return;
+  }
+  const bar = h('div', { class: 'stale-server top-banner', id: 'server-unreachable', role: 'alert' },
+    h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
+    h('div', { class: 'stale-server-body' },
+      h('strong', {}, 'The cockpit server is not answering.'),
+      h('span', { class: 'server-unreachable-msg' }, msg)));
+  document.body.prepend(bar);
+  restackBanners();
+}
+
+function clearUnreachableBanner() {
+  const bar = $('#server-unreachable');
+  if (!bar) return;
+  bar.remove();
+  restackBanners();
+}
+
+/* Reload whatever the user is looking at, without doing what a full route() would do to an
+ * in-progress review: route() unconditionally closes any open finding modal and resets the
+ * stepper's flow before it does anything else, which would throw away exactly the in-progress
+ * decisions this banner is trying not to disturb. Detail and review-flow reload their data in
+ * place instead — the same path ensureFeatureJobPolling already uses when a background job
+ * finishes (see its `justDone` branch) — and let their own re-render (rerenderDetail /
+ * renderFlowInto, via reconcileFlowItems) reconcile the fresh data against whatever is open. Every
+ * other view (home, the kind sections, guide) has no unsaved state to protect, so a plain route()
+ * — the same reload every hash navigation already does — is enough. */
+function refreshCurrentView() {
+  if ((current.view === 'detail' || current.view === 'review-flow') && current.id) {
+    loadDetail(current.id, true)
+      .then(() => (current.view === 'review-flow' ? renderFlowInto() : rerenderDetail()))
+      .catch(() => {});
+    return;
+  }
+  route();
+}
+
+/* A later /api/version call reporting a DIFFERENT startedAt than the first one we ever saw means
+ * the server process was replaced underneath this tab (a restart, a redeploy). The server sends no
+ * ETag/Cache-Control on app.js/style.css, so the browser has no other way to learn the assets this
+ * tab is running may now be stale. Never auto-reloads — the user may have unsaved editor text (an
+ * open comment draft, an edited hunk) — it only offers the button. */
+function checkRestart(startedAt) {
+  if (!startedAt) return;
+  if (heartbeat.startedAt == null) { heartbeat.startedAt = startedAt; return; }   // first observation: baseline only
+  if (startedAt === heartbeat.startedAt) return;
+  heartbeat.startedAt = startedAt;
+  if ($('#server-restarted')) return;   // already showing
+  const bar = h('div', { class: 'stale-server top-banner', id: 'server-restarted', role: 'alert' },
+    h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
+    h('div', { class: 'stale-server-body' },
+      h('strong', {}, 'The cockpit server restarted.'),
+      h('span', {}, ' This tab may be running a stale build (no cache-busting on app.js/style.css). '
+        + 'Reload when convenient — your place is kept, but an open editor is not.')),
+    h('button', {
+      class: 'btn btn-accent stale-server-reload', type: 'button', onclick: () => location.reload(),
+    }, 'Reload'),
+    h('button', {
+      class: 'btn-icon stale-server-dismiss', type: 'button', 'aria-label': 'Dismiss',
+      title: 'Dismiss (the tab stays on the old build)', onclick: () => { bar.remove(); restackBanners(); },
+    }, '×'));
+  document.body.prepend(bar);
+  restackBanners();
+}
+
 /* Compare the running server's API version against what this page was built for, and say so loudly
  * if they differ — in the RIGHT direction. A 404 on /api/version means the server predates the
  * check entirely, which is conclusive evidence the SERVER is the stale side; a numeric mismatch
  * can go either way (an upgraded server outliving a browser tab with a cached older app.js is just
  * as real as the reverse), so the two are told apart and each gets the instruction that actually
  * fixes it — the previous version only ever blamed the server, even when the PAGE was behind.
- * Re-checked on every poll tick (not a second timer) so a tab left open across an upgrade catches
+ * Re-checked on every heartbeat (not a second timer) so a tab left open across an upgrade catches
  * up instead of latching the boot-time verdict forever; a banner is dropped once versions agree
- * again (e.g. the server got restarted). */
-async function checkServerVersion() {
-  let got = null;
-  try {
-    const res = await fetch('/api/version');
-    if (res.ok) {
-      const body = await res.json();
-      got = body && body.apiVersion;
-    } else if (res.status !== 404) {
-      return;   // some other transient failure; don't cry wolf
-    }
-  } catch {
-    return;     // server down / offline — the views surface that on their own
-  }
+ * again (e.g. the server got restarted onto a matching build). */
+function checkVersionMismatch(got) {
   const gotN = got == null ? NaN : Number(got);
   if (Number.isFinite(gotN) && gotN === Number(EXPECTED_API_VERSION)) {
     const bar = $('#stale-server');
-    if (bar) bar.remove();   // back in sync since the last check
+    if (bar) { bar.remove(); restackBanners(); }   // back in sync since the last check
     return;
   }
   const serverIsNewer = Number.isFinite(gotN) && gotN > Number(EXPECTED_API_VERSION);
@@ -5487,6 +5921,13 @@ async function checkServerVersion() {
 }
 
 function showStaleServerBanner(got, serverIsNewer) {
+  // Same reasoning as showUnreachableBanner: this is re-evaluated on every heartbeat, so leave an
+  // identical banner's node alone rather than re-inserting a role="alert" every 4s. The signature
+  // covers everything the wording depends on, so a genuine change — a numeric mismatch that starts
+  // 404ing instead, or the direction flipping — still rebuilds the bar instead of leaving stale text.
+  const sig = `${serverIsNewer ? 'page-behind' : 'server-behind'}:${got == null ? 'none' : got}`;
+  const already = $('#stale-server');
+  if (already && already.dataset.sig === sig) return;
   const versionNote = got ? ` (server API v${got}, page expects v${EXPECTED_API_VERSION})` : ' (server predates the version check)';
   const body = serverIsNewer
     ? h('div', { class: 'stale-server-body' },
@@ -5496,22 +5937,29 @@ function showStaleServerBanner(got, serverIsNewer) {
         h('strong', {}, 'The cockpit server is running an older build than this page.'),
         h('span', {}, ' Actions can fail with a bare “Not found” because the server has never heard of ',
           'the routes this page calls. Restart it: ', h('code', {}, 'node src/cli.js start'), versionNote));
-  const existing = $('#stale-server');
-  if (existing) existing.remove();   // rebuilt below — the direction may have flipped since last check
-  const bar = h('div', { class: 'stale-server', id: 'stale-server', role: 'alert' },
+  if (already) already.remove();   // rebuilt below — the direction or the version note has changed
+  const bar = h('div', { class: 'stale-server top-banner', id: 'stale-server', role: 'alert', 'data-sig': sig },
     h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
     body,
     h('button', {
       class: 'btn-icon stale-server-dismiss', type: 'button', 'aria-label': 'Dismiss',
-      title: 'Dismiss (the mismatch remains)', onclick: () => bar.remove(),
+      title: 'Dismiss (the mismatch remains)', onclick: () => { bar.remove(); restackBanners(); },
     }, '×'));
   document.body.prepend(bar);
+  restackBanners();
 }
 
 window.addEventListener('hashchange', route);
 // Know whether a runner is going before the first paint settles, so the Run button doesn't pop in
 // a tick later (the shared poller keeps it fresh from then on).
 refreshRunner().then(renderRunnerZones).catch(() => {});
-checkServerVersion();
+checkHeartbeat();
 loadLiveConfig();
 route();
+// The app's ONE interval, and the only one there should ever be: started here at boot, owned by
+// the app rather than by whichever view happens to be mounted, and never cleared. Navigation can
+// only register/unregister the per-view callback it feeds (startPolling/stopPolling) — it cannot
+// stop the heartbeat, which is the whole point: a cold load with the server already down, or a
+// navigation mid-outage, used to leave no timer running and therefore no way to ever notice the
+// server was gone or that it had come back.
+setInterval(appTick, 4000);

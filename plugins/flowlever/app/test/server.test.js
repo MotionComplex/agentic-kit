@@ -261,6 +261,96 @@ test('GET /api/version lets the UI detect a server older than the page it serves
     'web/app.js EXPECTED_API_VERSION and src/version.js API_VERSION must be bumped together');
 });
 
+// Read the body of a top-level `function name(` / `async function name(` declaration in a source
+// file by matching braces, so these assertions don't depend on how the body is indented.
+function fnBody(src, decl) {
+  const at = src.indexOf(decl);
+  assert.ok(at > -1, `web/app.js must declare ${decl}`);
+  const open = src.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return src.slice(open + 1, i);
+  }
+  throw new Error(`unbalanced braces reading ${decl}`);
+}
+
+test('U1: the heartbeat timer belongs to the app, not to the per-view poller', () => {
+  // Regression guard for the bug that made the first cut of this heartbeat useless: it rode the
+  // interval owned by startPolling(), which route() tears down before every render and each view
+  // re-arms only at the END of its async render — after an `await api(...)` that throws while the
+  // server is down. So the heartbeat died exactly during an outage: a cold load with the server
+  // down never got a timer at all, and navigating mid-outage froze the failure count so the banner
+  // could neither trip nor clear. Assert the ownership that makes that impossible.
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+
+  // Exactly one interval in the app, and it must be created at module scope (column 0 — this file
+  // indents everything inside a function), i.e. at boot, where navigation cannot reach it.
+  const intervals = ui.match(/setInterval\s*\(/g) || [];
+  assert.equal(intervals.length, 1, 'the app must have exactly one setInterval');
+  assert.match(ui, /^setInterval\(appTick, 4000\);$/m,
+    'the sole interval must be armed at module scope at boot and run appTick on the 4s cadence');
+
+  // startPolling/stopPolling may only register/unregister the view callback. If either one grows a
+  // timer again the heartbeat is back on a view's lifetime, which is the whole bug.
+  const startBody = fnBody(ui, 'function startPolling(');
+  const stopBody = fnBody(ui, 'function stopPolling(');
+  assert.ok(!/setInterval|setTimeout/.test(startBody),
+    'startPolling must not create a timer — the app-level ticker owns the cadence');
+  assert.ok(!/clearInterval|clearTimeout/.test(stopBody),
+    'stopPolling() must not be able to stop the heartbeat');
+  assert.ok(!/\.timer\b/.test(startBody + stopBody),
+    'neither startPolling nor stopPolling may hold a timer handle');
+  assert.ok(/checkHeartbeat/.test(fnBody(ui, 'async function appTick(')),
+    'the app-level ticker must be the thing that runs the heartbeat');
+
+  // And within that ticker the heartbeat must be reached unconditionally: nothing — not a failed
+  // /api/requests, not a missing view callback — may return before it.
+  const tick = fnBody(ui, 'async function appTick(');
+  const heartbeatIdx = tick.indexOf('checkHeartbeat()');
+  assert.ok(heartbeatIdx > -1, 'appTick must call checkHeartbeat()');
+  assert.ok(!/\breturn\b/.test(tick.slice(0, heartbeatIdx)),
+    'appTick must not be able to return before the heartbeat runs');
+  assert.ok(tick.indexOf('pollRequestsTick') > heartbeatIdx,
+    'the heartbeat must run before the per-view requests poll, not after it');
+
+  // A 404 on /api/version means the server predates the check — reachable, so not a heartbeat
+  // failure, but still conclusively the stale side. It must reach the version-mismatch path.
+  const heartbeatBody = fnBody(ui, 'async function checkHeartbeat(');
+  assert.equal((heartbeatBody.match(/checkVersionMismatch\(/g) || []).length, 2,
+    'checkHeartbeat must call checkVersionMismatch on both the ok and the 404 path');
+  assert.match(heartbeatBody, /checkVersionMismatch\(null\)/,
+    'a 404 must reach checkVersionMismatch with a null version, not be treated as healthy');
+
+  // The debounce: the banner must require more than a single missed heartbeat.
+  const thresholdMatch = ui.match(/HEARTBEAT_FAIL_THRESHOLD\s*=\s*(\d+)/);
+  assert.ok(thresholdMatch, 'web/app.js must declare HEARTBEAT_FAIL_THRESHOLD');
+  assert.ok(Number(thresholdMatch[1]) >= 2, 'a single blip must not be enough to show the unreachable banner');
+
+  // And the banner itself must not be re-created on every failed tick: a fresh role="alert" is
+  // re-announced by screen readers, and this fires every 4s for the length of the outage.
+  const bannerBody = fnBody(ui, 'function showUnreachableBanner(');
+  assert.ok(/textContent\s*=/.test(bannerBody),
+    'showUnreachableBanner must update the existing banner\'s text in place');
+  // Guard the BEHAVIOUR, not one spelling of it. An earlier version of this assertion only
+  // rejected the literal `existing.remove()`, and a re-review proved it: reintroducing the very
+  // same bug as `existing.parentNode.removeChild(existing)` left the test passing. Match any way
+  // the found node can be detached, and require the early return that keeps it in place.
+  const detaches = /\bexisting\b[\s\S]*?\.(remove|removeChild|replaceWith|replaceChildren)\s*\(|\bremoveChild\s*\(\s*existing\s*\)/;
+  assert.ok(!detaches.test(bannerBody),
+    'showUnreachableBanner must not detach and rebuild the role="alert" node every tick '
+    + '(any of .remove/.removeChild/.replaceWith on the existing node)');
+  assert.ok(/if\s*\(existing\)\s*\{[\s\S]*?\breturn\b/.test(bannerBody),
+    'showUnreachableBanner must return early when the banner already exists, so the node survives');
+
+  // The heartbeat fetch needs a deadline. A dead process refuses instantly, but the outage this
+  // whole unit exists for was a WEDGED server: socket accepting, event loop stopped, so a fetch
+  // with no timeout never settles and `fails` never leaves 0 — verified with SIGSTOP.
+  const hbBody = fnBody(ui, 'async function checkHeartbeat(');
+  assert.ok(/AbortSignal\.timeout\(|signal:/.test(hbBody),
+    'checkHeartbeat must bound its fetch, or a wedged server is never detected');
+});
+
 test('GET /api/runner reports whether the queue is being drained', async () => {
   const res = await fetch(`${base}/api/runner`);
   assert.equal(res.status, 200);
@@ -910,4 +1000,180 @@ test('the whole of 127.0.0.0/8 counts as loopback, not just 127.0.0.1', () => {
   for (const host of ['0.0.0.0', '192.168.1.5', '10.0.0.1', '128.0.0.1', '27.0.0.1', '127.0.0.999', 'evil.com', '']) {
     assert.equal(isLoopbackHost(host), false, `${host} is NOT loopback`);
   }
+});
+
+test('U2: approveAllRemaining only ever touches currently-undecided findings', () => {
+  // No bulk-decision endpoint exists server-side (only /review/apply, which bulk-sets finding
+  // *status* for the post/apply hand-off — not the `decision` field a single Approve writes), so
+  // this whole unit lives client-side. Assert the source-level guarantee that matters most: a
+  // reviewer's considered Dismiss/Edit/Redirect/Waive/Skip can never be silently overturned by the
+  // bulk action, and it never posts.
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const undecidedBody = fnBody(ui, 'function undecidedFlowFps(');
+  // Must read the decisions map directly, not go through flowDecisionKind() — that helper falls
+  // back to 'skip' both for "never decided" AND for an explicit Skip (pr-respond/spec have a real
+  // Skip button), so using it here would let a bulk approve overturn a considered Skip.
+  assert.ok(/!state\.flow\.decisions\[/.test(undecidedBody),
+    'undecidedFlowFps must test the decisions map directly, not flowDecisionKind()');
+  assert.ok(!/flowDecisionKind/.test(undecidedBody),
+    'undecidedFlowFps must not go through flowDecisionKind() — it collapses "never decided" and "explicit Skip" into one bucket');
+
+  const bulkBody = fnBody(ui, 'async function approveAllRemaining(');
+  assert.ok(/undecidedFlowFps\(\)/.test(bulkBody),
+    'approveAllRemaining must source its target fps from undecidedFlowFps(), not from every flow item');
+  // The previous version of this guard only blacklisted `.map`/`.forEach`/`.filter` called on
+  // `state.flow.items`, so a `for..of state.flow.items`, a classic indexed `for` loop, a
+  // `for..in`, `state.flow.items[i]`, `...state.flow.items`, or `Object.keys(state.flow.items)`
+  // all sailed straight through it untouched. A reviewer proved this concretely with a `for..of`
+  // mutation that iterated every item and flipped an already-Dismissed finding to Approved —
+  // the suite stayed green at 208/208. There is no syntax-form denylist that reliably covers
+  // every one of those (and whatever's invented next); the only real invariant is that this
+  // function has no legitimate reason to reference `state.flow.items` AT ALL — undecidedFlowFps()
+  // is the sole approved way in. So assert the literal string is simply absent from the body.
+  assert.ok(!/state\.flow\.items/.test(bulkBody),
+    'approveAllRemaining must never reference state.flow.items directly (by .map/.forEach/.filter, '
+    + 'for..of, a classic for(;;), for..in, indexing, spread, Object.keys, or any other traversal) '
+    + '— undecidedFlowFps() must be the only way it reads the undecided set');
+  assert.ok(!/enqueueApply|postBack\(|\/review\/apply/.test(bulkBody),
+    'approveAllRemaining must never post or enqueue a post — Post stays a separate, explicit click');
+});
+
+/* Guarding the one path in the UI that causes a write to somebody else's pull request.
+ *
+ * `reject` became a decision kind so the bulk approve-all could not silently overturn a
+ * considered rejection. That promotion had a consequence nothing caught: flowDecisionKind() now
+ * returns 'reject' instead of falling back to 'skip', so in persistTriage the finding stopped
+ * hitting the `continue` and fell through to the `else` that pushes items into the post set and
+ * marks them pending-post for the runner. A finding the reviewer explicitly rejected would have
+ * been posted as a comment — while the Post button, which counts only accept/edit, said nothing
+ * about it. The whole suite stayed green through that, so the invariant gets its own test. */
+test('U2: persistTriage never carries a rejected or undecided finding into the post set', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'async function persistTriage(');
+
+  // Both non-decisions must bail BEFORE the branch that fills postFps.
+  const elseIdx = body.indexOf('postFps.push');
+  assert.ok(elseIdx > 0, 'persistTriage still builds a postFps set');
+  const beforePush = body.slice(0, elseIdx);
+  for (const kind of ['skip', 'reject']) {
+    const guard = new RegExp(`k === '${kind}'\\s*\\)\\s*continue;`);
+    assert.ok(guard.test(beforePush),
+      `persistTriage must skip '${kind}' before anything reaches postFps.push — `
+      + `a '${kind}' finding must never be handed to the runner to post`);
+  }
+
+  // And a rejected finding must not be quietly re-labelled as a dismissal either: Dismiss waives
+  // the finding, Reject only refuses the proposed change. Conflating them loses the distinction
+  // the reviewer drew.
+  assert.ok(!/waiveItems\.push[^;]*'reject'/.test(body),
+    'a reject must not be recorded as a waive — they are different reviewer intents');
+});
+
+test('U2: the approve-all control requires an inline confirm before it can act', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'function approveAllControl(');
+  assert.ok(!/window\.confirm|window\.alert/.test(body),
+    'must not use window.confirm/alert — this app builds confirms with h()');
+  assert.ok(/confirmApproveAll/.test(body),
+    'the write must be gated behind a two-step confirm flag, like stepWaiveForm');
+  assert.ok(/approveAllRemaining\(/.test(body),
+    'the confirmed branch must be able to actually call approveAllRemaining');
+  // Renders nothing when nothing is undecided, so it can never invite approving an already-clear
+  // batch. The previous version of this check just tested that SOME `return null` existed
+  // ANYWHERE in the body — which the function also does for the unrelated `kind !== 'pr-review'`
+  // early return, so a reviewer could delete the actual "nothing undecided → render nothing"
+  // guard entirely and this test kept passing. Anchor on the specific guard, not the substring.
+  assert.ok(/const fps = undecidedFlowFps\(\);/.test(body),
+    'approveAllControl must derive its fps from undecidedFlowFps()');
+  assert.ok(/if\s*\(\s*!fps\.length\s*\)\s*return null;/.test(body),
+    'approveAllControl must return null specifically when the undecided-fps set is empty — not '
+    + 'merely contain the text "return null" somewhere else in the function (e.g. the kind guard)');
+});
+
+test('U2: the zero-post label names the remaining work instead of dead-ending', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'function postActionEl(');
+  assert.ok(/still undecided/.test(body),
+    'postActionEl must name the undecided count instead of just restating "Post 0 …"');
+  // The already-correct disabled gate on the Post button (opacity/cursor unaffected) must survive
+  // this unit untouched — only the label above it may change.
+  assert.ok(/disabled: active \|\| \(postN === 0 && !posted && !errored && !stalled && !unconfirmed\)/.test(body),
+    'the existing Post-button disabled condition must not have been changed by this unit');
+});
+
+/* Regression guard for NEW-3: route()'s two confirm resets have no test coverage of their own
+ * today — a reviewer deleted the `confirmApproveAll` reset line entirely and the whole 209-test
+ * suite stayed green, because nothing ever asserted route() clears either flag. Both resets exist
+ * for the identical reason (a confirm armed on the finish screen must not survive navigating away
+ * and back to the SAME feature, since that path skips initFlow's fresh-state reset) and both guard
+ * a real write — confirmApproveAll gates approveAllRemaining, confirmApply gates a live write to
+ * ADO/Confluence — so losing either silently re-arms a "one click from a real write" state. */
+/* U3: editing a proposed comment/note used to strand the keyboard — Escape cancelled, but
+ * committing meant reaching for the mouse to click "Save & approve" / "Save note". The fix must
+ * (a) let Cmd/Ctrl+Enter submit through the SAME function the button calls, in both the spec and
+ * PR branches, so button and shortcut can never diverge; (b) leave bare Enter alone, since these
+ * are multi-line bodies; and (c) advertise the shortcut next to the buttons it duplicates. */
+test('U3: Cmd/Ctrl+Enter submits the comment editor via the same path as the Save button', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+
+  // The submit chord lives in exactly one place — both textareas wire onkeydown through it — so a
+  // future edit to one branch cannot silently leave the other without a keyboard submit.
+  const keydownBody = fnBody(ui, 'function commentEditTaKeydown(');
+  assert.match(keydownBody, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/,
+    'commentEditTaKeydown must require Cmd OR Ctrl with Enter — accepting either is what makes '
+    + 'this work on macOS and elsewhere without platform sniffing');
+  assert.match(keydownBody, /e\.preventDefault\(\)/,
+    'the chord must preventDefault, or the newline is inserted in addition to submitting');
+  assert.match(keydownBody, /e\.key === 'Escape'/,
+    'Escape must still be handled by the shared handler, so cancel behaviour cannot regress');
+
+  // Bare Enter must never reach a submit call on its own — only the guarded chord above may. If a
+  // regression added an unconditional `if (e.key === 'Enter')` branch, this would catch it.
+  assert.ok(!/e\.key === 'Enter'\)/.test(keydownBody.replace(/e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/, '')),
+    'bare Enter (no modifier) must not be wired to submit — these are multi-line bodies');
+
+  // commentEditTaKeydown must be the ONLY place in the app that binds this chord: if a second,
+  // divergent binding shows up (e.g. someone hand-rolls the condition again on a new textarea)
+  // this count moves, which is the drift this unit exists to prevent.
+  const chordSites = (ui.match(/e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/g) || []).length;
+  assert.equal(chordSites, 1, 'the Cmd/Ctrl+Enter condition must be defined once and reused');
+
+  const formBody = fnBody(ui, 'function commentEditForm(');
+  // Spec branch (note textarea): the button's onclick and the textarea's onkeydown must call the
+  // exact same function reference, not two separate calls into saveSpecNote — otherwise a future
+  // edit to one could change what gets saved without touching the other.
+  assert.match(formBody, /onkeydown:\s*commentEditTaKeydown\(cancel,\s*submitNote\)/,
+    'the spec-branch textarea must route Cmd/Ctrl+Enter through the same submitNote used by the button');
+  assert.match(formBody, /onclick:\s*submitNote\s*\}/,
+    'the "Save note" button must call submitNote, the same function the keyboard shortcut calls');
+
+  // PR branch (proposed-comment textarea): same requirement, via submitComment.
+  assert.match(formBody, /onkeydown:\s*commentEditTaKeydown\(cancel,\s*submitComment\)/,
+    'the PR-branch textarea must route Cmd/Ctrl+Enter through the same submitComment used by the button');
+  assert.match(formBody, /onclick:\s*submitComment\s*\}/,
+    'the "Save & approve" button must call submitComment, the same function the keyboard shortcut calls');
+
+  // Discoverability: the shortcut hint must actually be rendered next to both action rows, not
+  // just exist in code with nothing pointing at it (the U-5 register this unit follows).
+  const hintSites = (formBody.match(/saveKbdHint\(\)/g) || []).length;
+  assert.equal(hintSites, 2, 'saveKbdHint() must be rendered in both the spec and PR action rows');
+
+  // The global decide-loop handler must remain blind to this chord: it already refuses to fire
+  // while any modifier is held, which is what stops Cmd/Ctrl+Enter from also being read as a
+  // one-letter decide-loop key while the editor is open. If that guard is ever narrowed to only
+  // cover a subset of modifiers, this chord would start leaking into the decide loop.
+  const docKeydown = ui.slice(ui.indexOf("document.addEventListener('keydown'"));
+  assert.match(docKeydown, /!e\.metaKey && !e\.ctrlKey && !e\.altKey/,
+    'the decide-loop branch must still exclude all modifier keys, so Cmd/Ctrl+Enter can never '
+    + 'be misread as a one-letter decision');
+});
+
+test('NEW-3: route() disarms both finish-screen confirms on every navigation', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+  const body = fnBody(ui, 'function route(');
+  assert.ok(/state\.flow\.confirmApproveAll\s*=\s*false;/.test(body),
+    'route() must reset state.flow.confirmApproveAll = false on every navigation');
+  assert.ok(/state\.flow\.confirmApply\s*=\s*false;/.test(body),
+    'route() must reset state.flow.confirmApply = false on every navigation — it gates a real '
+    + 'write to ADO/Confluence and is the higher-stakes sibling of confirmApproveAll');
 });
