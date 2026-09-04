@@ -136,6 +136,8 @@ a { color: inherit; text-decoration: none; }
 /* ============================== topbar ============================== */
 
 .topbar {
+  /* `top` is overwritten inline by restackBanners() while any .top-banner is up: the banners are
+     sticky at a higher z-index and would otherwise paint over this whole 56px header. */
   position: sticky; top: 0; z-index: 50;
   display: flex; align-items: center; flex-wrap: wrap; row-gap: 6px;
   min-height: 56px; padding: 8px 24px;
@@ -604,6 +606,10 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   border-radius: 5px; padding: 1px 6px;
 }
 .stale-server-dismiss { flex: none; }
+/* #server-unreachable (heartbeat missed HEARTBEAT_FAIL_THRESHOLD times) and #server-restarted
+   (the process behind this tab changed) reuse this same bar: same alert color, same layout, their
+   own ids so all three can be up at once (JS stacks them via restackBanners()/.top-banner). */
+.stale-server-reload { flex: none; }
 
 /* ============================== review scope note ============================== */
 

@@ -261,6 +261,96 @@ test('GET /api/version lets the UI detect a server older than the page it serves
     'web/app.js EXPECTED_API_VERSION and src/version.js API_VERSION must be bumped together');
 });
 
+// Read the body of a top-level `function name(` / `async function name(` declaration in a source
+// file by matching braces, so these assertions don't depend on how the body is indented.
+function fnBody(src, decl) {
+  const at = src.indexOf(decl);
+  assert.ok(at > -1, `web/app.js must declare ${decl}`);
+  const open = src.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return src.slice(open + 1, i);
+  }
+  throw new Error(`unbalanced braces reading ${decl}`);
+}
+
+test('U1: the heartbeat timer belongs to the app, not to the per-view poller', () => {
+  // Regression guard for the bug that made the first cut of this heartbeat useless: it rode the
+  // interval owned by startPolling(), which route() tears down before every render and each view
+  // re-arms only at the END of its async render — after an `await api(...)` that throws while the
+  // server is down. So the heartbeat died exactly during an outage: a cold load with the server
+  // down never got a timer at all, and navigating mid-outage froze the failure count so the banner
+  // could neither trip nor clear. Assert the ownership that makes that impossible.
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+
+  // Exactly one interval in the app, and it must be created at module scope (column 0 — this file
+  // indents everything inside a function), i.e. at boot, where navigation cannot reach it.
+  const intervals = ui.match(/setInterval\s*\(/g) || [];
+  assert.equal(intervals.length, 1, 'the app must have exactly one setInterval');
+  assert.match(ui, /^setInterval\(appTick, 4000\);$/m,
+    'the sole interval must be armed at module scope at boot and run appTick on the 4s cadence');
+
+  // startPolling/stopPolling may only register/unregister the view callback. If either one grows a
+  // timer again the heartbeat is back on a view's lifetime, which is the whole bug.
+  const startBody = fnBody(ui, 'function startPolling(');
+  const stopBody = fnBody(ui, 'function stopPolling(');
+  assert.ok(!/setInterval|setTimeout/.test(startBody),
+    'startPolling must not create a timer — the app-level ticker owns the cadence');
+  assert.ok(!/clearInterval|clearTimeout/.test(stopBody),
+    'stopPolling() must not be able to stop the heartbeat');
+  assert.ok(!/\.timer\b/.test(startBody + stopBody),
+    'neither startPolling nor stopPolling may hold a timer handle');
+  assert.ok(/checkHeartbeat/.test(fnBody(ui, 'async function appTick(')),
+    'the app-level ticker must be the thing that runs the heartbeat');
+
+  // And within that ticker the heartbeat must be reached unconditionally: nothing — not a failed
+  // /api/requests, not a missing view callback — may return before it.
+  const tick = fnBody(ui, 'async function appTick(');
+  const heartbeatIdx = tick.indexOf('checkHeartbeat()');
+  assert.ok(heartbeatIdx > -1, 'appTick must call checkHeartbeat()');
+  assert.ok(!/\breturn\b/.test(tick.slice(0, heartbeatIdx)),
+    'appTick must not be able to return before the heartbeat runs');
+  assert.ok(tick.indexOf('pollRequestsTick') > heartbeatIdx,
+    'the heartbeat must run before the per-view requests poll, not after it');
+
+  // A 404 on /api/version means the server predates the check — reachable, so not a heartbeat
+  // failure, but still conclusively the stale side. It must reach the version-mismatch path.
+  const heartbeatBody = fnBody(ui, 'async function checkHeartbeat(');
+  assert.equal((heartbeatBody.match(/checkVersionMismatch\(/g) || []).length, 2,
+    'checkHeartbeat must call checkVersionMismatch on both the ok and the 404 path');
+  assert.match(heartbeatBody, /checkVersionMismatch\(null\)/,
+    'a 404 must reach checkVersionMismatch with a null version, not be treated as healthy');
+
+  // The debounce: the banner must require more than a single missed heartbeat.
+  const thresholdMatch = ui.match(/HEARTBEAT_FAIL_THRESHOLD\s*=\s*(\d+)/);
+  assert.ok(thresholdMatch, 'web/app.js must declare HEARTBEAT_FAIL_THRESHOLD');
+  assert.ok(Number(thresholdMatch[1]) >= 2, 'a single blip must not be enough to show the unreachable banner');
+
+  // And the banner itself must not be re-created on every failed tick: a fresh role="alert" is
+  // re-announced by screen readers, and this fires every 4s for the length of the outage.
+  const bannerBody = fnBody(ui, 'function showUnreachableBanner(');
+  assert.ok(/textContent\s*=/.test(bannerBody),
+    'showUnreachableBanner must update the existing banner\'s text in place');
+  // Guard the BEHAVIOUR, not one spelling of it. An earlier version of this assertion only
+  // rejected the literal `existing.remove()`, and a re-review proved it: reintroducing the very
+  // same bug as `existing.parentNode.removeChild(existing)` left the test passing. Match any way
+  // the found node can be detached, and require the early return that keeps it in place.
+  const detaches = /\bexisting\b[\s\S]*?\.(remove|removeChild|replaceWith|replaceChildren)\s*\(|\bremoveChild\s*\(\s*existing\s*\)/;
+  assert.ok(!detaches.test(bannerBody),
+    'showUnreachableBanner must not detach and rebuild the role="alert" node every tick '
+    + '(any of .remove/.removeChild/.replaceWith on the existing node)');
+  assert.ok(/if\s*\(existing\)\s*\{[\s\S]*?\breturn\b/.test(bannerBody),
+    'showUnreachableBanner must return early when the banner already exists, so the node survives');
+
+  // The heartbeat fetch needs a deadline. A dead process refuses instantly, but the outage this
+  // whole unit exists for was a WEDGED server: socket accepting, event loop stopped, so a fetch
+  // with no timeout never settles and `fails` never leaves 0 — verified with SIGSTOP.
+  const hbBody = fnBody(ui, 'async function checkHeartbeat(');
+  assert.ok(/AbortSignal\.timeout\(|signal:/.test(hbBody),
+    'checkHeartbeat must bound its fetch, or a wedged server is never detected');
+});
+
 test('GET /api/runner reports whether the queue is being drained', async () => {
   const res = await fetch(`${base}/api/runner`);
   assert.equal(res.status, 200);

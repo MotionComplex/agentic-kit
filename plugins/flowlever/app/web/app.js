@@ -2840,42 +2840,65 @@ function pendingJobCard(job) {
     job.instructions ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
 }
 
-/* One shared poller. `scope` lets a re-render (e.g. the finish screen) reuse the
- * running interval instead of resetting it; `token` invalidates in-flight fetches
- * after stopPolling so a late response can't clobber a newer view. */
-const poller = { timer: null, token: 0, scope: null, fn: null };
+/* One shared requests poll. `scope` lets a re-render (e.g. the finish screen) reuse the running
+ * registration instead of resetting it; `token` invalidates in-flight fetches after stopPolling so
+ * a late response can't clobber a newer view.
+ *
+ * There is deliberately NO timer in here. The app's single interval is appTick() below, started
+ * once at boot and never torn down, and startPolling/stopPolling only register/unregister which
+ * callback that ticker feeds. When the heartbeat rode a timer owned by this poller, an outage
+ * killed the very thing meant to report it: route() calls stopPolling() before rendering and every
+ * view re-arms the poller only at the END of its async render, after an `await api(...)` that
+ * throws while the server is down. So a cold load with the server down left no timer at all
+ * (failure count stuck at 1, no banner, for the life of the tab), navigating during an outage
+ * froze the count so the banner could neither trip nor clear when the server came back, and the
+ * views with no poller of their own — the guide, and the review stepper, the one surface holding
+ * unposted decisions — could never raise it at all. */
+const poller = { token: 0, scope: null, fn: null };
 
 function stopPolling() {
-  if (poller.timer) clearInterval(poller.timer);
-  poller.timer = null;
   poller.fn = null;
   poller.scope = null;
   poller.token++;
 }
 
 function startPolling(scope, fn) {
-  if (poller.scope === scope && poller.timer) { poller.fn = fn; return; }
+  if (poller.scope === scope && poller.fn) { poller.fn = fn; return; }
   stopPolling();
   poller.scope = scope;
   poller.fn = fn;
-  const token = poller.token;
-  const tick = async () => {
-    if (token !== poller.token) return;
-    let reqs;
-    try { reqs = await api('/api/requests'); } catch { return; /* transient — keep last view */ }
-    if (token !== poller.token || !poller.fn) return;
-    // The runner's liveness rides the same tick: every surface that shows a job also wants to know
-    // whether anything is draining it, and one extra tiny GET beats a second interval. The
-    // server-version check rides along too (C-18) — a tab left open across an upgrade re-checks
-    // instead of only ever trusting the verdict from page load.
-    await refreshRunner();
-    if (token !== poller.token || !poller.fn) return;
-    poller.fn(Array.isArray(reqs) ? reqs : []);
-    renderRunnerZones();
-    checkServerVersion();
-  };
-  tick();
-  poller.timer = setInterval(tick, 4000);
+  // Poll once immediately so a freshly rendered view doesn't sit a whole tick behind the queue.
+  pollRequestsTick(poller.token);
+}
+
+/* The per-view half of a tick: the requests queue plus the runner's liveness, handed to whichever
+ * view is registered right now. Re-checks the token at every await boundary, because a navigation
+ * mid-flight must not let a stale view's callback paint over the new one. */
+async function pollRequestsTick(token) {
+  if (token !== poller.token || !poller.fn) return;
+  let reqs;
+  // A failed /api/requests is transient here — keep the last view rather than blanking it. It is
+  // no longer the heartbeat's problem either: appTick() has already run checkHeartbeat() before
+  // calling this, so "the server is gone" is reported by the heartbeat, not inferred from here.
+  try { reqs = await api('/api/requests'); } catch { return; }
+  if (token !== poller.token || !poller.fn) return;
+  // The runner's liveness rides the same tick: every surface that shows a job also wants to know
+  // whether anything is draining it, and one extra tiny GET beats a second interval.
+  await refreshRunner();
+  if (token !== poller.token || !poller.fn) return;
+  poller.fn(Array.isArray(reqs) ? reqs : []);
+  renderRunnerZones();
+}
+
+/* The app's one and only ticker body (see the single setInterval at the bottom of the file). Order
+ * matters: the heartbeat runs FIRST and UNCONDITIONALLY, on every tick, no matter what any view is
+ * or isn't doing, because the failure it detects — the server not answering — is precisely the
+ * condition under which every view-owned mechanism stops running. Only then does the currently
+ * registered view get its requests poll. Both halves are guarded so a throw in one cannot stop the
+ * timer the whole app now depends on. */
+async function appTick() {
+  try { await checkHeartbeat(); } catch { /* a bug in the heartbeat must not kill the only timer */ }
+  try { await pollRequestsTick(poller.token); } catch { /* nor may a bug in a view's callback */ }
 }
 
 /* Force an out-of-band refresh right after an enqueue, so the queued row shows
@@ -5454,32 +5477,203 @@ document.addEventListener('keydown', (e) => {
 
 /* ============================== boot ============================== */
 
+/* Multiple sticky top banners (#stale-server, #server-unreachable, #server-restarted) can be up at
+ * once — a restart, for instance, clears the unreachable one but immediately raises the restart
+ * one. `position: sticky; top: 0` siblings don't stack themselves (they all pin to the same spot
+ * and the later one in the DOM just paints over the earlier one), so after any banner is
+ * shown/hidden this walks the survivors in document order and gives each one a top offset equal to
+ * the combined height of the banners above it. */
+function restackBanners() {
+  let offset = 0;
+  document.querySelectorAll('.top-banner').forEach((el) => {
+    el.style.top = `${offset}px`;
+    offset += el.offsetHeight;
+  });
+  // The banners sit at z-index 100 and the nav (.topbar, style.css) is sticky at z-index 50, so a
+  // full stack of three — measured at 148px against a 56px header — painted over the entire nav
+  // and made it unclickable. Push the nav down by exactly the stack's height instead, and hand the
+  // offset back to the stylesheet (top: 0) once the last banner is gone.
+  const topbar = document.querySelector('.topbar');
+  if (topbar) topbar.style.top = offset ? `${offset}px` : '';
+}
+
+/* Debounce for the unreachable banner: only trip it after this many CONSECUTIVE failed heartbeats
+ * (~8s at the 4s tick interval) so one dropped request doesn't cry wolf, while a real outage is
+ * still caught within a couple of ticks — this is the number called out in the diagnosis (a tab
+ * that sat open for ~20 hours with no way to tell the server was gone). */
+const HEARTBEAT_FAIL_THRESHOLD = 2;
+
+/* Heartbeat state. Deliberately module-level and OUTSIDE `poller`, which route() unregisters on
+ * every navigation: "is the server even there" has to survive that, or clicking around during a
+ * real outage would keep resetting the failure count and the debounce would never trip. */
+const heartbeat = {
+  fails: 0,          // consecutive failed/errored /api/version checks
+  lastOkAt: null,    // ISO stamp of the last time the server answered — drives "unreachable since…"
+  startedAt: null,   // the server's own SERVER_STARTED_AT, from the first successful check; a LATER
+                      // check reporting a different value means the process restarted underneath us
+};
+
+/* One request to the cheapest endpoint the server has (GET /api/version, src/server.js — "matched
+ * first, must answer even when everything else about the build is mismatched") answers three
+ * independent questions, each with its own banner:
+ *   1. Is the server there at all? → #server-unreachable, after HEARTBEAT_FAIL_THRESHOLD misses.
+ *   2. Did it restart since we last asked? → #server-restarted (the app.js/style.css this tab is
+ *      running may now be stale — the server sends no ETag/Cache-Control, so nothing else notices).
+ *   3. Does its API version match what this page was built for? → #stale-server (pre-existing).
+ * Runs on every tick of the app-level ticker — never on a view's poller, which is exactly what an
+ * outage takes down first; see the comment on `poller` for the failure that taught us that. */
+/* The timeout is the whole point, not a nicety. A DEAD process on loopback refuses instantly and
+ * any bare fetch catches it — but the outage that motivated this heartbeat was a WEDGED one: the
+ * listen socket still accepted, headers came back, and the event loop never ran, so a fetch with no
+ * deadline simply never settles. Without a deadline `fails` stays at 0 for as long as the server is
+ * wedged and the tab keeps looking healthy — the exact bug, reproduced with SIGSTOP. 3s is twice
+ * the ~1.5s worst case the server can legitimately block for behind a contended ledger write, so a
+ * merely slow cockpit is not reported as gone. This also bounds how many ticks can pile up. */
+const HEARTBEAT_TIMEOUT_MS = 3000;
+
+async function checkHeartbeat() {
+  let res;
+  let body = null;
+  try {
+    res = await fetch('/api/version', { signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS) });
+    if (res.ok) body = await res.json();
+  } catch {
+    onHeartbeatFail();   // refused, aborted at the deadline, or malformed body — all "not answering"
+    return;
+  }
+  if (!res.ok && res.status !== 404) {
+    onHeartbeatFail();   // a 5xx (or similar) is a real heartbeat failure, not just a thrown fetch
+    return;
+  }
+  onHeartbeatOk();
+  if (!res.ok) {
+    // A 404 is not a failed heartbeat — the server answered, so the two concerns stay separate —
+    // but it is conclusive evidence the SERVER is the stale side: it predates /api/version
+    // entirely, which is also what a different process squatting the port looks like. Pass the
+    // missing version through as `null` so checkVersionMismatch still renders the "server predates
+    // the version check" banner (and refreshes it if one is already up). Treating this as healthy,
+    // as an earlier cut of the heartbeat did, hid an old binary behind a green-looking tab.
+    checkVersionMismatch(null);
+    return;
+  }
+  checkRestart(body && body.startedAt);
+  checkVersionMismatch(body && body.apiVersion);
+}
+
+function onHeartbeatFail() {
+  heartbeat.fails += 1;
+  if (heartbeat.fails >= HEARTBEAT_FAIL_THRESHOLD) showUnreachableBanner();
+}
+
+function onHeartbeatOk() {
+  const wasUnreachable = heartbeat.fails >= HEARTBEAT_FAIL_THRESHOLD;
+  heartbeat.fails = 0;
+  heartbeat.lastOkAt = new Date().toISOString();
+  if (!wasUnreachable) return;
+  clearUnreachableBanner();
+  // Whatever view is open may be showing minutes (or, per the incident that motivated this, hours)
+  // of stale data gathered while the server was gone — don't let it linger now that it's back.
+  refreshCurrentView();
+}
+
+function showUnreachableBanner() {
+  const since = heartbeat.lastOkAt ? ` Last reached ${fmtAgo(heartbeat.lastOkAt)}.` : '';
+  const msg = `${since} Still retrying every few seconds — this banner clears on its own once it is back.`;
+  // Built ONCE, on the transition into the unreachable state, and only text-patched afterwards.
+  // This runs on every failed tick for as long as the outage lasts, and a freshly inserted
+  // role="alert" is re-announced by screen readers each time it appears: rebuilding the node every
+  // 4s would have meant roughly 18,000 announcements across the ~20-hour outage that motivated the
+  // banner. Only the "last reached …" age actually changes, so only that changes here.
+  const existing = $('#server-unreachable');
+  if (existing) {
+    // Only write when the wording actually changed. This is a role="alert" region, so an
+    // assistive technology may re-announce on any subtree mutation — and `fmtAgo` returns "just
+    // now" for the first minute and only ~80 distinct values across a day, so an unconditional
+    // write re-announced an identical sentence every 4s for the length of the outage.
+    const msgEl = existing.querySelector('.server-unreachable-msg');
+    if (msgEl && msgEl.textContent !== msg) {
+      msgEl.textContent = msg;
+      restackBanners();   // the age text can wrap, so the bar's height (and the stack) may shift
+    }
+    return;
+  }
+  const bar = h('div', { class: 'stale-server top-banner', id: 'server-unreachable', role: 'alert' },
+    h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
+    h('div', { class: 'stale-server-body' },
+      h('strong', {}, 'The cockpit server is not answering.'),
+      h('span', { class: 'server-unreachable-msg' }, msg)));
+  document.body.prepend(bar);
+  restackBanners();
+}
+
+function clearUnreachableBanner() {
+  const bar = $('#server-unreachable');
+  if (!bar) return;
+  bar.remove();
+  restackBanners();
+}
+
+/* Reload whatever the user is looking at, without doing what a full route() would do to an
+ * in-progress review: route() unconditionally closes any open finding modal and resets the
+ * stepper's flow before it does anything else, which would throw away exactly the in-progress
+ * decisions this banner is trying not to disturb. Detail and review-flow reload their data in
+ * place instead — the same path ensureFeatureJobPolling already uses when a background job
+ * finishes (see its `justDone` branch) — and let their own re-render (rerenderDetail /
+ * renderFlowInto, via reconcileFlowItems) reconcile the fresh data against whatever is open. Every
+ * other view (home, the kind sections, guide) has no unsaved state to protect, so a plain route()
+ * — the same reload every hash navigation already does — is enough. */
+function refreshCurrentView() {
+  if ((current.view === 'detail' || current.view === 'review-flow') && current.id) {
+    loadDetail(current.id, true)
+      .then(() => (current.view === 'review-flow' ? renderFlowInto() : rerenderDetail()))
+      .catch(() => {});
+    return;
+  }
+  route();
+}
+
+/* A later /api/version call reporting a DIFFERENT startedAt than the first one we ever saw means
+ * the server process was replaced underneath this tab (a restart, a redeploy). The server sends no
+ * ETag/Cache-Control on app.js/style.css, so the browser has no other way to learn the assets this
+ * tab is running may now be stale. Never auto-reloads — the user may have unsaved editor text (an
+ * open comment draft, an edited hunk) — it only offers the button. */
+function checkRestart(startedAt) {
+  if (!startedAt) return;
+  if (heartbeat.startedAt == null) { heartbeat.startedAt = startedAt; return; }   // first observation: baseline only
+  if (startedAt === heartbeat.startedAt) return;
+  heartbeat.startedAt = startedAt;
+  if ($('#server-restarted')) return;   // already showing
+  const bar = h('div', { class: 'stale-server top-banner', id: 'server-restarted', role: 'alert' },
+    h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
+    h('div', { class: 'stale-server-body' },
+      h('strong', {}, 'The cockpit server restarted.'),
+      h('span', {}, ' This tab may be running a stale build (no cache-busting on app.js/style.css). '
+        + 'Reload when convenient — your place is kept, but an open editor is not.')),
+    h('button', {
+      class: 'btn btn-accent stale-server-reload', type: 'button', onclick: () => location.reload(),
+    }, 'Reload'),
+    h('button', {
+      class: 'btn-icon stale-server-dismiss', type: 'button', 'aria-label': 'Dismiss',
+      title: 'Dismiss (the tab stays on the old build)', onclick: () => { bar.remove(); restackBanners(); },
+    }, '×'));
+  document.body.prepend(bar);
+  restackBanners();
+}
+
 /* Compare the running server's API version against what this page was built for, and say so loudly
  * if they differ — in the RIGHT direction. A 404 on /api/version means the server predates the
  * check entirely, which is conclusive evidence the SERVER is the stale side; a numeric mismatch
  * can go either way (an upgraded server outliving a browser tab with a cached older app.js is just
  * as real as the reverse), so the two are told apart and each gets the instruction that actually
  * fixes it — the previous version only ever blamed the server, even when the PAGE was behind.
- * Re-checked on every poll tick (not a second timer) so a tab left open across an upgrade catches
+ * Re-checked on every heartbeat (not a second timer) so a tab left open across an upgrade catches
  * up instead of latching the boot-time verdict forever; a banner is dropped once versions agree
- * again (e.g. the server got restarted). */
-async function checkServerVersion() {
-  let got = null;
-  try {
-    const res = await fetch('/api/version');
-    if (res.ok) {
-      const body = await res.json();
-      got = body && body.apiVersion;
-    } else if (res.status !== 404) {
-      return;   // some other transient failure; don't cry wolf
-    }
-  } catch {
-    return;     // server down / offline — the views surface that on their own
-  }
+ * again (e.g. the server got restarted onto a matching build). */
+function checkVersionMismatch(got) {
   const gotN = got == null ? NaN : Number(got);
   if (Number.isFinite(gotN) && gotN === Number(EXPECTED_API_VERSION)) {
     const bar = $('#stale-server');
-    if (bar) bar.remove();   // back in sync since the last check
+    if (bar) { bar.remove(); restackBanners(); }   // back in sync since the last check
     return;
   }
   const serverIsNewer = Number.isFinite(gotN) && gotN > Number(EXPECTED_API_VERSION);
@@ -5487,6 +5681,13 @@ async function checkServerVersion() {
 }
 
 function showStaleServerBanner(got, serverIsNewer) {
+  // Same reasoning as showUnreachableBanner: this is re-evaluated on every heartbeat, so leave an
+  // identical banner's node alone rather than re-inserting a role="alert" every 4s. The signature
+  // covers everything the wording depends on, so a genuine change — a numeric mismatch that starts
+  // 404ing instead, or the direction flipping — still rebuilds the bar instead of leaving stale text.
+  const sig = `${serverIsNewer ? 'page-behind' : 'server-behind'}:${got == null ? 'none' : got}`;
+  const already = $('#stale-server');
+  if (already && already.dataset.sig === sig) return;
   const versionNote = got ? ` (server API v${got}, page expects v${EXPECTED_API_VERSION})` : ' (server predates the version check)';
   const body = serverIsNewer
     ? h('div', { class: 'stale-server-body' },
@@ -5496,22 +5697,29 @@ function showStaleServerBanner(got, serverIsNewer) {
         h('strong', {}, 'The cockpit server is running an older build than this page.'),
         h('span', {}, ' Actions can fail with a bare “Not found” because the server has never heard of ',
           'the routes this page calls. Restart it: ', h('code', {}, 'node src/cli.js start'), versionNote));
-  const existing = $('#stale-server');
-  if (existing) existing.remove();   // rebuilt below — the direction may have flipped since last check
-  const bar = h('div', { class: 'stale-server', id: 'stale-server', role: 'alert' },
+  if (already) already.remove();   // rebuilt below — the direction or the version note has changed
+  const bar = h('div', { class: 'stale-server top-banner', id: 'stale-server', role: 'alert', 'data-sig': sig },
     h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '⚠'),
     body,
     h('button', {
       class: 'btn-icon stale-server-dismiss', type: 'button', 'aria-label': 'Dismiss',
-      title: 'Dismiss (the mismatch remains)', onclick: () => bar.remove(),
+      title: 'Dismiss (the mismatch remains)', onclick: () => { bar.remove(); restackBanners(); },
     }, '×'));
   document.body.prepend(bar);
+  restackBanners();
 }
 
 window.addEventListener('hashchange', route);
 // Know whether a runner is going before the first paint settles, so the Run button doesn't pop in
 // a tick later (the shared poller keeps it fresh from then on).
 refreshRunner().then(renderRunnerZones).catch(() => {});
-checkServerVersion();
+checkHeartbeat();
 loadLiveConfig();
 route();
+// The app's ONE interval, and the only one there should ever be: started here at boot, owned by
+// the app rather than by whichever view happens to be mounted, and never cleared. Navigation can
+// only register/unregister the per-view callback it feeds (startPolling/stopPolling) — it cannot
+// stop the heartbeat, which is the whole point: a cold load with the server already down, or a
+// navigation mid-outage, used to leave no timer running and therefore no way to ever notice the
+// server was gone or that it had come back.
+setInterval(appTick, 4000);
