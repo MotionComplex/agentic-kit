@@ -57,13 +57,12 @@ them**; each notes how reversible it is. Run outcome and unit history: `AUTOPILO
 2. **Hard-reload the cockpit** (⌘⇧R). The server sends no `ETag`/`Cache-Control`, so your tab may
    still hold the older `app.js`. You will now get a banner telling you when a restart means your
    assets are stale.
-3. **Worth a decision from you — a real hazard this run surfaced.** Clicking **Post** spawns a real
-   `claude … /flowlever:watch` session that writes to real Azure DevOps. Pointing
-   `FLOWLEVER_DATA` at a scratch ledger isolates the *data*, not the *outbound writes* — a worker
-   testing against a throwaway copy still spawned a live runner and had to kill it within a second.
-   I did not build the guard (out of this run's scope), but I recommend a `FLOWLEVER_READONLY=1`
-   that makes write routes and the runner spawn refuse. It would also make the cockpit safe to demo.
-   Say the word and it is a small unit.
+3. ~~**Worth a decision from you — a real hazard this run surfaced.** Clicking **Post** spawns a
+   real `claude … /flowlever:watch` session that writes to real Azure DevOps. Pointing
+   `FLOWLEVER_DATA` at a scratch ledger isolates the *data*, not the *outbound writes*.~~
+   **DONE** — you asked for it afterwards and it shipped as `FLOWLEVER_READONLY=1` (`efc2517`),
+   enforced at the ledger write choke point, the HTTP layer, and the runner spawn. See the
+   Environment variables table in `README.md`. Nothing to decide.
 4. **Unrelated, but your poller logged it during this run:** PR 5843's review was ingested at 08:37Z
    and the PR merged at 09:05Z with its five findings still in draft — never posted. The
    review-turnaround gap is yours to weigh.
