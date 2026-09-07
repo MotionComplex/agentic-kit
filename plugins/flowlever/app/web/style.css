@@ -601,6 +601,18 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .stale-server-icon { color: var(--major); font-size: 14px; line-height: 1.3; flex: none; }
 .stale-server-body { flex: 1; min-width: 0; }
 .stale-server-body strong { color: var(--major); }
+
+/* Read-only reuses the banner's shape but not its alarm. The other two banners report something
+ * wrong that the user should act on; this one reports a mode they chose, and will sit there for the
+ * whole session — amber for hours would train the eye to ignore all three. Neutral panel colours,
+ * same layout. */
+.read-only-banner { background: var(--panel-2); border-bottom-color: var(--line); }
+.read-only-banner .stale-server-icon,
+.read-only-banner .stale-server-body strong { color: var(--fg); }
+.read-only-banner code {
+  font-family: var(--mono); font-size: 11.5px;
+  background: var(--panel-3); border-radius: 5px; padding: 0 5px;
+}
 .stale-server code {
   font-family: var(--mono); font-size: 11.5px; background: var(--panel-3);
   border-radius: 5px; padding: 1px 6px;

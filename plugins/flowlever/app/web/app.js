@@ -35,7 +35,18 @@ let liveConfig = null;   // { severityWeights, gates: { readyThreshold, scoreZer
 
 async function loadLiveConfig() {
   try { liveConfig = await api('/api/config'); } catch { /* keep the fallback constants */ }
+  // Read-only rides on the config response, so the banner can go up as soon as the page knows.
+  if (readOnlyMode()) showReadOnlyBanner();
 }
+
+/* Whether the server refused writes for this session (FLOWLEVER_READONLY=1). Unknown until
+ * /api/config answers, and deliberately defaults to FALSE while unknown: guessing "read-only"
+ * would disable the whole cockpit on a slow first request, which is a worse failure than briefly
+ * offering a control that the server would refuse anyway. */
+function readOnlyMode() { return !!(liveConfig && liveConfig.readOnly); }
+
+const READ_ONLY_TITLE = 'Read-only mode (FLOWLEVER_READONLY=1) — this cannot change anything. '
+  + 'Restart the cockpit without it to make changes.';
 
 const ICONS = {
   pin: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16v6"/><path d="M9 3h6l-1 6 3.5 3.5a1 1 0 0 1-.7 1.5H7.2a1 1 0 0 1-.7-1.5L10 9z"/></svg>',
@@ -295,6 +306,14 @@ function toast(msg, kind = 'error') {
 /* ============================== api ============================== */
 
 async function api(path, opts = {}) {
+  // Refuse writes locally in read-only mode instead of letting each one round-trip to a 403.
+  // Every caller already handles a rejected api() — toasts, the "not saved — retry" affordance,
+  // the optimistic rollbacks — so failing here reuses all of that and gives one consistent
+  // sentence, rather than each surface inventing its own reading of a server error.
+  const method = (opts.method || 'GET').toUpperCase();
+  if (readOnlyMode() && method !== 'GET' && method !== 'HEAD') {
+    throw new Error('read-only mode (FLOWLEVER_READONLY=1) — nothing was changed');
+  }
   let res;
   try {
     res = await fetch(path, opts);
@@ -1363,6 +1382,11 @@ function decisionRow(data, f) {
   const mk = (b) => h('button', {
     class: `dec-btn ${b.cls} ${decKind === b.kind ? 'on' : ''}`, type: 'button',
     'aria-pressed': decKind === b.kind ? 'true' : 'false',
+    // Disabled rather than merely failing: reading a finding, forming a judgement and clicking
+    // Approve only to be told afterwards that nothing was recorded wastes the most expensive part
+    // of a review. The banner says why the whole row is dead.
+    disabled: readOnlyMode() ? 'disabled' : undefined,
+    title: readOnlyMode() ? READ_ONLY_TITLE : undefined,
     onclick: () => decide(data, f, b.kind),
   }, b.label);
   const tag = cfg.tagLabels
@@ -1798,7 +1822,9 @@ function approveAllControl(data) {
   }
   return h('button', {
     class: 'btn approve-all-btn', type: 'button',
-    title: 'Approve every finding below still marked Undecided. It never touches a finding you '
+    disabled: readOnlyMode() ? 'disabled' : undefined,
+    title: readOnlyMode() ? READ_ONLY_TITLE
+      : 'Approve every finding below still marked Undecided. It never touches a finding you '
       + 'already Dismissed, Edited, or otherwise decided. Nothing is posted — Post stays a separate click.',
     onclick: () => { state.flow.confirmApproveAll = true; renderFlowInto(); },
   }, `✓ Approve ${n} remaining`);
@@ -2069,6 +2095,12 @@ function applyStatusEl(applyReqs) {
  * re-audit note. */
 function nextStepNote(data) {
   const kind = data.feature && data.feature.kind;
+  // "Next: post back to the PR" is a promise this mode cannot keep, and a false next step is worse
+  // than none — it is the sentence a reviewer would act on after reading everything else here.
+  if (readOnlyMode()) {
+    return h('div', { class: 'finish-next' },
+      '🔒 Read-only mode: this is the end of the line. Nothing above will be written or posted.');
+  }
   if (kind === 'pr-review' || kind === 'pr-respond') {
     return h('div', { class: 'finish-next' }, '↻ Next: post back to the PR above, then the threads update in Azure DevOps.');
   }
@@ -2136,7 +2168,11 @@ function postActionEl(data) {
     : `${verb.split(' ')[0]} ${postN} ${postN === 1 ? noun[0] : noun[1]} to ${target}`;
   const btn = h('button', {
     class: 'btn btn-accent btn-post', type: 'button',
-    disabled: active || (postN === 0 && !posted && !errored && !stalled && !unconfirmed),
+    // Read-only is the strongest of the reasons this button can be dead — it is the one that
+    // reaches a colleague's pull request — so it gates alongside the existing conditions.
+    disabled: readOnlyMode() || active
+      || (postN === 0 && !posted && !errored && !stalled && !unconfirmed),
+    title: readOnlyMode() ? READ_ONLY_TITLE : undefined,
     onclick: () => (needsRelease ? retryPost(data, kind, verb) : postBack(data, kind, verb)),
   }, active ? 'Queued…'
     : stalled || unconfirmed || errored ? 'Retry post'
@@ -3353,6 +3389,17 @@ function renderRunnerZone(zone, queuedCount, label = '') {
   const r = runnerStatus();
   zone.dataset.queued = String(queuedCount || 0);
   if (label) zone.dataset.label = label;
+  // A runner is the one control that leaves this machine — it spawns a session that posts to real
+  // pull requests, which is why read-only refuses it in src/runner.js too. Say so instead of
+  // offering a button whose only outcome is a 403: a queue that cannot be drained is a fact about
+  // the mode, not a failure worth a retry affordance.
+  if (readOnlyMode()) {
+    zone.replaceChildren(queuedCount
+      ? h('span', { class: 'runner-unavailable', title: READ_ONLY_TITLE },
+          `🔒 ${plural(queuedCount, 'job', 'jobs')} queued — read-only mode will not run them`)
+      : null);
+    return;
+  }
   if (!r) { zone.replaceChildren(); return; }
 
   if (r.running) {
@@ -3416,8 +3463,10 @@ function renderRefreshZone(zone, kind, job) {
   const btn = h('button', {
     class: `btn btn-refresh ${busy ? 'is-busy' : ''} ${failed ? 'is-error' : ''}`.trim(),
     type: 'button',
-    disabled: busy || undefined,
-    title: busy
+    // Refresh enqueues a poll job, which is a write to the request queue — and in read-only mode
+    // nothing would ever drain it, so the button would only manufacture a queue it cannot clear.
+    disabled: readOnlyMode() || busy || undefined,
+    title: readOnlyMode() ? READ_ONLY_TITLE : busy
       ? 'A refresh pass is already in flight'
       : `Check Azure DevOps now for new ${label} PRs and updated comments — instead of waiting for the scheduled poll`,
     onclick: () => enqueueRefresh(kind),
@@ -5850,6 +5899,25 @@ function clearUnreachableBanner() {
   const bar = $('#server-unreachable');
   if (!bar) return;
   bar.remove();
+  restackBanners();
+}
+
+/* Read-only mode has to be stated, not discovered. The whole point of the mode is that the cockpit
+ * is safe to open, drive and demo against real data — and a reviewer who can read a finding, form a
+ * decision and click Approve before learning that nothing will be recorded has been misled by the
+ * UI, even though no harm reached the ledger. Unlike the unreachable and restarted banners this one
+ * never clears: the mode is fixed for the life of the process (see READONLY in ledger.js), so there
+ * is no recovery to wait for and no dismiss button to offer. */
+function showReadOnlyBanner() {
+  if ($('#read-only-mode')) return;         // fixed for the process; only ever shown once
+  const bar = h('div', { class: 'stale-server top-banner read-only-banner', id: 'read-only-mode', role: 'status' },
+    h('span', { class: 'stale-server-icon', 'aria-hidden': 'true' }, '🔒'),
+    h('div', { class: 'stale-server-body' },
+      h('strong', {}, 'Read-only mode.'),
+      h('span', {}, ' You can open and read everything. Decisions, posts, applies and runner jobs '
+        + 'are refused — nothing here can change your review data or reach Azure DevOps. Restart '
+        + 'without '), h('code', {}, 'FLOWLEVER_READONLY=1'), h('span', {}, ' to make changes.')));
+  document.body.prepend(bar);
   restackBanners();
 }
 

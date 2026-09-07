@@ -837,13 +837,24 @@ test('posting an agreed code fix over HTTP refuses a missing or malformed sha', 
 
 // ---------- config + scope + HEAD ----------
 
-test('GET /api/config serves the real merged config', async () => {
+test('GET /api/config serves the real merged config, plus this server\'s read-only mode', async () => {
   const res = await fetch(`${base}/api/config`);
   assert.equal(res.status, 200);
   const cfg = await res.json();
-  assert.deepEqual(cfg, ledger.loadConfig());
+  // The original point of this test stands: every documented config key must come from
+  // loadConfig() rather than a hardcoded copy in the server, which is what silently drifted the
+  // moment anyone edited config.json. Assert that key-by-key rather than by deep-equality on the
+  // whole body, so the response can also carry server state without loosening the guarantee.
+  const real = ledger.loadConfig();
+  for (const [k, v] of Object.entries(real)) {
+    assert.deepEqual(cfg[k], v, `${k} must be served from the real config, not a copy`);
+  }
   assert.equal(typeof cfg.gates.readyThreshold, 'number');
   assert.equal(typeof cfg.gates.scoreZeroAtPenalty, 'number');
+  // `readOnly` rides along because the page needs the mode at boot and already fetches this once.
+  // It must be present and false here: read-only is opt-in, never the default.
+  assert.equal(cfg.readOnly, false);
+  assert.ok(!('readOnly' in real), 'readOnly is server state, not a config.json key');
 });
 
 test('POST /api/ingest honours scope and rejects a malformed one', async () => {
@@ -1095,10 +1106,14 @@ test('U2: the zero-post label names the remaining work instead of dead-ending', 
   const body = fnBody(ui, 'function postActionEl(');
   assert.ok(/still undecided/.test(body),
     'postActionEl must name the undecided count instead of just restating "Post 0 …"');
-  // The already-correct disabled gate on the Post button (opacity/cursor unaffected) must survive
-  // this unit untouched — only the label above it may change.
-  assert.ok(/disabled: active \|\| \(postN === 0 && !posted && !errored && !stalled && !unconfirmed\)/.test(body),
-    'the existing Post-button disabled condition must not have been changed by this unit');
+  // The already-correct disabled gate on the Post button must survive intact — the U2 unit was
+  // only allowed to change the label above it. Read-only mode later added a term IN FRONT of this
+  // condition (a cockpit that cannot write must not offer to post), which is an addition rather
+  // than a rewrite, so the original clause is still asserted verbatim here.
+  assert.ok(/\(postN === 0 && !posted && !errored && !stalled && !unconfirmed\)/.test(body),
+    'the original Post-button disabled condition must survive intact');
+  assert.ok(/disabled: readOnlyMode\(\) \|\| active/.test(body),
+    'read-only must also disable Post — it is the control that reaches a real pull request');
 });
 
 /* Regression guard for NEW-3: route()'s two confirm resets have no test coverage of their own

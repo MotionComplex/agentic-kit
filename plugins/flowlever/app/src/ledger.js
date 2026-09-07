@@ -7,6 +7,11 @@ const crypto = require('node:crypto');
 const repoRoot = path.resolve(__dirname, '..');
 const DATA_DIR = process.env.FLOWLEVER_DATA || path.join(repoRoot, 'data');
 
+// Read-only mode: the cockpit reads and renders everything, and refuses every write — to the
+// ledger, to Azure DevOps, and to the runner. Read at require() time on purpose: a mode that could
+// be toggled mid-process would be a mode you cannot reason about from a log line. See writeJson().
+const READONLY = process.env.FLOWLEVER_READONLY === '1';
+
 const SEVERITIES = ['blocker', 'major', 'minor', 'info'];
 const STATUSES = ['open', 'reworking', 'resolved', 'waived'];
 // Workflow kinds a workspace can host. All ride the same finding model + stepper;
@@ -117,6 +122,17 @@ function readJson(file) {
 // untrue at the level that matters. Syncing the DIRECTORY as well (so the rename itself survives an
 // OS crash) is opt-in; see the note at the end of this function for the measurement behind that.
 function writeJson(file, obj) {
+  // Read-only mode is enforced HERE, at the one function every ledger write funnels through,
+  // rather than only at the HTTP layer. The reason is the failure it exists to stop: testing the
+  // cockpit against a throwaway copy of the data isolates the ledger but NOT the app's outbound
+  // side effects, and a stray keystroke in the real one silently rewrote a real finding. A guard
+  // that lives only in src/server.js would be bypassed by the CLI, by a spawned runner, and by
+  // any future caller of this module — so it lives at the choke point and covers all of them.
+  if (READONLY) {
+    throw new Error(`FLOWLEVER_READONLY=1 — refusing to write ${path.basename(file)}. `
+      + 'This cockpit is in read-only mode: nothing can change the ledger, post to Azure DevOps, '
+      + 'or start a runner. Unset FLOWLEVER_READONLY to make changes.');
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${nextTmpSeq()}.tmp`;
   const body = JSON.stringify(obj, null, 2) + '\n';
@@ -302,6 +318,11 @@ function mutateRequests(fn) {
 // ---------- data dir / config ----------
 
 function initDataDir() {
+  // In read-only mode this must not be the thing that fails: pointed at a fresh or empty directory
+  // there is nothing to initialise and nothing to serve, and crashing on the missing config file
+  // would make read-only mode look broken rather than empty. loadConfig() already falls back to
+  // DEFAULT_CONFIG, so skip both the mkdir and the seed and let the board render empty.
+  if (READONLY) return DATA_DIR;
   for (const sub of ['features', 'ledger', 'rounds']) {
     fs.mkdirSync(path.join(DATA_DIR, sub), { recursive: true });
   }
@@ -1936,6 +1957,7 @@ function setCoverage(featureId, coverage) {
 
 module.exports = {
   DATA_DIR,
+  READONLY,
   KINDS,
   FEATURE_STATUSES,
   REQUEST_ACTIONS,
