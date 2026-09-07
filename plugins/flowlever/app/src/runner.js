@@ -23,7 +23,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { DATA_DIR } = require('./ledger');
+const { DATA_DIR, READONLY } = require('./ledger');
 
 // The only prompts this module will ever run. `watch` drains the queue (this is what makes a
 // pending Post actually post); `poll` additionally discovers new PRs first.
@@ -37,8 +37,11 @@ const LOG_TAIL_BYTES = 16 * 1024;
 
 // Env vars worth forwarding to the child: the ledger it must operate on, plus the poll tuning the
 // README documents. Everything else comes from the login shell.
+// FLOWLEVER_READONLY rides along even though start() refuses to spawn under it: if that guard is
+// ever loosened, or a child is launched by some other path, the mode must not be lost in the gap.
 const FORWARD_ENV = [
   'FLOWLEVER_DATA', 'FLOWLEVER_ADO_PROJECT', 'FLOWLEVER_REVIEWER_EMAIL', 'FLOWLEVER_POLL_CAP',
+  'FLOWLEVER_READONLY',
 ];
 
 const state = {
@@ -185,6 +188,18 @@ function status() {
 // Launch the runner. Returns { ok, status } or { ok:false, code, error } — `code` lets the caller
 // pick an HTTP status: EBUSY → 409, ENOBIN → 503, EACTION → 400.
 function start(action = 'watch') {
+  // This is the route that reaches OUTSIDE the machine: the spawned session posts comments to real
+  // pull requests. It is also the one a read-only ledger cannot stop by itself, because spawning a
+  // process writes nothing locally — so read-only mode has to refuse it explicitly, here, rather
+  // than rely on the guard in writeJson. Pointing FLOWLEVER_DATA at a throwaway copy is exactly
+  // the case that misleads: the data is isolated, the pull request is not.
+  if (READONLY) {
+    return { ok: false,
+      code: 'EREADONLY',
+      error: 'FLOWLEVER_READONLY=1 — refusing to start a runner. A runner posts to real pull '
+        + 'requests, which a read-only ledger cannot prevent on its own. Restart the cockpit '
+        + 'without FLOWLEVER_READONLY to run jobs.' };
+  }
   if (!ACTIONS[action]) {
     return { ok: false, code: 'EACTION', error: `unknown runner action "${action}"` };
   }

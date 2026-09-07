@@ -615,6 +615,16 @@ async function route(req, res) {
 
   if (parts[0] !== 'api') return handleStatic(req, res, url.pathname);
 
+  // Explicit read-only mode. The ledger refuses writes on its own (see writeJson), but that would
+  // surface here as a 500 with a stack — a bug's shape, not a policy's. Answering 403 up front says
+  // the refusal was deliberate, and keeps the runner-spawn route (which reaches Azure DevOps
+  // without touching the ledger at all) inside the same gate.
+  if (ledger.READONLY && req.method !== 'GET' && req.method !== 'HEAD') {
+    return sendError(res, 403, 'This cockpit is running with FLOWLEVER_READONLY=1, so it cannot '
+      + 'change review data, post to Azure DevOps, or start a runner. Everything is still readable. '
+      + 'Restart without FLOWLEVER_READONLY to make changes.');
+  }
+
   // Read-only from a non-loopback bind unless the operator explicitly opted into remote writes.
   if (!IS_LOOPBACK && !ALLOW_REMOTE_WRITES && req.method !== 'GET' && req.method !== 'HEAD') {
     return sendError(res, 403, `This cockpit is bound to ${HOST} rather than loopback and has no `
@@ -691,6 +701,7 @@ async function route(req, res) {
       host: HOST,
       loopback: IS_LOOPBACK,
       remoteWritesAllowed: ALLOW_REMOTE_WRITES,
+      readOnly: ledger.READONLY,
       lockWaitMs: ledger.configureLocking().waitMs,
       fsyncDir: process.env.FLOWLEVER_FSYNC_DIR === '1',
       workspaces: listed.features.length,
@@ -701,7 +712,10 @@ async function route(req, res) {
   // hardcoded copy of the severity weights — which silently drifted the moment anyone edited the
   // documented config.json. Serve the real one instead.
   if (parts[1] === 'config' && parts.length === 2 && req.method === 'GET') {
-    return sendJson(res, 200, ledger.loadConfig());
+    // `readOnly` rides on the config the page already fetches at boot rather than needing its own
+    // request. The page has to know: in read-only mode every write control must say so up front
+    // instead of letting the user compose a decision and meet a 403 at the end of it.
+    return sendJson(res, 200, { ...ledger.loadConfig(), readOnly: ledger.READONLY });
   }
   if (parts[1] === 'runner' && parts.length === 2) {
     if (req.method === 'GET') return handleRunnerGet(res, url.searchParams.get('log') === '1');
