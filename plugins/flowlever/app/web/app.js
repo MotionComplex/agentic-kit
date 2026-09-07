@@ -2520,6 +2520,24 @@ function needsYouBits(c) {
   return bits;
 }
 
+/* The dates a completed row can be sorted by, shown so the chosen order is legible. Both are
+ * rendered rather than only the active sort key, because these rows are built once and merely
+ * reordered when the sort changes — a label that depended on the current key would go stale the
+ * moment you switched. "Updated" is dropped when it lands on the same day as the review, which is
+ * the common case (marking a workspace done is usually the last thing that touches it) and would
+ * otherwise print the same date twice on every row. */
+function doneDatesRow(r) {
+  const reviewed = (r.stamps && r.stamps.lastReviewedAt) || r.lastRoundAt || null;
+  const updated = r.updatedAt || null;
+  const sameDay = reviewed && updated && fmtDate(reviewed) === fmtDate(updated);
+  const parts = [
+    stampEl('Last reviewed', reviewed, 'ir-done-stamp'),
+    sameDay ? null : stampEl('Last modified', updated, 'ir-done-stamp'),
+  ].filter(Boolean);
+  if (!parts.length) return null;
+  return h('div', { class: 'review-stamps ir-stamps ir-done-stamps' }, parts);
+}
+
 function inboxRow(r) {
   const done = r.status === 'done';
   const bits = done ? [] : needsYouBits(r.counts);   // a completed workspace never nags
@@ -2538,8 +2556,12 @@ function inboxRow(r) {
             ? bits.map((b) => h('span', { class: 'ir-bit' }, b))
             : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you')),
       // PR rows carry the reviewed-vs-updated stamps, so the inbox shows at a glance which
-      // PRs have moved since we last looked at them.
-      done ? null : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
+      // PRs have moved since we last looked at them. A completed row has no use for that
+      // comparison — but it does need its dates visible, because the Done list can now be sorted
+      // by them, and a list ordered by something you cannot see is not a list you can trust.
+      done
+        ? doneDatesRow(r)
+        : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
     h('span', { class: 'ir-arrow', 'aria-hidden': 'true' }, '→'));
 
   const label = r.title || r.id;
@@ -2581,13 +2603,87 @@ function inboxRow(r) {
  * what still needs you stays on top. Keyed open-state survives the polling re-renders
  * (which rebuild the list every tick) so an expanded "Done" section doesn't snap shut. */
 const doneOpen = {};
-function doneDisclosure(key, count, bodyEl) {
+
+/* How the Done list can be ordered. One table, read by both the <select> and the comparator, so
+ * the menu can never offer an order nothing implements.
+ *
+ * `at` returns the timestamp to sort on, or null when the workspace has none — a workspace with no
+ * review round yet must sink rather than lead, so a missing date sorts last either way.
+ * Newest-first is the default because a 45-item Done list ordered by title answers "what is it
+ * called" when the question is "what did I finish recently". The server's ordering (active first,
+ * then by outstanding counts, then title) still decides the ACTIVE list: that list answers "what
+ * needs me next", which is a different question, and it stays as it was. */
+const DONE_SORTS = {
+  reviewed: {
+    label: 'Last reviewed',
+    at: (d) => (d.stamps && d.stamps.lastReviewedAt) || d.lastRoundAt || null,
+  },
+  modified: {
+    label: 'Last modified',
+    at: (d) => d.updatedAt || null,
+  },
+  title: { label: 'Title (A–Z)', at: null },
+};
+const DONE_SORT_DEFAULT = 'reviewed';
+const DONE_SORT_STORE = 'flowlever.doneSort';
+
+/* The choice outlives the tab: re-picking an order on every reload is the friction this control
+ * exists to remove. Storage access is wrapped because it throws outright in some private modes,
+ * and a sort preference is never worth breaking the board over. */
+function doneSortKey() {
+  let stored = null;
+  try { stored = localStorage.getItem(DONE_SORT_STORE); } catch { /* storage unavailable */ }
+  return DONE_SORTS[stored] ? stored : DONE_SORT_DEFAULT;
+}
+
+function setDoneSortKey(key) {
+  if (!DONE_SORTS[key]) return;
+  try { localStorage.setItem(DONE_SORT_STORE, key); } catch { /* preference stays session-only */ }
+}
+
+/* Sorts [{ sortable, el }] pairs. Reordering prebuilt elements instead of re-rendering them is what
+ * lets both call sites share this — the inbox builds rows, the sections build cards — without
+ * either having to hand over its render function. */
+function sortDonePairs(pairs, key) {
+  const spec = DONE_SORTS[key] || DONE_SORTS[DONE_SORT_DEFAULT];
+  const byTitle = (a, b) => String(a.sortable.title || a.sortable.id || '')
+    .localeCompare(String(b.sortable.title || b.sortable.id || ''));
+  if (!spec.at) return pairs.slice().sort(byTitle);
+  return pairs.slice().sort((a, b) => {
+    const av = spec.at(a.sortable);
+    const bv = spec.at(b.sortable);
+    if (!av && !bv) return byTitle(a, b);   // neither dated → a stable, readable fallback
+    if (!av) return 1;                       // undated sinks, never leads
+    if (!bv) return -1;
+    return String(bv).localeCompare(String(av)) || byTitle(a, b);   // ISO strings → newest first
+  });
+}
+
+/* `pairs` is [{ sortable, el }]; `sortable` needs title/stamps/lastRoundAt/updatedAt, which both
+ * /api/home rows and /api/features summaries carry. */
+function doneDisclosure(key, pairs, bodyClass) {
+  const body = h('div', { class: bodyClass });
+  const fill = (sortKey) => body.replaceChildren(...sortDonePairs(pairs, sortKey).map((p) => p.el));
+  fill(doneSortKey());
+
+  const select = h('select', {
+    class: 'done-sort-select', 'aria-label': 'Sort completed workspaces',
+    // This sits inside the <summary>, where any click would otherwise toggle the section shut the
+    // moment you reach for the menu.
+    onclick: (e) => e.stopPropagation(),
+    onkeydown: (e) => e.stopPropagation(),
+    onchange: (e) => { setDoneSortKey(e.target.value); fill(e.target.value); },
+  }, Object.entries(DONE_SORTS).map(([k, s]) =>
+    h('option', { value: k, selected: k === doneSortKey() ? 'selected' : undefined }, s.label)));
+
   return h('details', {
       class: 'done-disc', open: !!doneOpen[key],
       ontoggle: (e) => { doneOpen[key] = e.currentTarget.open; },
     },
-    h('summary', { class: 'done-disc-sum' }, `Done (${count})`),
-    bodyEl);
+    h('summary', { class: 'done-disc-sum' },
+      h('span', {}, `Done (${pairs.length})`),
+      h('span', { class: 'done-sort' }, h('span', { class: 'done-sort-label' }, 'Sort'), select)),
+    body);
 }
 
 async function renderHome() {
@@ -2635,8 +2731,8 @@ async function renderHome() {
   const lists = [];
   if (activeRows.length) lists.push(h('div', { class: 'inbox' }, activeRows.map(inboxRow)));
   else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
-  if (doneRows.length) lists.push(doneDisclosure('home', doneRows.length,
-    h('div', { class: 'inbox done-disc-body' }, doneRows.map(inboxRow))));
+  if (doneRows.length) lists.push(doneDisclosure('home',
+    doneRows.map((r) => ({ sortable: r, el: inboxRow(r) })), 'inbox done-disc-body'));
   app.replaceChildren(
     h('div', { class: 'view-head' },
       h('h1', {}, 'Home'),
@@ -2768,7 +2864,10 @@ function sectionGrid(kind, features, requests) {
   const activeCards = withJob
     .filter(({ f }) => f.status !== 'done')
     .map(({ f, job }) => ({ rank: urgency(job), el: featureCard(f, job) }));
-  const doneCards = withJob.filter(({ f }) => f.status === 'done').map(({ f, job }) => featureCard(f, job));
+  // Kept as { sortable, el } pairs so the Done disclosure can reorder them by date — the card
+  // element alone carries no timestamp to sort on.
+  const doneCards = withJob.filter(({ f }) => f.status === 'done')
+    .map(({ f, job }) => ({ sortable: f, el: featureCard(f, job) }));
   // In-flight reviews for THIS section with no workspace yet → pending placeholder cards,
   // ranked in the same urgency pool as the workspace cards.
   const pending = live
@@ -2779,8 +2878,7 @@ function sectionGrid(kind, features, requests) {
   const lists = [];
   if (top.length) lists.push(h('div', { class: 'features-grid' }, top));
   else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
-  if (doneCards.length) lists.push(doneDisclosure(kind, doneCards.length,
-    h('div', { class: 'features-grid done-disc-body' }, doneCards)));
+  if (doneCards.length) lists.push(doneDisclosure(kind, doneCards, 'features-grid done-disc-body'));
   return h('div', { class: 'section-lists' }, ...lists);
 }
 

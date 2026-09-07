@@ -200,6 +200,11 @@ function handleHome(res) {
       id: f.id, title: f.title, kind: f.kind || 'spec', status: f.status, readiness, counts,
       authorResponded: !!(f.review && f.review.authorRespondedAt),
       lastRoundAt,
+      // `updatedAt` is the "last touched anything" clock, and for a COMPLETED workspace it is
+      // effectively when it was marked done (that goes through mutateFeature like any other
+      // change). The inbox's Done list sorts on it, which /api/features already supported and
+      // this one did not — the two shapes had drifted for no reason.
+      updatedAt: f.updatedAt,
       stamps: ledger.reviewStamps(f, lastRoundAt),
     };
   });

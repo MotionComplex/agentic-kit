@@ -1484,6 +1484,21 @@ a.f-dup-chip:hover { border-color: var(--major); filter: brightness(1.15); }
 .done-disc[open] .done-disc-sum::before { transform: rotate(90deg); }
 .done-disc-sum:hover { color: var(--fg-dim); }
 .done-disc-body { margin-top: 4px; }
+
+/* The sort control lives in the summary row, pushed to the right so the "Done (n)" label and the
+ * disclosure arrow keep their position. `cursor: default` because the summary sets `pointer` for
+ * the whole row, and a menu that looks like part of the toggle invites clicking the wrong thing. */
+.done-sort { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; cursor: default; }
+.done-sort-label { font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-mute); }
+.done-sort-select {
+  font: inherit; font-size: 11.5px; font-weight: 500;
+  padding: 3px 6px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--fg-dim);
+  cursor: pointer;
+}
+.done-sort-select:hover { border-color: var(--accent-line); color: var(--fg); }
+.done-sort-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (max-width: 620px) { .done-sort-label { display: none; } }
 .all-done-note { color: var(--fg-mute); font-size: 13px; margin: 2px 0; }
 
 /* ============================== timeline disclosure ============================== */

@@ -122,6 +122,20 @@ test('POST /review/apply accepts posted (PR comment sent → reworking + postedA
   assert.ok(f.postedAt, 'carries a postedAt stamp');
 });
 
+/* The inbox's Done list can be sorted by "last modified", which reads `updatedAt` off each row.
+ * /api/features had always carried it and /api/home never did — the two summary shapes had drifted,
+ * and the sort would have silently ranked every completed workspace as undated. */
+test('GET /api/home carries the timestamps the Done list sorts on', async () => {
+  const home = await (await fetch(`${base}/api/home`)).json();
+  const row = home.find((r) => r.id === 'flow-feat');
+  assert.ok(row, 'flow-feat is in the inbox');
+  assert.ok(row.updatedAt, 'updatedAt must be present — "sort by last modified" reads it');
+  assert.ok(!Number.isNaN(Date.parse(row.updatedAt)), 'and it must be a parseable timestamp');
+  // The other sort key comes off the stamps block, which this endpoint already served.
+  assert.ok(row.stamps, 'stamps must be present — "sort by last reviewed" reads lastReviewedAt');
+  assert.ok('lastReviewedAt' in row.stamps);
+});
+
 test('GET /api/home counts posted findings separately, not as reworking/toReview', async () => {
   const home = await (await fetch(`${base}/api/home`)).json();
   const row = home.find((r) => r.id === 'flow-feat');
@@ -1191,4 +1205,41 @@ test('NEW-3: route() disarms both finish-screen confirms on every navigation', (
   assert.ok(/state\.flow\.confirmApply\s*=\s*false;/.test(body),
     'route() must reset state.flow.confirmApply = false on every navigation — it gates a real '
     + 'write to ADO/Confluence and is the higher-stakes sibling of confirmApproveAll');
+});
+
+/* Sorting the Done list. The comparator lives in browser code the Node suite cannot import, so
+ * these are source assertions — but they pin the two properties that would actually break it: the
+ * menu must be generated from the same table the comparator reads (otherwise it can offer an order
+ * nothing implements, the DECIDE_KEYS failure mode), and a workspace with no date must sink rather
+ * than lead (an undated entry sorting first would put the least-known work at the top of a list
+ * whose whole purpose is recency). The ordering itself is verified in a real browser. */
+test('the Done sort menu and its comparator read one table, and undated rows sink', () => {
+  const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+
+  const table = ui.match(/const DONE_SORTS = \{[\s\S]*?\n\};/);
+  assert.ok(table, 'DONE_SORTS must exist as the single source of truth');
+  for (const key of ['reviewed', 'modified', 'title']) {
+    assert.ok(new RegExp(`\\b${key}:`).test(table[0]), `DONE_SORTS must define "${key}"`);
+  }
+
+  const disc = fnBody(ui, 'function doneDisclosure(');
+  assert.ok(/Object\.entries\(DONE_SORTS\)/.test(disc),
+    'the <select> options must be generated from DONE_SORTS, not hand-listed alongside it');
+  assert.ok(/e\.stopPropagation\(\)/.test(disc),
+    'the menu sits inside a <summary>, so its events must not bubble into the disclosure toggle');
+
+  const cmp = fnBody(ui, 'function sortDonePairs(');
+  assert.ok(/if \(!av\) return 1;/.test(cmp) && /if \(!bv\) return -1;/.test(cmp),
+    'a row with no timestamp must sort LAST in sortDonePairs, never first');
+  assert.ok(/localeCompare\(String\(av\)\)/.test(cmp),
+    'timestamps are ISO strings and must be compared newest-first (b vs a)');
+
+  // The two date labels the user picks between must be the same words the rows print, or the sort
+  // is unverifiable by eye — this is what made the first cut of the feature unusable.
+  const dates = fnBody(ui, 'function doneDatesRow(');
+  assert.ok(/'Last reviewed'/.test(dates) && /'Last modified'/.test(dates),
+    'doneDatesRow must label the dates exactly as the sort menu names them');
+  assert.ok(/DONE_SORTS/.test(table[0]) && /'Last reviewed'/.test(table[0])
+    && /'Last modified'/.test(table[0]),
+    'and DONE_SORTS must use those same labels');
 });
