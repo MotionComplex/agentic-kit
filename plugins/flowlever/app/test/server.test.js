@@ -1460,3 +1460,89 @@ test('U2: an empty band is not rendered', () => {
   assert.match(grid, /doneDisclosure\(kind, doneCards, 'features-grid done-disc-body'\)/,
     'the Done disclosure and its date sort must be left exactly as they were');
 });
+
+/* U2 review fixes. Same shape as the tests above — source assertions over browser code the Node
+ * suite cannot import, pinning the property that would actually break, with the rendering itself
+ * verified in a real browser. */
+
+test('U2: a job that already has a workspace card never gets a placeholder beside it', () => {
+  const grid = fnBody(readUi(), 'function sectionGrid(');
+
+  // `used` holds the ONE job jobForFeature bound per workspace, so a PR with two live jobs leaks
+  // its runner-up into the placeholder list and is drawn twice — once as "queued, not running" and
+  // once as its real card — while the band count above claims a workspace that isn't there.
+  assert.match(grid, /const wsIds = new Set\(features\.map\(\(f\) => f\.id\)\)/,
+    'sectionGrid must know which workspaces this page actually draws');
+  assert.match(grid, /!used\.has\(r\.id\) && !\(r\.wsId && wsIds\.has\(r\.wsId\)\)/,
+    'a job naming a workspace on this page has a card already — it must be disqualified from the '
+    + 'placeholder list, on top of the `used` check which only covers the bound job');
+  // The other half, and the reason the test is not just `&& !r.wsId`: a wsId pointing at a
+  // workspace that is gone is as orphaned as one that never had a wsId, and a bare !r.wsId would
+  // drop its placeholder and hide a running review completely.
+  assert.ok(!/&&\s*!r\.wsId\b/.test(grid),
+    'the filter must test workspace EXISTENCE, not merely the presence of a wsId — a dangling '
+    + 'wsId must still get its placeholder');
+
+  // And the placeholder is a card like any other, so it takes the band's density (finding 5).
+  assert.match(grid, /pendingJobCard\(e\.job, band\.density\)/,
+    'a placeholder must be drawn at the band density, not always full — a full-height placeholder '
+    + 'among one-line compact rows breaks the only promise a compact band makes');
+});
+
+test('U2: a full card names its state, so the band that demands action says the most', () => {
+  const ui = readUi();
+  const card = fnBody(ui, 'function featureCard(');
+
+  // Without this, ready-to-post / needs-review / needs-rereview / author-responded render
+  // pixel-identically: same lifecycle chip, same dial, same stamps. The compact cards parked
+  // BELOW them were the only ones labelled.
+  assert.match(card, /cat \? wsStatePill\(cat\) : null/,
+    'a full card must render the state pill when it was given a category');
+  assert.match(card, /statusChip\(f\.status\)/,
+    'and keep the lifecycle chip — "is this workspace still open" is a different question from '
+    + '"what is it waiting on"');
+
+  // .chip.ws-pill-needs-you was unreachable dead CSS while only compact cards wore a pill and no
+  // needs-you card was ever compact. Every band must have a reachable tint.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
+  for (const b of wsTables(ui).bands) {
+    assert.ok(css.includes(`.chip.ws-pill-${b.key}`), `style.css must tint the "${b.key}" pill`);
+  }
+  assert.match(fnBody(ui, 'function wsStatePill('), /ws-pill-\$\{cssSafe\(meta\.band\)\}/,
+    'the pill tint must come from the band the WS_STATES row names, not from the card');
+});
+
+test('U2: the category is decided once per render and handed to the card', () => {
+  const ui = readUi();
+  const grid = fnBody(ui, 'function sectionGrid(');
+  const card = fnBody(ui, 'function featureCard(');
+
+  assert.match(grid, /featureCard\(e\.f, e\.job, band\.density, e\.cat\)/,
+    'the band loop already decided the category — it must travel with the card');
+  // categoryOf reads the clock through isStaleJob, so a second call inside the card can disagree
+  // with the one that chose the header the card is sitting under: banded as one state, pilled as
+  // another, on a single job crossing the 3-minute stale threshold mid-render.
+  assert.ok(!/categoryOf\(/.test(card),
+    'featureCard must not recompute categoryOf — one decision per render');
+  assert.match(ui, /function featureCard\(f, job, density = 'full', cat = null\)/,
+    'and the Done disclosure, which draws outside the bands, must be able to pass no category: '
+    + '`done` is deliberately not a WS_STATES key, so there is no honest pill for it');
+});
+
+test('U2: band density is emitted from WS_BANDS, not restated in CSS', () => {
+  const ui = readUi();
+  const { bands } = wsTables(ui);
+  const grid = fnBody(ui, 'function sectionGrid(');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
+
+  assert.match(grid, /band-density-\$\{cssSafe\(band\.density\)\}/,
+    'the band must carry its density as a class, so the stylesheet can read the table too');
+  // Hardcoding which bands are compact is the WS_BANDS/band-map drift spelled in CSS: flip a
+  // `density` in the table and the spacing stays behind on a band that no longer holds one-liners.
+  for (const b of bands) {
+    assert.ok(!new RegExp(`\\.band-${b.key}\\s+\\.features-grid`).test(css),
+      `style.css must not space the "${b.key}" band by name — key it off the density class`);
+  }
+  assert.ok(css.includes('.band-density-compact .features-grid'),
+    'the compact spacing must hang off the density class');
+});

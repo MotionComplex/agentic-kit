@@ -2922,11 +2922,20 @@ function sectionGrid(kind, features, requests) {
     if (job) used.add(job.id);
     return { f, job };
   });
+  const wsIds = new Set(features.map((f) => f.id));
   // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, banded
   // by the same rule as everything else. They lead the list so that, at equal rank, the work that
   // has no card of its own yet still appears where its real card will land.
+  //
+  // `used` is not enough to decide "has no workspace yet": it holds the ONE job jobForFeature
+  // bound per workspace, so a PR carrying two live jobs leaks its runner-up through here and draws
+  // a placeholder BESIDE that PR's own card — two contradictory claims about one PR, and a band
+  // count that says more workspaces than the band holds. A placeholder's whole justification is
+  // that there is no card to fold the job onto, so a job naming a workspace on this page is out.
+  // A wsId naming a workspace that is gone is NOT out: that job is as orphaned as one that never
+  // carried a wsId, and dropping it would hide a running review entirely.
   const pending = live
-    .filter((r) => r.action === kind && r.prId && !used.has(r.id))
+    .filter((r) => r.action === kind && r.prId && !used.has(r.id) && !(r.wsId && wsIds.has(r.wsId)))
     .map((r) => ({ f: null, job: r, cat: categoryOf(null, r) }));
   // Active workspaces get banded; finished ones drop into a collapsed "Done" section.
   const active = withJob.filter(({ f }) => f.status !== 'done')
@@ -2944,12 +2953,20 @@ function sectionGrid(kind, features, requests) {
     // A header with nothing under it reads as "you have none of these", which is a claim the list
     // doesn't need to make three times per view. Omit the band entirely.
     if (!rows.length) continue;
-    bands.push(h('section', { class: `band band-${cssSafe(band.key)}` },
+    // The density rides out as a class so the stylesheet can space a band by how much card it
+    // holds without keeping its own list of which bands are compact — that second list is the
+    // WS_BANDS/band-map drift again, just spelled in CSS, and it survives a `density` flip here.
+    bands.push(h('section', { class: `band band-${cssSafe(band.key)} band-density-${cssSafe(band.density)}` },
       h('div', { class: 'band-head' },
         h('h2', { class: 'band-label' }, band.label),
         h('span', { class: 'band-count' }, `· ${rows.length}`)),
       h('div', { class: 'features-grid' },
-        rows.map((e) => (e.f ? featureCard(e.f, e.job, band.density) : pendingJobCard(e.job))))));
+        // The category decided above travels with the card. Recomputing it inside featureCard
+        // re-reads Date.now() through isStaleJob, so a job crossing the stale threshold mid-render
+        // would be banded under one header and labelled as another: one decision per render.
+        rows.map((e) => (e.f
+          ? featureCard(e.f, e.job, band.density, e.cat)
+          : pendingJobCard(e.job, band.density))))));
   }
 
   if (!bands.length && !doneCards.length) return sectionEmpty(kind);
@@ -3067,8 +3084,14 @@ function compactCard(f, job, cat, cls, href) {
 }
 
 /* `density` comes from the band the card is drawn in (WS_BANDS), not from the card itself — the
- * same workspace is worth a full card under "Needs you" and a one-liner under "Waiting on others". */
-function featureCard(f, job, density = 'full') {
+ * same workspace is worth a full card under "Needs you" and a one-liner under "Waiting on others".
+ *
+ * `cat` is the WS_STATES key the band loop already decided for this card, handed down rather than
+ * recomputed: categoryOf() reads the clock through isStaleJob, so a second call can answer
+ * differently from the one that chose the header this card is sitting under. A card drawn outside
+ * the bands (the Done disclosure) passes none and wears no state pill — `done` is deliberately not
+ * a WS_STATES key, so there is no honest label to print there. */
+function featureCard(f, job, density = 'full', cat = null) {
   const r = summaryReadiness(f);
   const kind = f.kind || 'spec';
   const metaBits = [];
@@ -3093,12 +3116,17 @@ function featureCard(f, job, density = 'full') {
   const href = `#/feature/${encodeURIComponent(f.id)}`;
 
   const card = density === 'compact'
-    ? compactCard(f, job, categoryOf(f, job), cls, href)
+    ? compactCard(f, job, cat, cls, href)
     : h('a', { class: cls, href },
       h('div', { class: 'fc-top' },
         h('div', { class: 'fc-titlewrap' },
           h('div', { class: 'fc-title' }, f.title || f.id),
-          h('div', {}, statusChip(f.status)),
+          // The state pill leads, and it is the whole reason a full card is readable: without it
+          // ready-to-post, needs-review, needs-rereview and author-responded drew identically —
+          // the band that demands action said less about itself than the parked compact rows
+          // below it. statusChip stays because it answers a different question (is this workspace
+          // still open) from the pill (what is it waiting on).
+          h('div', { class: 'fc-chips' }, cat ? wsStatePill(cat) : null, statusChip(f.status)),
         ),
         dialEl(r.score, r.gate, 64, 'dial-sm'),
       ),
@@ -3326,18 +3354,25 @@ function cardReviewRow(f) {
     since ? `⏳ Waiting on author — posted ${since}` : '⏳ Waiting on author');
 }
 
-// A workspace doesn't exist yet (a first review still running): show a placeholder
-// card so the work is visible exactly where its real card will land.
-function pendingJobCard(job) {
+/* A workspace doesn't exist yet (a first review still running): show a placeholder card so the work
+ * is visible exactly where its real card will land.
+ *
+ * `density` is the band's, like every other card's. A placeholder that ignored it sat at full
+ * height among one-line compact rows, which breaks the only promise a compact band makes — that
+ * everything under this header is a glance, not a read. What the compact form drops is what the
+ * dial and the instructions line were already only guessing at: there is no workspace to score. */
+function pendingJobCard(job, density = 'full') {
   const title = job.title || `PR ${job.prId}`;
-  return h('div', { class: 'card feature-card fc-pending' },
+  const compact = density === 'compact';
+  return h('div', { class: `card feature-card fc-pending${compact ? ' fc-compact' : ''}` },
     h('div', { class: 'fc-top' },
       h('div', { class: 'fc-titlewrap' },
         h('div', { class: 'fc-title' }, title),
-        h('div', {}, h('span', { class: 'chip status-auditing' }, 'starting…'))),
-      h('div', { class: 'fc-pending-dial', 'aria-hidden': 'true' }, '—')),
+        h('div', { class: compact ? 'fc-why' : 'fc-chips' },
+          h('span', { class: 'chip status-auditing' }, 'starting…'))),
+      compact ? null : h('div', { class: 'fc-pending-dial', 'aria-hidden': 'true' }, '—')),
     cardJobRow(job, false),
-    job.instructions ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
+    !compact && job.instructions ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
 }
 
 /* One shared requests poll. `scope` lets a re-render (e.g. the finish screen) reuse the running
