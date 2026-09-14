@@ -141,6 +141,7 @@ const state = {
   // review API, this just records which path the reviewer chose.
   flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null, persistFailed: {} },
   section: { kind: null, features: [] },   // cached cards for the open PR section, re-bound to live jobs each poll
+  home: { rows: [] },      // cached inbox rows, re-banded against the live jobs on every poll tick
   runner: null,            // last GET /api/runner — is a session draining the queue right now?
 };
 const current = { view: null, id: null, tab: null };
@@ -2549,8 +2550,13 @@ function syncNav() {
 
 /* ============================== home (unified inbox) ============================== */
 
-/* Which "what needs you" bits to show for an inbox row. toReview/reworking/open are
- * the actionable states; a row with none of them is settled (shown as a check). */
+/* The supporting detail a needs-you row prints UNDER its state pill — how much is waiting, in
+ * counts. Deliberately not the headline any more: `state` is, and it is the only one of the two
+ * that can be trusted here. These bits read `counts`, and counts.toReview only counts findings
+ * carrying a `draft` — a PR-review finding usually carries just a `suggestion` — so toReview reads
+ * 0 on most PR workspaces and the row said "3 open" where it meant "3 to review". The counts
+ * themselves are left exactly as they are (the server's inbox sort reads them); what changed is
+ * that no row's headline, and no header count, depends on them. */
 function needsYouBits(c) {
   const bits = [];
   if (c.toReview) bits.push(`${c.toReview} to review`);
@@ -2580,30 +2586,62 @@ function doneDatesRow(r) {
   return h('div', { class: 'review-stamps ir-stamps ir-done-stamps' }, parts);
 }
 
-function inboxRow(r) {
+/* `density` is the band's, exactly as a card's is (WS_BANDS): a needs-you row earns the dial and
+ * the counts, a parked one earns only what identifies it and the one stamp that says why it is
+ * parked. `cat` is the WS_STATES key the band loop already decided, handed down rather than
+ * recomputed — the same rule featureCard follows, and for the same reason: categoryOf() reads the
+ * clock, so a second call can label a row as something other than the header it sits under. A row
+ * drawn outside the bands (the Done disclosure) passes neither and looks exactly as it did. */
+function inboxRow(r, job = null, density = 'full', cat = null) {
   const done = r.status === 'done';
-  const bits = done ? [] : needsYouBits(r.counts);   // a completed workspace never nags
+  const compact = density === 'compact';
+  // A completed workspace never nags; a parked one has nothing to act on either, and its pill and
+  // stamp already say why it is here — counts underneath would only invite a read it doesn't need.
+  const bits = done || compact ? [] : needsYouBits(r.counts);
   const rd = r.readiness || { score: 0, gate: 'in-progress' };
   const wrap = h('div', { class: `ir-wrap ${done ? 'ir-done' : ''}`.trim() });
 
-  const link = h('a', { class: 'inbox-row', href: `#/feature/${encodeURIComponent(r.id)}` },
-    dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
+  // Same job tints as a card, from the same classes — a row with a failed or stalled runner must
+  // read as failed or stalled here too, or Home is where a stuck Post goes unnoticed.
+  const busyState = job
+    ? (job.needsInput && job.status !== 'error' ? 'needs' : (isStaleJob(job) ? 'stale' : job.status))
+    : null;
+  const cls = ['inbox-row', compact ? 'ir-compact' : '', job ? `fc-busy fc-busy-${cssSafe(busyState)}` : '']
+    .filter(Boolean).join(' ');
+
+  const link = h('a', { class: cls, href: `#/feature/${encodeURIComponent(r.id)}` },
+    // The dial is decision material — a score you weigh before opening something. Nothing in the
+    // compact bands is waiting on that decision, so it goes with the rest of the full row.
+    compact ? null : dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
     h('div', { class: 'ir-main' },
       h('div', { class: 'ir-top' }, kindBadge(r.kind), h('span', { class: 'ir-title' }, r.title || r.id),
         done ? h('span', { class: 'chip status-done ir-done-chip' }, 'done') : null),
       h('div', { class: 'ir-needs' },
+        // The state leads, and the counts follow it as the detail they are. Without the pill,
+        // ready-to-post / needs-review / needs-rereview / author-responded drew identically on the
+        // first screen you land on — the inbox was the last surface still hiding the distinction
+        // the section cards gained.
+        cat ? wsStatePill(cat) : null,
         done
           ? h('span', { class: 'ir-clear' }, '✓ Review complete')
           : bits.length
             ? bits.map((b) => h('span', { class: 'ir-bit' }, b))
-            : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you')),
+            // The pre-band fallback, and only reachable without a pill: a row that says neither
+            // what it is waiting on nor what is outstanding says nothing at all.
+            : (cat ? null : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you')),
+        // The ONE stamp a compact row earns, chosen by the same rule a compact card uses: a posted
+        // review is waiting on the clock since WE posted, anything else since our last round.
+        compact ? compactStamp(r, job, cat) : null),
       // PR rows carry the reviewed-vs-updated stamps, so the inbox shows at a glance which
       // PRs have moved since we last looked at them. A completed row has no use for that
       // comparison — but it does need its dates visible, because the Done list can now be sorted
       // by them, and a list ordered by something you cannot see is not a list you can trust.
       done
         ? doneDatesRow(r)
-        : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
+        : (compact ? null : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
+      // The live job in the same words the cards use. A row banded by a state a runner is in the
+      // middle of invalidating, with no line saying so, is the inbox lying about what is happening.
+      job ? cardJobRow(job, hasFindingsOf(r)) : null),
     h('span', { class: 'ir-arrow', 'aria-hidden': 'true' }, '→'));
 
   const label = r.title || r.id;
@@ -2728,6 +2766,88 @@ function doneDisclosure(key, pairs, bodyClass) {
     body);
 }
 
+/* The banding every list view draws: WS_BANDS top to bottom, WS_STATES rank within a band, a
+ * header carrying its own count, and no header over an empty band. ONE implementation, on purpose
+ * — a second copy of this loop is how the kind sections and the inbox would come to disagree about
+ * which band a workspace belongs in, which is the same drift the single WS_BANDS/WS_STATES tables
+ * exist to prevent, just one level up.
+ *
+ * `entries` are `{ cat, ... }`: the category is decided ONCE by the caller and travels with the
+ * entry, because categoryOf() reads the clock through isStaleJob and a second call can answer
+ * differently from the one that chose the header. `render(entry, density)` draws one item at the
+ * band's density, and `itemsClass` is the container the view stacks them in — a card grid for a
+ * section, the inbox list for Home. */
+function bandSections(entries, render, itemsClass) {
+  // Rank is the WS_STATES index, and .sort() is stable, so ties keep insertion order.
+  const ranked = entries.slice().sort((a, b) => wsState(a.cat).rank - wsState(b.cat).rank);
+  const bands = [];
+  for (const band of WS_BANDS) {
+    const rows = ranked.filter((e) => wsState(e.cat).band === band.key);
+    // A header with nothing under it reads as "you have none of these", which is a claim the list
+    // doesn't need to make three times per view. Omit the band entirely.
+    if (!rows.length) continue;
+    // The density rides out as a class so the stylesheet can space a band by how much card it
+    // holds without keeping its own list of which bands are compact — that second list is the
+    // WS_BANDS/band-map drift again, just spelled in CSS, and it survives a `density` flip here.
+    bands.push(h('section', { class: `band band-${cssSafe(band.key)} band-density-${cssSafe(band.density)}` },
+      h('div', { class: 'band-head' },
+        h('h2', { class: 'band-label' }, band.label),
+        h('span', { class: 'band-count' }, `· ${rows.length}`)),
+      h('div', { class: itemsClass }, rows.map((e) => render(e, band.density)))));
+  }
+  return bands;
+}
+
+/* The subtitle's count of what needs you comes from the TOP band — which is what ordering WS_BANDS
+ * by urgency means — and no longer from needsYouBits: those bits read `counts`, whose toReview is
+ * blind to a PR finding carrying only a suggestion, so the header undercounted exactly the PR rows
+ * it was meant to be about. The band is the same answer the rows below it are grouped by. */
+function homeSubtitle(total, needsYou) {
+  return needsYou
+    ? `${plural(needsYou, 'workspace', 'workspaces')} need you · ${plural(total, 'workspace', 'workspaces')} total`
+    : `All caught up · ${plural(total, 'workspace', 'workspaces')} under watch`;
+}
+
+/* Draws the inbox from the cached rows against the jobs seen this tick, and answers WHICH of those
+ * jobs it folded onto a row. The strip needs that answer: a job shown on a row and in the strip
+ * states the same thing twice on one screen — the exact duplication the sections removed when they
+ * folded jobs onto cards. Returns a Set of job ids. */
+function renderHomeInbox(requests) {
+  const rows = (state.home && state.home.rows) || [];
+  const live = (requests || []).filter(isLiveJob);
+  const used = new Set();
+  const active = [];
+  const doneRows = [];
+  for (const r of rows) {
+    if (r.status === 'done') { doneRows.push(r); continue; }
+    // Bound exactly as a section card binds its job, through the same two helpers: a PR being
+    // posted, or one whose runner has stalled, must band by what is happening to it right now
+    // rather than by whatever it was before the job started.
+    const job = jobForFeature(r, live);
+    if (job) used.add(job.id);
+    active.push({ r, job, cat: categoryOf(r, job) });
+  }
+
+  const zone = $('#home-inbox-zone');
+  if (!zone) return used;
+  const bands = bandSections(active, (e, density) => inboxRow(e.r, e.job, density, e.cat), 'inbox');
+  const lists = bands.length
+    ? bands
+    : [h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.')];
+  if (doneRows.length) {
+    lists.push(doneDisclosure('home',
+      doneRows.map((r) => ({ sortable: r, el: inboxRow(r) })), 'inbox done-disc-body'));
+  }
+  zone.replaceChildren(h('div', { class: 'section-lists' }, ...lists));
+
+  const sub = $('#home-sub');
+  if (sub) {
+    sub.textContent = homeSubtitle(rows.length,
+      active.filter((e) => wsState(e.cat).band === WS_BANDS[0].key).length);
+  }
+  return used;
+}
+
 async function renderHome() {
   current.view = 'home'; current.id = null; current.tab = null;
   const seq = ++routeSeq;
@@ -2767,36 +2887,39 @@ async function renderHome() {
     return;
   }
 
-  const actionable = rows.filter((r) => r.status !== 'done' && needsYouBits(r.counts).length).length;
-  const activeRows = rows.filter((r) => r.status !== 'done');
-  const doneRows = rows.filter((r) => r.status === 'done');
-  const lists = [];
-  if (activeRows.length) lists.push(h('div', { class: 'inbox' }, activeRows.map(inboxRow)));
-  else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
-  if (doneRows.length) lists.push(doneDisclosure('home',
-    doneRows.map((r) => ({ sortable: r, el: inboxRow(r) })), 'inbox done-disc-body'));
+  // Cached so every poll tick can re-band them against the live jobs without refetching — the same
+  // arrangement the kind sections use, and the only way a row's band can follow its runner.
+  state.home.rows = rows;
   app.replaceChildren(
     h('div', { class: 'view-head' },
       h('h1', {}, 'Home'),
-      h('p', { class: 'view-sub' }, actionable
-        ? `${plural(actionable, 'workspace', 'workspaces')} need you · ${plural(rows.length, 'workspace', 'workspaces')} total`
-        : `All caught up · ${plural(rows.length, 'workspace', 'workspaces')} under watch`)),
+      h('p', { class: 'view-sub', id: 'home-sub' }, homeSubtitle(rows.length, 0))),
     h('div', { class: 'section-actions' }, refreshZone(null), runnerZone(0)),
     requestsStripEl([]),
-    h('div', { class: 'section-lists' }, ...lists),
+    h('div', { id: 'home-inbox-zone' }),
   );
+  // No job is known until the queue answers, which startPolling asks for immediately below. Paint
+  // the bands on the server's states now rather than holding the whole inbox back for a round trip.
+  renderHomeInbox([]);
   startHomeRequestsPoll();
 }
 
-/* Home shows the active jobs (queued/running, plus errors awaiting attention);
- * done jobs drop off once their workspace appears in the inbox below. When a job
- * completes, refresh the inbox so the new workspace surfaces. */
+/* Home re-bands its rows against the live queue every tick, then shows what the rows did NOT
+ * account for: the strip is the cross-section queue view and still carries jobs with no row yet,
+ * but a job already folded onto a row must not be listed twice on one screen. Done jobs drop off
+ * once their workspace appears in the inbox below; when one completes, refetch so it surfaces. */
 function startHomeRequestsPoll() {
   let lastDone = new Set();
   startPolling('home', (reqs) => {
     if (current.view !== 'home') return;
+    const used = renderHomeInbox(reqs);
     const active = reqs.filter((r) => r.status !== 'done');
-    populateRequestsStrip($('#requests-strip'), active, null);
+    const unbound = active.filter((r) => !used.has(r.id));
+    // With everything bound the strip has nothing left to add. Empty and silent reads as a broken
+    // queue, so say where those jobs went instead.
+    populateRequestsStrip($('#requests-strip'), unbound, active.length
+      ? `${plural(active.length, 'job', 'jobs')} in flight — already shown on the rows below.`
+      : null);
     // Home's Refresh button covers both PR sections, so any live poll job drives it.
     renderRefreshZone($('#refresh-zone'), null, pickPollJob(reqs, null));
     // Home's Run button offers to drain everything that's waiting, whatever section it belongs to.
@@ -2940,34 +3063,17 @@ function sectionGrid(kind, features, requests) {
   // Active workspaces get banded; finished ones drop into a collapsed "Done" section.
   const active = withJob.filter(({ f }) => f.status !== 'done')
     .map(({ f, job }) => ({ f, job, cat: categoryOf(f, job) }));
-  // Rank is the WS_STATES index, and .sort() is stable, so ties keep insertion order.
-  const ranked = [...pending, ...active].sort((a, b) => wsState(a.cat).rank - wsState(b.cat).rank);
   // Kept as { sortable, el } pairs so the Done disclosure can reorder them by date — the card
   // element alone carries no timestamp to sort on.
   const doneCards = withJob.filter(({ f }) => f.status === 'done')
     .map(({ f, job }) => ({ sortable: f, el: featureCard(f, job) }));
 
-  const bands = [];
-  for (const band of WS_BANDS) {
-    const rows = ranked.filter((e) => wsState(e.cat).band === band.key);
-    // A header with nothing under it reads as "you have none of these", which is a claim the list
-    // doesn't need to make three times per view. Omit the band entirely.
-    if (!rows.length) continue;
-    // The density rides out as a class so the stylesheet can space a band by how much card it
-    // holds without keeping its own list of which bands are compact — that second list is the
-    // WS_BANDS/band-map drift again, just spelled in CSS, and it survives a `density` flip here.
-    bands.push(h('section', { class: `band band-${cssSafe(band.key)} band-density-${cssSafe(band.density)}` },
-      h('div', { class: 'band-head' },
-        h('h2', { class: 'band-label' }, band.label),
-        h('span', { class: 'band-count' }, `· ${rows.length}`)),
-      h('div', { class: 'features-grid' },
-        // The category decided above travels with the card. Recomputing it inside featureCard
-        // re-reads Date.now() through isStaleJob, so a job crossing the stale threshold mid-render
-        // would be banded under one header and labelled as another: one decision per render.
-        rows.map((e) => (e.f
-          ? featureCard(e.f, e.job, band.density, e.cat)
-          : pendingJobCard(e.job, band.density))))));
-  }
+  // The category decided above travels with the card. Recomputing it inside featureCard re-reads
+  // Date.now() through isStaleJob, so a job crossing the stale threshold mid-render would be
+  // banded under one header and labelled as another: one decision per render.
+  const bands = bandSections([...pending, ...active], (e, density) => (e.f
+    ? featureCard(e.f, e.job, density, e.cat)
+    : pendingJobCard(e.job, density)), 'features-grid');
 
   if (!bands.length && !doneCards.length) return sectionEmpty(kind);
   const lists = bands.length

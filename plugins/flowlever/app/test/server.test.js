@@ -1380,18 +1380,25 @@ test('U2: WS_BANDS/WS_STATES are the only place band order and rank are expresse
   const runs = states.map((s) => s.band).filter((b, i, a) => b !== a[i - 1]);
   assert.deepEqual(runs, [...new Set(runs)], 'each band must be one contiguous run of WS_STATES');
 
+  // The loop itself lives in ONE place, shared by every list view (see U3) — a second copy is how
+  // the sections and the inbox would come to disagree about which band a workspace is in.
+  const loop = fnBody(ui, 'function bandSections(');
   const grid = fnBody(ui, 'function sectionGrid(');
-  assert.match(grid, /for \(const band of WS_BANDS\)/,
-    'sectionGrid must walk WS_BANDS, not a hand-listed set of bands');
-  assert.match(grid, /wsState\(a\.cat\)\.rank - wsState\(b\.cat\)\.rank/,
+  assert.match(loop, /for \(const band of WS_BANDS\)/,
+    'the band loop must walk WS_BANDS, not a hand-listed set of bands');
+  assert.match(loop, /wsState\(a\.cat\)\.rank - wsState\(b\.cat\)\.rank/,
     'rank must come from the WS_STATES table, not a parallel comparator');
+  assert.ok(!/for \(const band of WS_BANDS\)/.test(grid),
+    'sectionGrid must reuse the shared loop rather than keep its own');
   for (const b of bands) {
-    assert.ok(!grid.includes(`'${b.key}'`),
-      `sectionGrid must not name the "${b.key}" band itself — that is a second copy of the order`);
-    assert.ok(!grid.includes(`'${b.label}'`), `sectionGrid must not hand-write the "${b.label}" header`);
+    for (const [name, body] of [['bandSections', loop], ['sectionGrid', grid]]) {
+      assert.ok(!body.includes(`'${b.key}'`),
+        `${name} must not name the "${b.key}" band itself — that is a second copy of the order`);
+      assert.ok(!body.includes(`'${b.label}'`), `${name} must not hand-write the "${b.label}" header`);
+    }
   }
-  // Density is the band's property, read from the table and handed to the card.
-  assert.match(grid, /band\.density/, 'the card density must come from the band table');
+  // Density is the band's property, read from the table and handed to the renderer.
+  assert.match(loop, /band\.density/, 'the card density must come from the band table');
   assert.match(fnBody(ui, 'function featureCard('), /density === 'compact'/,
     'featureCard must branch on the density the band gave it');
 
@@ -1448,8 +1455,9 @@ test('U2: categoryOf falls back instead of crashing on a missing or unknown stat
 });
 
 test('U2: an empty band is not rendered', () => {
-  const grid = fnBody(readUi(), 'function sectionGrid(');
-  assert.match(grid, /if \(!rows\.length\) continue;/,
+  const ui = readUi();
+  const grid = fnBody(ui, 'function sectionGrid(');
+  assert.match(fnBody(ui, 'function bandSections('), /if \(!rows\.length\) continue;/,
     'a band with no cards must be skipped entirely — never a header with zero under it');
   // The pre-band behaviour at the two edges must survive: nothing at all → the empty state,
   // nothing active but something done → the note above the disclosure.
@@ -1484,7 +1492,7 @@ test('U2: a job that already has a workspace card never gets a placeholder besid
     + 'wsId must still get its placeholder');
 
   // And the placeholder is a card like any other, so it takes the band's density (finding 5).
-  assert.match(grid, /pendingJobCard\(e\.job, band\.density\)/,
+  assert.match(grid, /pendingJobCard\(e\.job, density\)/,
     'a placeholder must be drawn at the band density, not always full — a full-height placeholder '
     + 'among one-line compact rows breaks the only promise a compact band makes');
 });
@@ -1517,7 +1525,7 @@ test('U2: the category is decided once per render and handed to the card', () =>
   const grid = fnBody(ui, 'function sectionGrid(');
   const card = fnBody(ui, 'function featureCard(');
 
-  assert.match(grid, /featureCard\(e\.f, e\.job, band\.density, e\.cat\)/,
+  assert.match(grid, /featureCard\(e\.f, e\.job, density, e\.cat\)/,
     'the band loop already decided the category — it must travel with the card');
   // categoryOf reads the clock through isStaleJob, so a second call inside the card can disagree
   // with the one that chose the header the card is sitting under: banded as one state, pilled as
@@ -1532,10 +1540,10 @@ test('U2: the category is decided once per render and handed to the card', () =>
 test('U2: band density is emitted from WS_BANDS, not restated in CSS', () => {
   const ui = readUi();
   const { bands } = wsTables(ui);
-  const grid = fnBody(ui, 'function sectionGrid(');
+  const loop = fnBody(ui, 'function bandSections(');
   const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
 
-  assert.match(grid, /band-density-\$\{cssSafe\(band\.density\)\}/,
+  assert.match(loop, /band-density-\$\{cssSafe\(band\.density\)\}/,
     'the band must carry its density as a class, so the stylesheet can read the table too');
   // Hardcoding which bands are compact is the WS_BANDS/band-map drift spelled in CSS: flip a
   // `density` in the table and the spacing stays behind on a band that no longer holds one-liners.
@@ -1545,4 +1553,114 @@ test('U2: band density is emitted from WS_BANDS, not restated in CSS', () => {
   }
   assert.ok(css.includes('.band-density-compact .features-grid'),
     'the compact spacing must hang off the density class');
+});
+
+/* U3 — the Home inbox, banded by the same tables as the kind sections. Source assertions again:
+ * `node --test` cannot import browser code, so these pin the properties whose loss would actually
+ * break the screen, and the rendering itself is verified in a real browser. */
+
+test('U3: the inbox bands come from the shared loop, not a second one of its own', () => {
+  const ui = readUi();
+  const { bands } = wsTables(ui);
+  const inbox = fnBody(ui, 'function renderHomeInbox(');
+
+  // The whole point of extracting bandSections: an inbox with its own copy of the loop is free to
+  // order, label or count a band differently from the sections showing the same workspaces.
+  assert.match(inbox, /bandSections\(active, \(e, density\) => inboxRow\(e\.r, e\.job, density, e\.cat\), 'inbox'\)/,
+    'renderHomeInbox must draw its bands through bandSections, handing each row the band density '
+    + 'and the category the loop already decided');
+  assert.ok(!/for \(const band of WS_BANDS\)/.test(inbox),
+    'the inbox must not walk WS_BANDS itself — that is a second copy of the band order');
+  for (const b of bands) {
+    assert.ok(!inbox.includes(`'${b.label}'`),
+      `the inbox must not hand-write the "${b.label}" header — it comes from WS_BANDS`);
+  }
+  // The band table is ordered by urgency, so the top band IS what needs you. Deriving the header
+  // count from it rather than from needsYouBits is the fix for a subtitle that disagreed with the
+  // rows underneath it: the bits read counts.toReview, which is 0 on a PR whose findings carry
+  // suggestions rather than drafts — exactly the rows the count was about.
+  assert.match(inbox, /wsState\(e\.cat\)\.band === WS_BANDS\[0\]\.key/,
+    'the "needs you" count must come from the top band, the same answer the rows are grouped by');
+  assert.ok(!/needsYouBits/.test(inbox),
+    'no count on this screen may be derived from needsYouBits any more');
+});
+
+test('U3: Home folds each live job onto its row', () => {
+  const ui = readUi();
+  const inbox = fnBody(ui, 'function renderHomeInbox(');
+  const row = fnBody(ui, 'function inboxRow(');
+
+  // Without binding, the inbox cannot band truthfully: a PR being posted, or one whose runner has
+  // stalled and needs a human, sits under whatever state it held before the job started.
+  assert.match(inbox, /\.filter\(isLiveJob\)/,
+    'Home must bind the same jobs a section binds — isLiveJob, not its own liveness test');
+  assert.match(inbox, /jobForFeature\(r, live\)/,
+    'and correlate them with jobForFeature, not a second matcher');
+  assert.match(inbox, /categoryOf\(r, job\)/,
+    'the job must reach categoryOf, which is what lets it outrank the served state');
+  // And the row has to SAY so, in the words the cards use — a stalled job must be as actionable
+  // from the inbox as it is from a section.
+  assert.match(row, /cardJobRow\(job, hasFindingsOf\(r\)\)/,
+    'a row with a live job must render the same job line the cards do');
+});
+
+test('U3: the requests strip drops the jobs already shown on a row', () => {
+  const ui = readUi();
+  const poll = fnBody(ui, 'function startHomeRequestsPoll(');
+
+  // A job on a row AND in the strip states the same thing twice on one screen — the duplication
+  // the sections removed when they folded jobs onto cards.
+  assert.match(poll, /const used = renderHomeInbox\(reqs\)/,
+    'the strip must learn which jobs the rows took from the render that took them');
+  assert.match(poll, /active\.filter\(\(r\) => !used\.has\(r\.id\)\)/,
+    'a job bound to a visible row must not be listed in the strip as well');
+  // But the strip stays: it is the cross-section queue view, and a job with no row yet has nowhere
+  // else to appear. Emptied by the dedupe it must say where its jobs went, not go silent — a blank
+  // strip under a live queue reads as broken.
+  assert.match(poll, /populateRequestsStrip\(\$\('#requests-strip'\), unbound, active\.length/,
+    'the strip must still render the unbound jobs, with an honest empty state when there are none');
+  assert.match(poll, /already shown on the rows below/,
+    'and that empty state must explain the dedupe rather than leave a gap');
+});
+
+test('U3: a needs-you row names its state, and a parked row drops the decision material', () => {
+  const ui = readUi();
+  const row = fnBody(ui, 'function inboxRow(');
+
+  // The inbox was the last surface where ready-to-post / needs-review / needs-rereview /
+  // author-responded drew identically — the section cards gained the pill in 3d008a8.
+  assert.match(row, /cat \? wsStatePill\(cat\) : null/,
+    'a banded row must wear the state pill, whatever its density');
+  assert.match(ui, /function inboxRow\(r, job = null, density = 'full', cat = null\)/,
+    'and a row drawn outside the bands (the Done disclosure) must still be able to pass neither');
+  // Compact rows: title, kind, pill, ONE stamp. The dial is a score you weigh before opening
+  // something, and nothing parked on someone else is waiting on that decision.
+  assert.match(row, /compact \? null : dialEl\(/, 'a compact row must not draw the readiness dial');
+  assert.match(row, /const bits = done \|\| compact \? \[\] : needsYouBits\(r\.counts\)/,
+    'nor the needs-you counts');
+  assert.match(row, /compact \? compactStamp\(r, job, cat\) : null/,
+    'it earns the one stamp that says why it is parked, chosen by the same rule a compact card uses');
+  // Every density keeps the two things that make a row usable at all.
+  assert.match(row, /href: `#\/feature\/\$\{encodeURIComponent\(r\.id\)\}`/,
+    'every row keeps its link to the workspace');
+  assert.match(row, /class: 'btn-icon ir-delete'/, 'and its delete-confirm flow');
+});
+
+test('U3: the inbox skips an empty band and keeps both edge cases', () => {
+  const ui = readUi();
+  const inbox = fnBody(ui, 'function renderHomeInbox(');
+
+  // Shared with the sections, so the "never a header with zero under it" rule is pinned once — but
+  // the inbox has to actually go through it, which is what this asserts.
+  assert.match(fnBody(ui, 'function bandSections('), /if \(!rows\.length\) continue;/,
+    'the shared loop must skip a band with nothing in it');
+  assert.match(inbox, /bands\.length\s*\?\s*bands/,
+    'the inbox draws whatever bands came back — it must not fill in the missing ones');
+  assert.match(inbox, /No active workspaces — everything below is complete\./,
+    'nothing active but something done must keep the all-done note');
+  assert.match(inbox, /doneDisclosure\('home',\s*\n?\s*doneRows\.map\(\(r\) => \(\{ sortable: r, el: inboxRow\(r\) \}\)\), 'inbox done-disc-body'\)/,
+    'and the Done disclosure and its date sort must be left exactly as they were');
+  // The zero-workspace case never reaches here: renderHome answers it with the seeding empty state.
+  assert.match(fnBody(ui, 'async function renderHome('), /if \(rows\.length === 0\)/,
+    'an empty cockpit must still get the "Nothing in the cockpit yet" view');
 });

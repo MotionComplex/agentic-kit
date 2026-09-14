@@ -263,9 +263,13 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 /* tint the card border by job state so a glance reads "busy / blocked / failed" */
 .fc-busy { border-color: var(--accent-line); }
 .fc-busy-error { border-color: var(--notready-line); }
-/* Needs-your-input cards are sorted to the top and tinted whole-card so they can't be missed. */
-.feature-card.fc-busy-needs { border-color: var(--major-line); background: var(--major-soft); }
-.feature-card.fc-busy-needs:hover { border-color: var(--major); }
+/* Needs-your-input cards are sorted to the top and tinted whole-card so they can't be missed. The
+   inbox row wears the same fc-busy-* classes rather than a parallel ir-busy-* set: one job state,
+   one tint, and a row that has folded a job on is the same object a card is. */
+.feature-card.fc-busy-needs,
+.inbox-row.fc-busy-needs { border-color: var(--major-line); background: var(--major-soft); }
+.feature-card.fc-busy-needs:hover,
+.inbox-row.fc-busy-needs:hover { border-color: var(--major); }
 .fc-busy-needs .fc-job { border-color: var(--major-line); background: var(--major-soft); }
 .fc-busy-error .fc-job { border-color: var(--notready-line); background: var(--notready-soft); }
 /* Stalled: amber like needs-input (it needs you), but the card border stays calm — the point is
@@ -289,8 +293,10 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 /* Compact bands pack tighter: less air between rows that hold one line each. Keyed off the density
    the band emits, never off which bands happen to be compact today — a list of band names here is
    a second copy of WS_BANDS' `density` column, and flipping that column would leave the spacing
-   behind on a band that no longer holds one-liners. */
-.band-density-compact .features-grid { gap: 10px; }
+   behind on a band that no longer holds one-liners. Both containers the one band loop can draw
+   into, because the sections and the inbox are banded by the same code and must breathe alike. */
+.band-density-compact .features-grid,
+.band-density-compact .inbox { gap: 8px; }
 
 /* A compact card — same object, denser: title, why it's parked, one stamp, the job row. The dial,
  * the severity counts and the sources line are decision material, and nothing in these bands is
@@ -430,6 +436,19 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .ir-clear { color: var(--ready); font-weight: 540; }
 .ir-arrow { flex: none; color: var(--fg-mute); font-size: 16px; transition: transform var(--dur-fast) var(--ease-interactive), color var(--dur-fast) var(--ease-interactive); }
 .inbox-row:hover .ir-arrow { color: var(--accent-text); transform: translateX(3px); }
+
+/* A compact row — same object, denser: what identifies it, the pill that says why it is parked,
+   and one stamp. The dial and the counts are decision material, and nothing in these bands is
+   waiting on a decision from you, so the row only has to be scannable. */
+.inbox-row.ir-compact { padding: 10px 16px; gap: 12px; }
+.ir-compact .ir-top { margin-bottom: 2px; }
+.ir-compact .ir-title { font-size: 13.5px; font-weight: 600; }
+.ir-compact .ir-needs { font-size: 11.5px; }
+
+/* The live job folded onto a row. `.fc-job` is written for a card's grid, where it spans the full
+   width by itself; inside the row's text column it needs its own separation from the line above. */
+.ir-main .fc-job { margin-top: 8px; }
+.ir-compact .fc-job { padding: 6px 9px; font-size: 12px; }
 .empty-icon { display: inline-flex; color: var(--fg-mute); opacity: .6; margin-bottom: 12px; }
 .empty-icon svg { width: 30px; height: 30px; }
 
