@@ -289,6 +289,14 @@ function fnBody(src, decl) {
   throw new Error(`unbalanced braces reading ${decl}`);
 }
 
+/* Some assertions below forbid a pattern (`&& !r.wsId`, a bare `.wsId` read) that the code's own
+ * comments QUOTE, because explaining why a rule was rejected means naming it. A regex over the raw
+ * body would read the warning as the mistake and fail on a correct file — and, worse, would pass on
+ * a broken one whose comment happened to be reworded. Strip the prose and assert on the code. */
+function codeOnly(body) {
+  return body.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
 test('U1: the heartbeat timer belongs to the app, not to the per-view poller', () => {
   // Regression guard for the bug that made the first cut of this heartbeat useless: it rode the
   // interval owned by startPolling(), which route() tears down before every render and each view
@@ -1474,27 +1482,75 @@ test('U2: an empty band is not rendered', () => {
  * verified in a real browser. */
 
 test('U2: a job that already has a workspace card never gets a placeholder beside it', () => {
-  const grid = fnBody(readUi(), 'function sectionGrid(');
+  const ui = readUi();
+  const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
 
-  // `used` holds the ONE job jobForFeature bound per workspace, so a PR with two live jobs leaks
-  // its runner-up into the placeholder list and is drawn twice — once as "queued, not running" and
-  // once as its real card — while the band count above claims a workspace that isn't there.
-  assert.match(grid, /const wsIds = new Set\(features\.map\(\(f\) => f\.id\)\)/,
-    'sectionGrid must know which workspaces this page actually draws');
-  assert.match(grid, /!used\.has\(r\.id\) && !\(r\.wsId && wsIds\.has\(r\.wsId\)\)/,
-    'a job naming a workspace on this page has a card already — it must be disqualified from the '
-    + 'placeholder list, on top of the `used` check which only covers the bound job');
-  // The other half, and the reason the test is not just `&& !r.wsId`: a wsId pointing at a
-  // workspace that is gone is as orphaned as one that never had a wsId, and a bare !r.wsId would
-  // drop its placeholder and hide a running review completely.
-  assert.ok(!/&&\s*!r\.wsId\b/.test(grid),
-    'the filter must test workspace EXISTENCE, not merely the presence of a wsId — a dangling '
-    + 'wsId must still get its placeholder');
+  // The placeholder list is "every live job of this kind that has no card to be folded onto", and
+  // that second clause is jobBindsTo asked of every card the page draws. Anything narrower has
+  // shipped wrong twice: `used` alone holds the ONE job jobForFeature folded per workspace, so a PR
+  // with two live jobs leaks its runner-up and is drawn twice; adding a wsId test on top still
+  // misses a job that carries no wsId and binds by prId — which is what "+ New PR review" enqueues.
+  assert.match(grid, /!features\.some\(\(f\) => jobBindsTo\(r, f\)\)/,
+    'the placeholder filter must exclude any job that binds to ANY workspace on this page, through '
+    + 'the same predicate that folds jobs onto cards');
+  // The other half of the rule — a dangling wsId must KEEP its placeholder — has its own test
+  // below, so this one is free to be about suppression alone.
 
   // And the placeholder is a card like any other, so it takes the band's density (finding 5).
   assert.match(grid, /pendingJobCard\(e\.job, density\)/,
     'a placeholder must be drawn at the band density, not always full — a full-height placeholder '
     + 'among one-line compact rows breaks the only promise a compact band makes');
+});
+
+test('U2: card-binding and placeholder-suppression are ONE predicate, stated once', () => {
+  const ui = readUi();
+  const binds = codeOnly(fnBody(ui, 'function jobBindsTo('));
+  const forFeature = codeOnly(fnBody(ui, 'function jobForFeature('));
+  const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
+
+  // A job may arrive with a wsId, a prId, or both — the "+ New PR review" dialog enqueues
+  // { action, prId, title } with no wsId at all. Both arms live in the predicate, so a caller that
+  // only ever thought about wsId cannot be wrong about the prId case separately.
+  assert.match(binds, /job\.wsId && job\.wsId === f\.id/,
+    'jobBindsTo must bind a job to the workspace its wsId names');
+  assert.match(binds, /String\(job\.prId\) === String\(prNumber\(f\)\)|String\(job\.prId\) === String\(pr\)/,
+    'jobBindsTo must ALSO bind a PR job by prId — a wsId-less job is the ordinary UI-enqueued case, '
+    + 'and a rule that only reads wsId lets it bind a card and draw a placeholder beside it');
+  assert.match(binds, /pr-review|pr-respond/,
+    'and the prId arm stays limited to the PR actions, so an apply job never binds by PR number');
+
+  // The whole point: neither call site may restate the matching. Two copies of this rule is how the
+  // duplicate PR card shipped — one side learned about prId, the other never did.
+  for (const [name, body] of [['jobForFeature', forFeature], ['sectionGrid', grid]]) {
+    assert.match(body, /jobBindsTo\(/, `${name} must go through the shared predicate`);
+    assert.ok(!/\.wsId\b/.test(body),
+      `${name} must not read wsId at all — one rule, or the two call sites drift apart`);
+    // A comparison is a restatement; a bare truthiness check is not. sectionGrid keeps exactly one
+    // prId mention — "is this even a PR job", the reason a placeholder can exist at all — and it
+    // must never compare that prId to a workspace, which is the predicate's whole job.
+    assert.ok(!/String\([^)]*prId/.test(body) && !/prId\s*===/.test(body),
+      `${name} must not compare prId to a workspace — that comparison lives in jobBindsTo`);
+  }
+  assert.ok(!/prId/.test(forFeature),
+    'jobForFeature must not mention prId at all: it asks the predicate and sorts the answer');
+});
+
+test('U2: a wsId naming a workspace that is gone still gets its placeholder', () => {
+  const ui = readUi();
+  const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
+
+  // The rejected fix was `&& !r.wsId`, which reads "has a wsId ⇒ has a card". It does not: a
+  // workspace can be deleted out from under a running review, and that review then vanishes from
+  // the cockpit entirely — no card, no placeholder, no trace of the runner that is still going.
+  // Membership in `features` is the only honest test, and it is exactly what .some() performs.
+  assert.match(grid, /features\.some\(/,
+    'placeholder suppression must be decided against the workspaces this page actually draws, so a '
+    + 'dangling wsId matches nothing and keeps its placeholder');
+  assert.ok(!/wsIds\.has\(/.test(grid),
+    'and not against a bare set of ids, which can only answer the wsId half of the question');
+  assert.ok(!/!r\.wsId\b/.test(grid),
+    'the filter must test workspace EXISTENCE, never merely the presence of a wsId — `&& !r.wsId` '
+    + 'is the rejected fix, and it makes a running review on a deleted workspace disappear');
 });
 
 test('U2: a full card names its state, so the band that demands action says the most', () => {

@@ -3039,26 +3039,25 @@ function categoryOf(f, job) {
  * exist yet gets a placeholder. No separate jobs strip — the status lives on the card it belongs to. */
 function sectionGrid(kind, features, requests) {
   const live = (requests || []).filter(isLiveJob);
-  const used = new Set();
-  const withJob = features.map((f) => {
-    const job = jobForFeature(f, live);
-    if (job) used.add(job.id);
-    return { f, job };
-  });
-  const wsIds = new Set(features.map((f) => f.id));
+  const withJob = features.map((f) => ({ f, job: jobForFeature(f, live) }));
   // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, banded
   // by the same rule as everything else. They lead the list so that, at equal rank, the work that
   // has no card of its own yet still appears where its real card will land.
   //
-  // `used` is not enough to decide "has no workspace yet": it holds the ONE job jobForFeature
-  // bound per workspace, so a PR carrying two live jobs leaks its runner-up through here and draws
-  // a placeholder BESIDE that PR's own card — two contradictory claims about one PR, and a band
-  // count that says more workspaces than the band holds. A placeholder's whole justification is
-  // that there is no card to fold the job onto, so a job naming a workspace on this page is out.
-  // A wsId naming a workspace that is gone is NOT out: that job is as orphaned as one that never
-  // carried a wsId, and dropping it would hide a running review entirely.
+  // "No workspace yet" is jobBindsTo() asked of every card on the page, and it has to be that and
+  // nothing else. The job jobForFeature HAPPENED to bind is not the test — a PR carrying two live
+  // jobs binds both but folds one, so the runner-up leaks through and draws a placeholder BESIDE
+  // that PR's own card: two contradictory claims about one PR, and a band count naming more
+  // workspaces than the band holds. Neither is `wsId` the test — a job enqueued from "+ New PR
+  // review" carries no wsId and binds by prId, so reading only wsId here is the same duplicate
+  // wearing a different hat. A placeholder's whole justification is that there is no card to fold
+  // the job onto; the one predicate that answers that is the one the folding itself uses.
+  //
+  // What is deliberately NOT excluded: a wsId naming a workspace that is GONE. That job is as
+  // orphaned as one that never carried a wsId, and dropping it (`&& !r.wsId`) hides a running
+  // review from the cockpit entirely. Existence is the question, not the presence of the field.
   const pending = live
-    .filter((r) => r.action === kind && r.prId && !used.has(r.id) && !(r.wsId && wsIds.has(r.wsId)))
+    .filter((r) => r.action === kind && r.prId && !features.some((f) => jobBindsTo(r, f)))
     .map((r) => ({ f: null, job: r, cat: categoryOf(null, r) }));
   // Active workspaces get banded; finished ones drop into a collapsed "Done" section.
   const active = withJob.filter(({ f }) => f.status !== 'done')
@@ -3341,13 +3340,29 @@ function jobRank(r) {
   if (r.status === 'running') return 2;
   return 1; // queued
 }
-// The live job acting on this workspace: an apply/re-run targeting its id, or a
-// pr-review/pr-respond for the same PR number. Most-urgent wins.
-function jobForFeature(f, jobs) {
+/* Does this job act on this workspace? An apply/re-run naming its id, or a pr-review/pr-respond for
+ * the same PR number — a job may arrive with EITHER, which is why both arms are here and not split.
+ * The "+ New PR review" dialog enqueues { action, prId, title } with no wsId at all, so the prId arm
+ * is the ordinary path for anything started from the UI, not an edge case.
+ *
+ * ONE predicate, called from both sides of the card/placeholder decision, because those two are the
+ * same question asked twice: jobForFeature() asks "which job do I fold onto this card", sectionGrid
+ * asks "does this job already have a card to be folded onto". Spelled out separately they drift, and
+ * the drift is not cosmetic — a filter that inspected only wsId let a wsId-less job bind to a card by
+ * prId and STILL draw a placeholder beside it, so one PR appeared twice under a band header counting
+ * more workspaces than the band held. Whatever binding learns next (a repo, a branch, a second id
+ * shape) it learns here, once, and both callers learn it at the same moment. */
+function jobBindsTo(job, f) {
+  if (!job || !f) return false;
+  if (job.wsId && job.wsId === f.id) return true;
+  if (job.action !== 'pr-review' && job.action !== 'pr-respond') return false;
   const pr = prNumber(f);
-  const mine = jobs.filter((r) =>
-    (r.wsId && r.wsId === f.id) ||
-    ((r.action === 'pr-review' || r.action === 'pr-respond') && r.prId && pr && String(r.prId) === String(pr)));
+  return !!(job.prId && pr && String(job.prId) === String(pr));
+}
+
+// The live job acting on this workspace. Most-urgent wins.
+function jobForFeature(f, jobs) {
+  const mine = jobs.filter((r) => jobBindsTo(r, f));
   return mine.sort((a, b) => jobRank(b) - jobRank(a))[0] || null;
 }
 // What the runner is doing, in card language. `existing` ⇒ a re-run on a workspace
