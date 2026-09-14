@@ -1802,18 +1802,19 @@ test('U4: a poll tick that changes nothing touches nothing', () => {
 test('U4: a repaint never lands on top of an interaction — and is never dropped either', () => {
   const ui = readUi();
   const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
-  const busy = codeOnly(fnBody(ui, 'function inboxInteracting('));
+  const busy = codeOnly(fnBody(ui, 'function zoneHold('));
   const flush = codeOnly(fnBody(ui, 'function flushHomeInboxSoon('));
+  const release = codeOnly(fnBody(ui, 'function releaseHomeInbox('));
   const home = codeOnly(fnBody(ui, 'async function renderHome('));
 
-  const guardAt = inbox.indexOf('inboxInteracting(zone)');
+  const guardAt = inbox.indexOf('zoneHold(zone)');
   const paintAt = inbox.indexOf('zone.replaceChildren(');
   assert.ok(guardAt > -1, 'a tick must ask whether the user is mid-interaction before repainting');
   assert.ok(guardAt < paintAt, 'and ask it before the write, not after');
-  assert.match(inbox.slice(guardAt, paintAt), /homeInbox\.pending = true;\s*return used;/,
+  assert.match(inbox.slice(guardAt, paintAt), /homeInbox\.pending = true;[\s\S]*?return used;/,
     'a tick arriving mid-interaction must HOLD the repaint and return, not perform it');
 
-  // The two interactions a replaceChildren destroys without a trace.
+  // The interactions a replaceChildren destroys without a trace.
   assert.match(busy, /querySelector\('\.delete-confirm'\)/,
     'an open delete-confirm must block the repaint — rebuilding it answers "no" for the user');
   assert.match(busy, /zone\.contains\(a\)/,
@@ -1821,13 +1822,15 @@ test('U4: a repaint never lands on top of an interaction — and is never droppe
 
   // Held, not dropped. Two independent releases, because either alone has a hole: the tick alone
   // leaves up to four seconds of stale bands after a Cancel, and the event alone loses the change
-  // if the interaction ends some way that fires neither.
-  assert.match(flush, /homeInbox\.pending/, 'the flush must only fire when something is actually held');
-  assert.match(flush, /renderHomeInbox\(homeInbox\.reqs\)/,
+  // if the interaction ends some way that fires neither. The body moved into releaseHomeInbox when
+  // the full-view reload joined the same guard; the properties are the ones that always held.
+  assert.match(release, /homeInbox\.pending/, 'the release must only fire when something is actually held');
+  assert.match(release, /renderHomeInbox\(homeInbox\.reqs\)/,
     'and must replay the held tick, not repaint from an empty queue');
   assert.match(flush, /setTimeout\(/,
     'deferred a turn: during focusout activeElement is transiently <body>, so asking now would '
     + 'answer "nobody is here" mid-Tab and destroy the element about to receive focus');
+  assert.match(flush, /releaseHomeInbox/, 'and the deferred call must be the shared release');
   assert.match(home, /onclick: flushHomeInboxSoon/,
     'the zone must release the hold on the click that ends a confirm');
   assert.match(home, /onfocusout: flushHomeInboxSoon/, 'and on the blur that ends a keyboard visit');
@@ -2003,7 +2006,9 @@ test('U5: the section poll asks the binding predicate instead of restating it', 
   // the binding rule. Same-kind jobs reach the grid whether or not they bind a workspace — that is
   // what lets an in-flight review with no workspace yet draw its pending placeholder — and the
   // predicate guards only the `apply` arm, where the old copy sat.
-  const kindArm = poll.indexOf('r.action === kind');
+  // The kind arm is KIND_ACTIONS now rather than `r.action === kind` (see U6), but its POSITION in
+  // the filter is the property that mattered and still does.
+  const kindArm = poll.indexOf('actsOnKind(r, kind)');
   const applyArm = poll.indexOf("r.action === 'apply'");
   const asked = poll.indexOf('jobBindsTo(');
   assert.ok(kindArm > -1, 'every job of this section\'s own kind must still be relevant to it');
@@ -2133,4 +2138,370 @@ test('U5: a band names itself, and its name carries its size', () => {
     'and that restatement must not be the heading\'s own value');
   assert.match(css.slice(css.indexOf('.band-label {')), /^[^}]*display: flex/,
     'and the heading must become the flex row .band-head was, so the gap is unchanged');
+});
+
+/* U6 — the four findings left open against 316edb0's fix. Same two shapes as U5, for the same
+ * reason: where a rule is pure it is LIFTED OUT AND RUN (rowAgeText, holdStands, actsOnKind), and
+ * where it is inseparable from the DOM it is pinned by ORDERING and CONTROL FLOW — which branch
+ * returns before which write — never by the presence of a constructed string. The rendering itself,
+ * and everything about focus and live DOM these cannot reach, is verified in a real browser. */
+
+test('U6: the full-view refetch goes through the same guard as the repaint', () => {
+  const ui = readUi();
+  const poll = codeOnly(fnBody(ui, 'function startHomeRequestsPoll('));
+  const release = codeOnly(fnBody(ui, 'function releaseHomeInbox('));
+  const home = codeOnly(fnBody(ui, 'async function renderHome('));
+
+  // The narrow path that survived 316edb0: a second job completing while a confirm was open called
+  // renderHome() outright, and renderHome() does app.replaceChildren() on the WHOLE view — outside
+  // both the signature and the interaction guard. Measured: {"confirms":1,"active":"BUTTON.btn
+  // btn-danger"} → {"confirms":0,"active":"BODY."}. The poller must no longer reach it directly.
+  assert.ok(!/renderHome\(\)/.test(poll),
+    'the poll must not call renderHome() itself — that is the unguarded write, whatever guards the '
+    + 'repaint beside it');
+  assert.match(poll, /homeInbox\.reload = true/,
+    'a newly completed job must FLAG the refetch, so the guard decides when it happens');
+  assert.match(poll, /releaseHomeInbox\(\)/,
+    'and the tick must offer the flag to the release, or a completed job waits for an event that '
+    + 'may never come');
+  // Flagged, never dropped: the refetch exists because the server has new data.
+  const flagAt = poll.indexOf('homeInbox.reload = true');
+  const releaseAt = poll.indexOf('releaseHomeInbox()');
+  assert.ok(flagAt > -1 && releaseAt > flagAt,
+    'the release must come after the flag in the same tick, or the refetch is a tick late for no '
+    + 'reason');
+
+  // One guard, asked before the write — the same two functions the zone repaint asks.
+  const askAt = release.indexOf('holdStands(hold, homeInbox)');
+  const reloadAt = release.indexOf('renderHome()');
+  const repaintAt = release.indexOf('renderHomeInbox(homeInbox.reqs)');
+  assert.match(release, /const hold = zoneHold\(\$\('#home-inbox-zone'\)\)|zoneHold\(zone\)/,
+    'the release must ask the SAME hold predicate, not invent a second one');
+  assert.ok(askAt > -1 && reloadAt > askAt,
+    'and ask it BEFORE renderHome() — after it, the view is already gone');
+  assert.ok(repaintAt > askAt, 'and before the repaint, for the same reason');
+  assert.match(release.slice(askAt, reloadAt), /return;/,
+    'a standing hold must return without reaching either write');
+  // A reload rebuilds the zone from fresh server data, so a repaint queued behind it is stale by
+  // construction — drawing it first would paint the old rows and then throw them away.
+  assert.ok(reloadAt < repaintAt, 'the reload must win over a repaint held beside it');
+
+  // And the flag must not outlive the view it was raised against.
+  assert.match(home, /homeInbox\.reload = false/,
+    'renderHome must clear the pending reload it has just satisfied, or the next tick does it again');
+});
+
+test('U6: the hold on a confirm is absolute; the hold on a cursor has a ceiling', () => {
+  const ui = readUi();
+  const ceilingDecl = ui.match(/^const ZONE_BUSY_HOLD_MS = \d+;$/m);
+  assert.ok(ceilingDecl, 'the ceiling must be declared once, at module scope, as a named constant');
+  const CEILING = Number(ceilingDecl[0].match(/(\d+)/)[1]);
+  // holdStands reads its two arguments and the clock, so it is run rather than read.
+  const { holdStands } = liftUi(ui, [ceilingDecl[0], 'function holdStands(']);
+
+  // Nothing held: no decision, and — critically — no clock started. Stamping heldAt on a quiet tick
+  // would spend the ceiling before the first change that needed it ever arrived.
+  const quiet = { heldAt: 0 };
+  assert.equal(holdStands(null, quiet), false);
+  assert.equal(quiet.heldAt, 0, 'an unheld tick must not start the hold clock');
+
+  // A destructive confirm is an unanswered question. A repaint answers it "no" on the user's behalf
+  // and there is nothing to restore, so no elapsed time makes that trade worth making.
+  const confirming = { heldAt: Date.now() - CEILING * 100 };
+  assert.equal(holdStands('confirm', confirming), true,
+    'an open delete-confirm must hold however long it has been open — it has no ceiling');
+
+  // A cursor is a place, not a decision. Holding is right while the user is moving through the
+  // list; past the ceiling the list is lying about the world to protect a cursor position, which is
+  // the worse of the two failures. Measured before the fix: frozen across 5+ ticks, data changing
+  // on every one.
+  const fresh = { heldAt: 0 };
+  assert.equal(holdStands('busy', fresh), true, 'focus must still buy the user some time');
+  assert.ok(fresh.heldAt > 0, 'and the first held decision must start the clock');
+  const stale = { heldAt: Date.now() - (CEILING + 1000) };
+  assert.equal(holdStands('busy', stale), false,
+    'but past the ceiling the repaint must land — an indefinite freeze is the bug being closed');
+  // Continuous time, not a count of calls: a user clicking around inside the zone is as entitled to
+  // a truthful list as one sitting still, so repeated calls must not re-arm the budget.
+  const armed = { heldAt: Date.now() - (CEILING - 500) };
+  const at = armed.heldAt;
+  holdStands('busy', armed); holdStands('busy', armed); holdStands('busy', armed);
+  assert.equal(armed.heldAt, at, 'a second held decision must not restart the clock');
+});
+
+test('U6: a forced repaint puts the user back where it found them', () => {
+  const ui = readUi();
+  const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
+  const grid = codeOnly(fnBody(ui, 'function startSectionRequestsPoll('));
+  const mark = codeOnly(fnBody(ui, 'function zoneFocusMark('));
+  const restore = codeOnly(fnBody(ui, 'function restoreZoneFocus('));
+
+  // The ceiling would be a straight trade of one failure for another if it dropped the keyboard
+  // user to <body> — that is exactly what the hold was added to prevent. A node reference cannot
+  // survive replaceChildren, so the mark is a string looked up again in the rebuilt list.
+  assert.match(mark, /\[data-fk\]/, 'the mark must be read off a stable key, not a node identity');
+  assert.match(restore, /querySelector\(`\[data-fk="\$\{CSS\.escape\(fk\)\}"\]`\)/,
+    'and redeemed by looking that key up in the NEW dom');
+  assert.match(restore, /preventScroll: true/,
+    'the user did not ask to move, so restoring focus must not scroll the page either');
+
+  // Order is the whole property: taken while the old dom is still there, redeemed after the new one
+  // exists. Either side of the write and it marks or restores nothing.
+  for (const [name, body, write] of [
+    ['the inbox', inbox, 'zone.replaceChildren('],
+    ['the section grid', grid, 'zone.replaceChildren('],
+  ]) {
+    const took = body.indexOf('zoneFocusMark(zone)');
+    const wrote = body.indexOf(write);
+    const put = body.indexOf('restoreZoneFocus(zone, mark)');
+    assert.ok(took > -1 && wrote > took, `${name} must take the focus mark before it repaints`);
+    assert.ok(put > wrote, `${name} must restore focus after the repaint, not before it`);
+  }
+
+  // Every control a repaint can pull out from under the keyboard has to carry a key, or the mark is
+  // null for it and the ceiling drops the user after all. These are all of them in both lists.
+  for (const [what, decl, key] of [
+    ['the inbox row link', 'function inboxRow(', 'fk: `row:${r.id}`'],
+    ['its delete button', 'function inboxRow(', 'fk: `row-del:${r.id}`'],
+    ['the full card', 'function featureCard(', 'fk: `card:${f.id}`'],
+    ['its delete button', 'function featureCard(', 'fk: `card-del:${f.id}`'],
+    ['the compact card', 'function compactCard(', 'fk: `card:${f.id}`'],
+    ['the Done disclosure', 'function doneDisclosure(', 'fk: `done-sum:${key}`'],
+    ['its sort menu', 'function doneDisclosure(', 'fk: `done-sort:${key}`'],
+  ]) {
+    assert.ok(codeOnly(fnBody(ui, decl)).includes(key),
+      `${what} must carry a focus key (${key}) — without it a forced repaint loses the keyboard`);
+  }
+});
+
+test('U6: a held list says so, and nothing already on screen moves when it does', () => {
+  const ui = readUi();
+  const note = codeOnly(fnBody(ui, 'function zoneHeldNote('));
+  const poll = codeOnly(fnBody(ui, 'function startHomeRequestsPoll('));
+  const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
+
+  // While held the page stated two different things about one queue: the strip read "1 job in
+  // flight — already shown on the rows below" while no row showed it. Both halves of the fix are
+  // pinned here.
+  //
+  // Half one: the rows admit it. The note is raised on the SAME branch that holds, so it cannot be
+  // forgotten on a path that holds silently.
+  const holdAt = inbox.indexOf('holdStands(hold, homeInbox)');
+  const paintAt = inbox.indexOf('zone.replaceChildren(');
+  assert.ok(holdAt > -1 && holdAt < paintAt);
+  assert.match(inbox.slice(holdAt, paintAt), /zoneHeldNote\(zone, HOME_HELD_NOTE\[hold\]\)/,
+    'the branch that holds must be the branch that says it is holding');
+  // And it must come down again when the list is no longer behind — a paused sign over a live list
+  // is the same contradiction pointing the other way.
+  assert.match(inbox, /clearZoneHeldNote\(zone\)/,
+    'a tick that finds nothing outstanding must take the note down');
+  const notes = ui.match(/const HOME_HELD_NOTE = \{[\s\S]*?\n\};/);
+  assert.ok(notes, 'the wording must live in one table, not be built at the call site');
+  assert.match(notes[0], /queue above has moved on/,
+    'and it must say the queue above is AHEAD of these rows — "paused" alone leaves the strip\'s '
+    + '"already shown on the rows below" standing, which is the contradiction being closed');
+
+  // Half two: the strip and the toolbar deliberately DO NOT hold. Freezing the "▶ Run N jobs" count
+  // means pressing a button that promises the wrong number, and freezing the strip hides live work
+  // at the moment work is happening. They must stay ahead of the release, unguarded.
+  const stripAt = poll.indexOf('populateRequestsStrip(');
+  const runnerAt = poll.indexOf('renderRunnerZone(');
+  const releaseAt = poll.indexOf('releaseHomeInbox()');
+  assert.ok(stripAt > -1 && runnerAt > -1 && releaseAt > -1);
+  assert.ok(stripAt < releaseAt && runnerAt < releaseAt,
+    'the strip and the runner button must update before the hold is even consulted');
+  assert.ok(!/holdStands|zoneHold/.test(poll.slice(0, Math.max(stripAt, runnerAt))),
+    'and neither may be placed behind the hold — the fix is the rows admitting they are stale, '
+    + 'not the rest of the screen going stale with them');
+
+  // The note arrives while a confirm is open and the pointer is already over the red Delete button.
+  // Anything that reflows the list above it turns a status line into a misclick on an irreversible
+  // action, so it may only ever be appended.
+  assert.match(note, /zone\.append\(note\)/, 'the note must be appended to the zone');
+  assert.ok(!/prepend|insertBefore|replaceChildren/.test(note),
+    'never prepended or inserted — that pushes an open confirm down under the pointer');
+  assert.match(note, /if \(t\.textContent !== text\)/,
+    'and written only on a real change, or role="status" re-announces the same sentence every '
+    + 'four seconds for as long as the hold lasts');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
+  const rule = css.slice(css.indexOf('.zone-held {'), css.indexOf('.zone-held {') + 400);
+  assert.match(rule, /position: sticky/,
+    'and pinned rather than placed, so a long held list still shows it');
+  assert.match(css, /\.zone-held-text \{[^}]*min-width: 0/,
+    'the sentence must wrap inside the note, or it forces the page wider than a 420px viewport');
+  // Pinned means it floats over the bottom row. That row has to stay reachable, and the room has to
+  // be made at the END — padding-bottom moves nothing already on screen, which is the same property
+  // that makes appending safe. The reservation must be taken down by the paint, not only the note:
+  // a zone left holding 90px of padding under a live list is a hole in the layout.
+  assert.match(css, /\.zone-holding \{[^}]*padding-bottom: calc\(var\(--zone-held-h, [^)]*\)/,
+    'the zone must reserve the note\'s measured height, with a fallback for the first frame');
+  assert.match(note, /zone\.classList\.add\('zone-holding'\)/, 'raised with the note');
+  assert.match(codeOnly(fnBody(ui, 'function clearZoneHeldNote(')), /classList\.remove\('zone-holding'\)/,
+    'and taken down with it');
+  for (const [where, decl] of [['the inbox', 'function renderHomeInbox('],
+    ['the section grid', 'function startSectionRequestsPoll(']]) {
+    const body = codeOnly(fnBody(ui, decl));
+    const wrote = body.indexOf('zone.replaceChildren(');
+    const cleared = body.indexOf('clearZoneHeldNote(zone)', wrote);
+    assert.ok(cleared > wrote,
+      `${where} must clear the reservation after it repaints — replaceChildren removes the note's `
+      + 'element but leaves the padding its parent is carrying');
+  }
+});
+
+test('U6: a rendered age is in the signature, and the clock is not', () => {
+  const ui = readUi();
+  // rowAgeText reads its arguments, the formatters and the clock — nothing else — so it is run.
+  const staleDecl = ui.match(/^const JOB_STALE_MS = .*;$/m);
+  assert.ok(staleDecl, 'JOB_STALE_MS must stay a module-scope constant');
+  const { rowAgeText } = liftUi(ui, [
+    'function fmtDate(', 'function fmtDateTime(', 'function fmtAgo(', 'function fmtAge(',
+    'function reviewStampsOf(', staleDecl[0], 'function jobAgeMs(', 'function isStaleJob(',
+    'function rowAgeText(',
+  ], { runnerBusy: () => false });
+
+  const ago = (mins, secs = 0) => new Date(Date.now() - (mins * 60 + secs) * 1000).toISOString();
+  const row = (mins, secs) => ({ id: 'pr-1', stamps: { lastReviewedAt: ago(mins, secs) } });
+
+  // The regression: "Reviewed 18m ago" is rendered text with nothing else in the signature standing
+  // for it, so once a tick that changes nothing touched nothing, a card that read "queued 27m ago"
+  // went on reading it at 40m. The text has to be IN the signature.
+  assert.notEqual(rowAgeText(row(18), null), rowAgeText(row(19), null),
+    'a minute that changes the words must change the signature, or the age freezes');
+  assert.notEqual(rowAgeText(row(59), null), rowAgeText(row(61), null),
+    'and so must the crossing into hours');
+
+  // The other way to lose: Date.now() in the signature differs on EVERY tick, so every tick
+  // repaints and the DOM-swap pressure this whole mechanism exists to remove is back in full. What
+  // is folded in is the TEXT, which is the same string for a whole minute.
+  assert.equal(rowAgeText(row(18, 0), null), rowAgeText(row(18, 30), null),
+    'a quiet half-minute inside the same displayed minute must NOT repaint');
+  assert.equal(rowAgeText(row(600), null), rowAgeText(row(605), null),
+    'nor five minutes inside the same displayed hour');
+
+  // The stale job's own clock ("Not running — queued 27m ago") is the third rendered age, and it is
+  // only printed when the job is stale. `runnerBusy: false` above is what lets isStaleJob say so.
+  const stale = { id: 'j1', status: 'queued', createdAt: ago(30), updatedAt: ago(30) };
+  const staler = { id: 'j1', status: 'queued', createdAt: ago(31), updatedAt: ago(31) };
+  const quiet = { id: 'j2', status: 'running', createdAt: ago(0, 10), updatedAt: ago(0, 10) };
+  assert.notEqual(rowAgeText(row(1000), stale), rowAgeText(row(1000), staler),
+    'the stale note\'s age must move the signature too');
+  assert.equal(rowAgeText(row(1000), quiet), rowAgeText(row(1000), null),
+    'a job that is not stale prints no clock of its own, so it must add nothing');
+
+  // And the signature has to actually carry it — for the Done rows as well, which print the same
+  // "Last reviewed 12m ago" and would freeze the same way.
+  const sig = codeOnly(fnBody(ui, 'function homeInboxSig('));
+  assert.match(sig, /rowAgeText\(e\.r, e\.job\)/, 'every active row must contribute its age text');
+  assert.match(sig, /doneRows\.map\(\(r\) => `\$\{r\.id\}~\$\{rowAgeText\(r, null\)\}`\)/,
+    'and every done row its own');
+  assert.ok(!/Date\.now\(\)/.test(sig),
+    'the signature must never read the clock directly — that repaints every single tick');
+  assert.ok(!/Date\.now\(\)/.test(codeOnly(fnBody(ui, 'function renderHomeInbox('))),
+    'nor may the tick that compares it');
+});
+
+test('U6: a section sees exactly the jobs that act on its own workspaces', () => {
+  const ui = readUi();
+  // KIND_ACTIONS + actsOnKind read nothing else, so they are run rather than read.
+  const table = ui.match(/const KIND_ACTIONS = \{[\s\S]*?\n\};/);
+  assert.ok(table, 'the kind→actions map must be declared once, at module scope');
+  const { actsOnKind } = liftUi(ui, [table[0], 'function actsOnKind(']);
+
+  // The bug: `r.action === kind` is true only because a PR review's action IS its workspace kind.
+  // Spec has no action of its own name, so #/spec matched nothing and never folded a job — one
+  // workspace reading "In progress" on Home and "Ready to post" on its own section.
+  for (const a of ['audit', 're-audit', 'propose']) {
+    assert.equal(actsOnKind({ action: a }, 'spec'), true, `#/spec must see its own ${a} jobs`);
+    assert.equal(actsOnKind({ action: a }, 'pr-review'), false,
+      `and a ${a} job must not reach a PR section`);
+    assert.equal(actsOnKind({ action: a }, 'pr-respond'), false);
+  }
+  // No PR job may leak the other way, which is the scoping the fix could most easily get wrong.
+  for (const a of ['pr-review', 'pr-respond']) {
+    assert.equal(actsOnKind({ action: a }, 'spec'), false,
+      `a ${a} job must never be admitted to #/spec`);
+    assert.equal(actsOnKind({ action: a }, a), true, 'while each PR kind still sees its own');
+  }
+  assert.equal(actsOnKind({ action: 'pr-respond' }, 'pr-review'), false,
+    'and the two PR kinds must not see each other, exactly as jobBindsTo refuses to cross them');
+  // apply and poll are not owned by a kind. `apply` may only reach a section through jobBindsTo —
+  // that is what keeps an apply on a PR workspace out of #/spec — and `poll` drives the Refresh
+  // button, never a card.
+  for (const kind of ['spec', 'pr-review', 'pr-respond']) {
+    assert.equal(actsOnKind({ action: 'apply' }, kind), false,
+      'apply must not be admitted by the kind arm — jobBindsTo is its only way in');
+    assert.equal(actsOnKind({ action: 'poll' }, kind), false);
+  }
+  assert.equal(actsOnKind({ action: 'nonsense' }, 'spec'), false);
+  assert.equal(actsOnKind({ action: 'audit' }, 'no-such-kind'), false,
+    'an unknown kind must admit nothing rather than throw on an undefined lookup');
+
+  // One taxonomy, like WS_STATES and WORKSPACE_STATES: every action the server can enqueue must be
+  // either owned by exactly one kind or one of the two deliberately shared ones. A new action added
+  // to ledger.js and forgotten here is precisely how #/spec went blind in the first place.
+  const owners = new Map();
+  for (const [kind, actions] of Object.entries(new Function(`${table[0]}; return KIND_ACTIONS;`)())) {
+    for (const a of actions) {
+      assert.ok(!owners.has(a), `"${a}" is claimed by both ${owners.get(a)} and ${kind}`);
+      owners.set(a, kind);
+    }
+  }
+  const shared = ['apply', 'poll'];
+  for (const a of ledger.REQUEST_ACTIONS) {
+    assert.ok(owners.has(a) || shared.includes(a),
+      `ledger.js can enqueue "${a}" but no section claims it and it is not one of the shared `
+      + `actions (${shared.join(', ')}) — it would be invisible on every section`);
+  }
+  for (const a of owners.keys()) {
+    assert.ok(ledger.REQUEST_ACTIONS.includes(a),
+      `KIND_ACTIONS claims "${a}", which ledger.js can never enqueue`);
+  }
+  for (const a of shared) {
+    assert.ok(!owners.has(a), `"${a}" is shared and must not be claimed by a kind`);
+  }
+});
+
+test('U6: #/spec is polled and banded like the PR sections, and guarded like them too', () => {
+  const ui = readUi();
+  const section = codeOnly(fnBody(ui, 'async function renderSection('));
+  const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
+  const poll = codeOnly(fnBody(ui, 'function startSectionRequestsPoll('));
+
+  // `if (isPr) startSectionRequestsPoll(kind)` is what left #/spec with no runner at all.
+  assert.match(section, /\n\s*startSectionRequestsPoll\(kind\);/,
+    'every kind must start the poll — a section that never sees a job cannot band by one');
+  assert.ok(!/isPr\s*(\?|&&)?\s*startSectionRequestsPoll|if \(isPr\) startSectionRequestsPoll/.test(section),
+    'and it must not be conditional on the kind being a PR one');
+  // The section-actions header stays PR-only — spec has no Refresh or Run button and gains none.
+  assert.match(section, /isPr\s*\n?\s*\?\s*h\('div', \{ class: 'section-actions' \}/,
+    'the PR-only toolbar must stay PR-only: the poll is what generalises, not the header');
+
+  // Both filters now read the one table, so a section cannot admit a job it does not own.
+  assert.match(poll, /actsOnKind\(r, kind\)/, 'the relevance filter must ask the table');
+  assert.match(grid, /actsOnKind\(r, kind\) && r\.prId/,
+    'and so must the placeholder filter — with prId still required, because a placeholder has no '
+    + 'workspace to take a name from and spec actions never carry one');
+  assert.ok(!/r\.action === kind/.test(poll) && !/r\.action === kind/.test(grid),
+    'the coincidence that a PR review\'s action equals its workspace kind must not be relied on '
+    + 'anywhere — that is the whole bug');
+
+  // Turning the poll on for #/spec hands it the repaint the PR sections already had, and this grid
+  // draws the same delete-confirm the inbox does. Guarded by the SAME helpers — a second rule for
+  // "may I repaint now" is how two surfaces drawing one confirm come to disagree about it.
+  const holdAt = poll.indexOf('holdStands(hold, gridHold)');
+  const writeAt = poll.indexOf('zone.replaceChildren(');
+  assert.ok(holdAt > -1, 'the grid must ask the shared hold before repainting');
+  assert.ok(writeAt > holdAt, 'and ask it before the write, not after');
+  assert.match(poll.slice(holdAt, writeAt), /return;/,
+    'a standing hold must return without reaching replaceChildren');
+  assert.match(poll.slice(holdAt, writeAt), /zoneHeldNote\(zone, GRID_HELD_NOTE\[hold\]\)/,
+    'and say so, for the same reason the inbox does');
+  assert.ok(!/function (gridHold|sectionInteracting)\(/.test(ui),
+    'the grid must reuse zoneHold/holdStands rather than grow a predicate of its own');
+  // Its clock is its own, though: one shared record would carry a hold across a navigation between
+  // two lists that are never on screen together.
+  assert.match(ui, /^const gridHold = \{ heldAt: 0 \};$/m, 'the grid keeps its own hold clock');
+  assert.match(section, /gridHold\.heldAt = 0/,
+    'and a freshly rendered section must clear it — a fresh zone has no interaction in progress');
 });

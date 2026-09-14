@@ -317,6 +317,40 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .band-density-compact .features-grid,
 .band-density-compact .inbox { gap: 8px; }
 
+/* The note a polled list shows while it is holding its repaint (web/app.js, zoneHeldNote). The
+   requests strip and the "▶ Run N jobs" toolbar are outside that hold and keep updating, so without
+   this the screen states two different things about one queue; this is the held half admitting it.
+
+   Sticky at the BOTTOM of the viewport rather than in the flow above the list, and appended rather
+   than prepended, because of when it appears: a delete-confirm is open and the pointer is already
+   over the red Delete button. Anything that pushes the list down by its own height turns a status
+   line into a misclick on something irreversible. Sticky also keeps it on screen on a long list,
+   where the end of the zone is nowhere near the rows being held.
+
+   z-index 3 clears the band headers; it does not need to clear the modal layer, and must not — a
+   dialog over this list is the one thing that should cover it. */
+.zone-held {
+  position: sticky; bottom: 10px; z-index: 3;
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 12px 0 0; padding: 9px 13px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-shadow);
+  color: var(--fg-dim); font-size: 12.5px; line-height: 1.45;
+}
+/* The room the pinned note needs at the end of the list, so the row it floats over is still
+   reachable by scrolling. `--zone-held-h` is the note's measured height, set by zoneHeldNote()
+   because the sentence wraps to one line at 1280px and three at 420px; the fallback covers the
+   frame before that measurement lands. Bottom padding is the only way to make room that moves
+   nothing already on screen — the same reason the note is appended rather than prepended. */
+.zone-holding { padding-bottom: calc(var(--zone-held-h, 72px) + 18px); }
+.zone-held-glyph { color: var(--fg-mute); line-height: 1.45; }
+/* min-width: 0 so the sentence wraps inside the flex row instead of forcing the note — and with it
+   the page — wider than the viewport at 420px. */
+.zone-held-text { min-width: 0; }
+
 /* A compact card — same object, denser: title, why it's parked, one stamp, the job row. The dial,
  * the severity counts and the sources line are decision material, and nothing in these bands is
  * waiting on a decision from you. */

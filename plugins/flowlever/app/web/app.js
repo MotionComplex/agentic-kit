@@ -2625,7 +2625,13 @@ function inboxRow(r, job = null, density = 'full', cat = null) {
   const cls = ['inbox-row', compact ? 'ir-compact' : '', job ? `fc-busy fc-busy-${cssSafe(busyState)}` : '']
     .filter(Boolean).join(' ');
 
-  const link = h('a', { class: cls, href: `#/feature/${encodeURIComponent(r.id)}` },
+  const link = h('a', {
+    class: cls,
+    href: `#/feature/${encodeURIComponent(r.id)}`,
+    // A key for this control that outlives the element: the rows are rebuilt on every repaint, so a
+    // forced one puts focus back by looking this string up again (zoneFocusMark/restoreZoneFocus).
+    dataset: { fk: `row:${r.id}` },
+  },
     // The dial is decision material — a score you weigh before opening something. Nothing in the
     // compact bands is waiting on that decision, so it goes with the rest of the full row.
     compact ? null : dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
@@ -2666,6 +2672,7 @@ function inboxRow(r, job = null, density = 'full', cat = null) {
     const trashBtn = h('button', {
       class: 'btn-icon ir-delete', type: 'button',
       'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
+      dataset: { fk: `row-del:${r.id}` },
       onclick: (e) => { e.preventDefault(); e.stopPropagation(); showConfirm(); },
     }, h('span', { class: 'icon', html: ICONS.trash }));
     wrap.replaceChildren(link, trashBtn);
@@ -2770,6 +2777,9 @@ function doneDisclosure(key, pairs, bodyClass) {
 
   const select = h('select', {
     class: 'done-sort-select', 'aria-label': 'Sort completed workspaces',
+    // Focus keys, so a forced repaint (see zoneFocusMark) puts the keyboard back on the control it
+    // took away. Keyed by the list, because two disclosures can share one page.
+    dataset: { fk: `done-sort:${key}` },
     // This sits inside the <summary>, where any click would otherwise toggle the section shut the
     // moment you reach for the menu.
     onclick: (e) => e.stopPropagation(),
@@ -2782,7 +2792,7 @@ function doneDisclosure(key, pairs, bodyClass) {
       class: 'done-disc', open: !!doneOpen[key],
       ontoggle: (e) => { doneOpen[key] = e.currentTarget.open; },
     },
-    h('summary', { class: 'done-disc-sum' },
+    h('summary', { class: 'done-disc-sum', dataset: { fk: `done-sum:${key}` } },
       h('span', {}, `Done (${pairs.length})`),
       h('span', { class: 'done-sort' }, h('span', { class: 'done-sort-label' }, 'Sort'), select)),
     body);
@@ -2857,58 +2867,231 @@ function homeSubtitle(total, needsYou) {
  * undone.") within four seconds of opening it, focus dropped to <body>, the selection cleared, and
  * the Done disclosure's <select> torn out mid-choice. Before ce22adf Home repainted only
  * #requests-strip, so none of that could happen; binding jobs onto the rows is what put the whole
- * list on the tick. Two rules keep it there without the cost.
+ * list on the tick. Three rules keep it there without the cost.
  *
- * `sig` is everything the inbox actually draws — each row's id, the state/band it landed in, and
- * the identity and status of the job folded onto it. Row CONTENT is not in it because it cannot
- * change here: state.home.rows is only ever refilled by renderHome(), which rebuilds the zone
- * outright. A tick whose signature matches the last painted one touches nothing at all, and that is
- * the overwhelming majority of ticks.
+ * `sig` is everything the inbox actually draws — each row's id, the state/band it landed in, the
+ * identity and status of the job folded onto it, and the age STRINGS it prints (rowAgeText). Row
+ * content beyond that is not in it because it cannot change here: state.home.rows is only ever
+ * refilled by renderHome(), which rebuilds the zone outright. A tick whose signature matches the
+ * last painted one touches nothing at all, and that is the overwhelming majority of ticks.
  *
- * `pending` is the other half. A tick that DOES change something, arriving while a confirm is open
- * or focus lives inside the zone, must not yank the DOM — but it must not drop the change either: a
- * job that starts while you are hovering a trash icon still has to show up. So the repaint is held,
- * and released the moment the interaction ends (see flushHomeInboxSoon) or, failing that, on the
- * next tick. `sig` is set only when the paint actually lands, which is what makes the hold
- * self-healing rather than a one-shot flag that can be lost. */
-const homeInbox = { sig: null, reqs: [], pending: false };
+ * `pending` is the second. A tick that DOES change something, arriving while the user is mid-
+ * something, must not yank the DOM — but it must not drop the change either: a job that starts
+ * while you are hovering a trash icon still has to show up. So the repaint is held, and released
+ * the moment the interaction ends (see releaseHomeInbox) or, failing that, on the next tick. `sig`
+ * is set only when the paint actually lands, which is what makes the hold self-healing rather than
+ * a one-shot flag that can be lost.
+ *
+ * `reload` is the third, and it is the same rule one level up. startHomeRequestsPoll refetches the
+ * whole view when a job newly completes, because a completed job means new server data — and
+ * renderHome() does app.replaceChildren() on the ENTIRE view, outside both the signature and the
+ * hold. That is blocker 2 again by a narrower path, and it was still reproducible: confirm open,
+ * focus on the red Delete button, a second job completes → {"confirms":0,"active":"BODY."}. The
+ * refetch must still happen — dropping it would leave the view stale — so it is flagged here and
+ * performed by releaseHomeInbox() through the SAME guard, never a second one of its own. */
+const homeInbox = { sig: null, reqs: [], pending: false, reload: false, heldAt: 0 };
+
+/* Every "N ago" a row will print, as the text it will print — not the clock behind it.
+ *
+ * These strings are rendered and derived from nothing else in the signature, so once "a tick that
+ * changes nothing touches nothing" landed they froze: at ce22adf the inbox repainted every 4s and
+ * they kept up; after it, a row reading "queued 27m ago" went on saying so at 40m. Putting
+ * Date.now() in the signature is the other way to lose — every tick would differ, every tick would
+ * repaint, and the DOM-swap pressure this whole mechanism exists to remove would be back in full.
+ * Rendered text changes at the granularity fmtAgo/fmtAge print at (a minute, then an hour, then a
+ * day, then an absolute date that never moves), so that is when this repaints: when the words would
+ * actually differ, not when the clock does.
+ *
+ * Deliberately EVERY stamp the workspace owns, not only the ones this row's density happens to
+ * draw. Re-deriving "which stamp shows at which density" here would be a second copy of
+ * inboxRow/compactStamp/reviewStampsRow's rule, and a copy like that drifts silently — with a
+ * frozen string as the symptom, which is the bug. Over-including costs at most one extra repaint a
+ * minute on a workspace whose stamps are under an hour old; under-including costs the regression. */
+function rowAgeText(f, job) {
+  const s = f ? reviewStampsOf(f) : {};
+  return [
+    fmtAgo(s.lastReviewedAt), fmtAgo(s.lastActivityAt), fmtAgo(s.lastPostedAt),
+    fmtAgo(f && f.lastRoundAt), fmtAgo(f && f.updatedAt),
+    // cardJobRow prints exactly one clock of its own, on a stalled job ("started 27m ago"). Whether
+    // the job IS stale already reaches the signature through `cat`; this is the number beside it.
+    job && isStaleJob(job) ? fmtAge(jobAgeMs(job)) : null,
+  ].map((x) => x || '').join('/');
+}
 
 /* The signature of the banded layout — see homeInbox. Job identity AND status, because "queued →
  * running" is a visible change on the row even when the band doesn't move; `phase` too, since the
- * job line spells it out. Done rows contribute their ids so the disclosure's count can't go stale. */
+ * job line spells it out. Done rows contribute their ids so the disclosure's count can't go stale,
+ * and their age text with them: a Done row prints "Last reviewed 12m ago" exactly as an active one
+ * does, so it would freeze exactly as one. */
 function homeInboxSig(active, doneRows) {
   const parts = active.map((e) => [
     e.r.id,
     e.cat,
     wsState(e.cat).band,
     e.job ? `${e.job.id}/${e.job.status}/${e.job.needsInput ? 1 : 0}/${e.job.phase || ''}` : '-',
+    rowAgeText(e.r, e.job),
   ].join('~'));
-  parts.push(`done:${doneRows.map((r) => r.id).join(',')}`);
+  parts.push(`done:${doneRows.map((r) => `${r.id}~${rowAgeText(r, null)}`).join(',')}`);
   return parts.join('|');
 }
 
-/* Is the user in the middle of something inside the inbox? Both arms are things a replaceChildren
- * destroys silently: an open confirm is a decision in progress, and rebuilding it answers "no" on
- * the user's behalf; focus inside the zone means a keyboard user is somewhere in this list, and the
- * swap drops them to <body> with the text selection. */
-function inboxInteracting(zone) {
-  if (!zone) return false;
-  if (zone.querySelector('.delete-confirm')) return true;
+/* How long a polled list may hold a repaint for a cursor: three ticks of the 4s poller.
+ *
+ * 316edb0 held on focus exactly as it held on a confirm — until the interaction ends — and focusout
+ * only fires when the user MOVES. A keyboard user resting on a row link therefore stopped seeing
+ * new work indefinitely: measured frozen across 5+ ticks with the data changing on every one. A
+ * list that is silently wrong about the world is the worse of the two failures, so focus gets a
+ * ceiling. Long enough that ordinary tabbing, reading, and reaching for a control are never
+ * interrupted; short enough that "frozen" is never the right word for what you are looking at. */
+const ZONE_BUSY_HOLD_MS = 12000;
+
+/* Why a polled list is holding its repaint, or null. The two answers are different in kind, and
+ * telling them apart IS the ceiling:
+ *
+ *  'confirm' — an unanswered destructive question ("Delete X? This can't be undone."). A repaint
+ *    answers it "no" on the user's behalf, silently, and there is nothing to put back afterwards.
+ *    No poll tick is worth that, so this hold has NO ceiling: it lasts until the user answers, and
+ *    the note the list shows while held (zoneHeldNote) is what keeps that honest on screen.
+ *  'busy' — focus, or a live text selection, inside the list: a place the user is keeping, not a
+ *    decision they are making. A swap drops them to <body> and clears the selection, which is why
+ *    holding here is right at all — but only up to ZONE_BUSY_HOLD_MS, after which the list repaints
+ *    and puts focus back where it was (zoneFocusMark / restoreZoneFocus). The one interaction that
+ *    ceiling can still interrupt is a native <select> dropdown left open past it: it closes, focus
+ *    survives, and the chosen value is unchanged — recoverable and visible, which a silently
+ *    dismissed delete confirm is not. That asymmetry is the whole reason the two are separated. */
+function zoneHold(zone) {
+  if (!zone) return null;
+  if (zone.querySelector('.delete-confirm')) return 'confirm';
   const a = document.activeElement;
-  return !!(a && a !== document.body && zone.contains(a));
+  if (a && a !== document.body && zone.contains(a)) return 'busy';
+  // Selecting a title to copy leaves activeElement on <body>, so the focus arm never sees it — and
+  // a repaint collapses the selection with no way to restore it.
+  const sel = typeof getSelection === 'function' ? getSelection() : null;
+  if (sel && sel.rangeCount && !sel.isCollapsed && sel.anchorNode && zone.contains(sel.anchorNode)) {
+    return 'busy';
+  }
+  return null;
 }
 
-/* Release a held repaint as soon as the interaction that held it is over, rather than up to a whole
- * tick later — a Cancel that leaves four seconds of stale bands behind it is the same staleness the
- * signature check exists to avoid, just from the other direction. Deferred by a turn of the event
- * loop on purpose: during focusout document.activeElement is transiently <body>, so asking
- * inboxInteracting() right now would answer "nobody is here" mid-Tab and destroy the element about
- * to receive focus. */
-function flushHomeInboxSoon() {
-  setTimeout(() => {
-    if (homeInbox.pending && current.view === 'home') renderHomeInbox(homeInbox.reqs);
-  }, 0);
+/* May this hold still stand? `g.heldAt` is stamped by the first held decision and cleared by the
+ * paint that ends it, so what this measures is CONTINUOUS held time rather than a count of calls —
+ * a user clicking around inside the zone must not burn the budget faster than a user sitting still,
+ * because they are equally entitled to a list that is telling the truth. */
+function holdStands(hold, g) {
+  if (!hold) return false;
+  if (!g.heldAt) g.heldAt = Date.now();
+  return hold === 'confirm' || Date.now() - g.heldAt < ZONE_BUSY_HOLD_MS;
 }
+
+/* Where focus is, in terms that survive the rebuild. Every element in the zone is replaced, so a
+ * node reference is worthless; what survives is WHICH control it was, and each focusable in a
+ * polled list carries a stable `data-fk` for exactly this. Without it the ceiling would trade one
+ * failure for another — the list unfreezes and the keyboard user is dumped to <body>, which is the
+ * thing the hold was added to prevent in the first place. */
+function zoneFocusMark(zone) {
+  const a = document.activeElement;
+  if (!zone || !a || !a.closest || !zone.contains(a)) return null;
+  const el = a.closest('[data-fk]');
+  return el ? el.dataset.fk : null;
+}
+
+function restoreZoneFocus(zone, fk) {
+  if (!zone || !fk) return;
+  const el = zone.querySelector(`[data-fk="${CSS.escape(fk)}"]`);
+  // preventScroll: the user did not ask to move, so putting them back must not move the page either.
+  if (el) el.focus({ preventScroll: true });
+}
+
+/* What a held list says about itself, and why it says anything at all.
+ *
+ * While the rows were held the page contradicted itself outright: the requests strip and the
+ * "▶ Run N jobs" toolbar sit OUTSIDE this guard and keep updating, so the strip read "1 job in
+ * flight — already shown on the rows below" while no row showed it. The answer is NOT to freeze
+ * them too. The toolbar is a control whose count you act on — freezing it means pressing a button
+ * that promises the wrong number — and the strip is the cross-section queue view, so freezing it
+ * hides live work at the exact moment work is happening. What was missing was never their liveness;
+ * it was the rows admitting they are not live. Now they do, and one story covers the whole screen.
+ *
+ * Appended, never prepended, and never through replaceChildren: this element has to arrive without
+ * moving anything already on screen. A confirm's red Delete button is under the pointer when this
+ * appears, and a banner that pushes the list down by its own height turns a status line into a
+ * misclick on something irreversible. It pins itself to the bottom of the viewport in CSS instead. */
+function zoneHeldNote(zone, text) {
+  if (!zone) return;
+  let note = zone.querySelector(':scope > .zone-held');
+  if (!note) {
+    note = h('div', { class: 'zone-held', role: 'status' },
+      h('span', { class: 'zone-held-glyph', 'aria-hidden': 'true' }, '⏸'),
+      h('span', { class: 'zone-held-text' }));
+    zone.append(note);
+  }
+  const t = note.querySelector('.zone-held-text');
+  // Written only on a real change, or role="status" re-announces the same sentence every four
+  // seconds to a screen reader for as long as the hold lasts.
+  if (t.textContent !== text) t.textContent = text;
+  // Pinned means it floats over whatever row is at the bottom edge, so the zone reserves its height
+  // and that row stays reachable by scrolling. Pinning is not optional: the strip this answers is
+  // at the TOP of the page, so a note sitting in flow at the end of a tall list would be off screen
+  // exactly when the contradiction is on it. Bottom padding is the one way to make room that moves
+  // nothing already above — which is the same reason the note is appended and never prepended.
+  zone.classList.add('zone-holding');
+  zone.style.setProperty('--zone-held-h', `${note.offsetHeight}px`);
+}
+
+function clearZoneHeldNote(zone) {
+  if (!zone) return;
+  const note = zone.querySelector(':scope > .zone-held');
+  if (note) note.remove();
+  zone.classList.remove('zone-holding');
+  zone.style.removeProperty('--zone-held-h');
+}
+
+/* One sentence per reason, and each one answers the strip directly. The measured contradiction was
+ * the strip reading "1 job in flight — already shown on the rows below" while no row showed it, so
+ * it is not enough to say "paused": the note has to say that the queue above is AHEAD of these
+ * rows, which is exactly the gap the strip's sentence would otherwise deny. */
+const HOME_HELD_NOTE = {
+  confirm: 'Paused while you answer — the job queue above has moved on and these rows have not. '
+    + 'They catch up the moment you decide.',
+  busy: 'Paused while you work here — the job queue above has moved on and these rows have not. '
+    + 'They catch up in a moment.',
+};
+
+/* Release whatever Home is holding, in the order that keeps the newest answer: a pending RELOAD
+ * refetches and rebuilds the whole view, so a repaint queued behind it is stale by construction and
+ * is dropped rather than drawn first. Called from BOTH release edges — the interaction ending
+ * (flushHomeInboxSoon, wired to the zone's click/focusout) and the next poll tick — because either
+ * alone has a hole: the tick alone leaves up to four seconds of stale bands after a Cancel, and the
+ * event alone loses the change when the interaction ends in a way that fires neither. */
+function releaseHomeInbox() {
+  if (current.view !== 'home') return;
+  // Nothing held ⇒ nothing to decide, and in particular no hold clock to start: stamping heldAt on
+  // a quiet tick would spend the ceiling before the first change that needed it ever arrived.
+  if (!homeInbox.reload && !homeInbox.pending) return;
+  const zone = $('#home-inbox-zone');
+  const hold = zoneHold(zone);
+  if (holdStands(hold, homeInbox)) { zoneHeldNote(zone, HOME_HELD_NOTE[hold]); return; }
+  // Past the ceiling with focus still inside, the mark is how the user keeps their place across a
+  // rebuild they did not ask for. A release triggered by the user's OWN click or blur has no hold
+  // left to read, so `mark` is null there and focus is left exactly where they put it.
+  const mark = hold ? zoneFocusMark(zone) : null;
+  if (homeInbox.reload) {
+    homeInbox.reload = false;
+    homeInbox.pending = false;
+    homeInbox.heldAt = 0;
+    // renderHome() replaces the view, so the mark can only be redeemed once the new zone exists.
+    renderHome()
+      .then(() => restoreZoneFocus($('#home-inbox-zone'), mark))
+      .catch(() => { /* renderHome reports its own failures in the view it drew */ });
+    return;
+  }
+  renderHomeInbox(homeInbox.reqs);
+}
+
+/* Deferred by a turn of the event loop on purpose: during focusout document.activeElement is
+ * transiently <body>, so asking zoneHold() right now would answer "nobody is here" mid-Tab and
+ * destroy the element about to receive focus. */
+function flushHomeInboxSoon() { setTimeout(releaseHomeInbox, 0); }
 
 /* Draws the inbox from the cached rows against the jobs seen this tick, and answers WHICH of those
  * jobs it folded onto a row. The strip needs that answer: a job shown on a row and in the strip
@@ -2937,10 +3120,25 @@ function renderHomeInbox(requests) {
   const zone = $('#home-inbox-zone');
   if (!zone) return used;
   const sig = homeInboxSig(active, doneRows);
-  // A tick that changes nothing must touch nothing.
-  if (sig === homeInbox.sig) { homeInbox.pending = false; return used; }
-  // Something did change — but not at the cost of whatever the user has open. Hold it.
-  if (inboxInteracting(zone)) { homeInbox.pending = true; return used; }
+  // A tick that changes nothing must touch nothing — and with nothing outstanding there is nothing
+  // to hold, so the clock and the note both go.
+  if (sig === homeInbox.sig) {
+    homeInbox.pending = false;
+    homeInbox.heldAt = 0;
+    clearZoneHeldNote(zone);
+    return used;
+  }
+  // Something did change — but not at the cost of whatever the user has open. Hold it, and say so
+  // on the rows, because the strip and the toolbar above are deliberately NOT held (zoneHeldNote).
+  const hold = zoneHold(zone);
+  if (holdStands(hold, homeInbox)) {
+    homeInbox.pending = true;
+    zoneHeldNote(zone, HOME_HELD_NOTE[hold]);
+    return used;
+  }
+  // Past the ceiling with focus still parked inside: repaint, then put the user back on the same
+  // control. Unfreezing the list at the cost of their place would just be the other failure.
+  const mark = hold ? zoneFocusMark(zone) : null;
 
   const bands = bandSections(active, (e, density) => inboxRow(e.r, e.job, density, e.cat), 'inbox');
   const lists = bands.length
@@ -2951,10 +3149,14 @@ function renderHomeInbox(requests) {
       doneRows.map((r) => ({ sortable: r, el: inboxRow(r) })), 'inbox done-disc-body'));
   }
   zone.replaceChildren(h('div', { class: 'section-lists' }, ...lists));
+  // replaceChildren takes the note's ELEMENT but not the reservation on its parent.
+  clearZoneHeldNote(zone);
   // Recorded only now, after the paint actually landed: a signature stamped on a tick that skipped
   // would make the skip permanent, which is how a deferred change turns into a dropped one.
   homeInbox.sig = sig;
   homeInbox.pending = false;
+  homeInbox.heldAt = 0;
+  restoreZoneFocus(zone, mark);
 
   const sub = $('#home-sub');
   if (sub) {
@@ -2985,6 +3187,15 @@ async function renderHome() {
   }
   if (seq !== routeSeq) return;
   if (!Array.isArray(rows)) rows = [];
+
+  // A fresh view is a fresh zone, and an EMPTY one, so the signature from the last visit must not
+  // be allowed to match and skip the first paint into it. The hold goes with it: a clock or a
+  // deferred reload left over from the zone that has just been thrown away would be measuring an
+  // interaction in a DOM that no longer exists.
+  homeInbox.sig = null;
+  homeInbox.pending = false;
+  homeInbox.reload = false;
+  homeInbox.heldAt = 0;
 
   if (rows.length === 0) {
     app.replaceChildren(
@@ -3021,10 +3232,6 @@ async function renderHome() {
       onfocusout: flushHomeInboxSoon,
     }),
   );
-  // A fresh zone is an EMPTY zone, so the signature from the last visit must not be allowed to
-  // match and skip the first paint into it.
-  homeInbox.sig = null;
-  homeInbox.pending = false;
   // No job is known until the queue answers, which startPolling asks for immediately below. Paint
   // the bands on the server's states now rather than holding the whole inbox back for a round trip.
   renderHomeInbox([]);
@@ -3066,7 +3273,15 @@ function startHomeRequestsPoll() {
     doneIds.forEach((id) => { if (!lastDone.has(id)) newlyDone = true; });
     const first = lastDone.size === 0;
     lastDone = doneIds;
-    if (newlyDone && !first) renderHome();
+    // A completed job means new server data, so the whole view has to be refetched — but
+    // renderHome() replaces the entire view, which destroys an open confirm and drops focus exactly
+    // as a zone repaint does, only wider. Flag it and let releaseHomeInbox() run it through the
+    // same guard; with nothing held that happens on this very line, as it did before.
+    if (newlyDone && !first) homeInbox.reload = true;
+    // The tick-side release, after everything this tick decided. The event-side release is
+    // flushHomeInboxSoon on the zone; neither is enough alone — an interaction can end in a way
+    // that fires no event, and waiting for the next tick alone leaves a Cancel four seconds stale.
+    releaseHomeInbox();
   });
 }
 
@@ -3145,7 +3360,12 @@ async function renderSection(kind) {
     gridZone,
   ].filter(Boolean));
 
-  if (isPr) startSectionRequestsPoll(kind);
+  // Every kind, not only the PR ones. Without this #/spec was the one banded surface that never saw
+  // a runner: a spec workspace with a live `apply` read "In progress" on Home and "Needs you /
+  // Ready to post" here, which is two answers about one workspace from the two views that share a
+  // state table precisely so they cannot give two.
+  gridHold.heldAt = 0;   // a fresh zone has no interaction to be mid-way through
+  startSectionRequestsPoll(kind);
 }
 
 /* Which WS_STATES key a card belongs under. A live runner job OUTRANKS the workspace's own state:
@@ -3170,6 +3390,30 @@ function categoryOf(f, job) {
   return WS_STATE_INDEX.has(f && f.state) ? f.state : WS_FALLBACK_STATE;
 }
 
+/* Which queue actions act on a workspace of THIS kind. The section filter used to be
+ * `r.action === kind`, which is right only by coincidence: a PR review's action IS the kind of
+ * workspace it makes. `spec` has no action of its own name, so the same test admitted nothing and
+ * #/spec never folded a job onto a card — a spec workspace with a live `apply` banded "In progress"
+ * on Home and "Needs you / Ready to post" on its own section. One workspace, two surfaces, two
+ * answers: the exact thing the single `state` and the single band table exist to prevent.
+ *
+ * One table rather than a branch per kind, for the reason WS_STATES is one table: a second place
+ * that decides what belongs to a section is a second place to forget `propose` in. It mirrors
+ * ledger.js's REQUEST_ACTIONS, minus the two that are not owned by a kind —
+ *
+ *   `apply`  reaches a section only through jobBindsTo, which is what keeps an apply on a PR
+ *            workspace out of #/spec: the wsId arm is an exact id match and nothing else answers.
+ *   `poll`   is PR discovery. It drives the Refresh button, never a card, and has no workspace.
+ *
+ * — so no PR action appears under `spec` and no spec action under a PR kind, which is the whole of
+ * "a section sees exactly the jobs that act on its own workspaces". */
+const KIND_ACTIONS = {
+  spec: ['audit', 're-audit', 'propose'],
+  'pr-review': ['pr-review'],
+  'pr-respond': ['pr-respond'],
+};
+function actsOnKind(job, kind) { return (KIND_ACTIONS[kind] || []).includes(job.action); }
+
 /* The cards for a section, drawn as ordered bands: what needs you, what a runner is mid-way
  * through, what is parked on somebody else — then the collapsed Done list, unchanged. Each
  * workspace's live job is folded onto its card, and an in-flight review whose workspace doesn't
@@ -3193,8 +3437,13 @@ function sectionGrid(kind, features, requests) {
   // What is deliberately NOT excluded: a wsId naming a workspace that is GONE. That job is as
   // orphaned as one that never carried a wsId, and dropping it (`&& !r.wsId`) hides a running
   // review from the cockpit entirely. Existence is the question, not the presence of the field.
+  //
+  // `r.prId` is still required and still does real work: a placeholder has no workspace to name
+  // itself from, so the PR number is the only identity it has. Spec's own actions never carry one
+  // (ledger.js requires wsId or instructions for an `audit`), so a spec section draws no
+  // placeholders — as it never did.
   const pending = live
-    .filter((r) => r.action === kind && r.prId && !features.some((f) => jobBindsTo(r, f)))
+    .filter((r) => actsOnKind(r, kind) && r.prId && !features.some((f) => jobBindsTo(r, f)))
     .map((r) => ({ f: null, job: r, cat: categoryOf(null, r) }));
   // Active workspaces get banded; finished ones drop into a collapsed "Done" section.
   const active = withJob.filter(({ f }) => f.status !== 'done')
@@ -3219,7 +3468,22 @@ function sectionGrid(kind, features, requests) {
   return h('div', { class: 'section-lists' }, ...lists);
 }
 
-/* Poll requests for a PR section: rebind jobs to cards every tick, and when a job
+/* The grid's half of the hold. Only a clock: the grid repaints every tick regardless, so unlike the
+ * inbox it has no repaint that could be lost and nothing to defer — just a question of whether THIS
+ * tick may land on an open confirm. Its own record rather than the inbox's, because the two lists
+ * are never on screen together and one shared clock would carry a hold across a navigation. */
+const gridHold = { heldAt: 0 };
+
+/* Said on the cards themselves, for the reason HOME_HELD_NOTE is said on the rows: everything else
+ * on the page keeps updating, so the part that isn't has to be the part that says so. */
+const GRID_HELD_NOTE = {
+  confirm: 'Paused while you answer — the job queue above has moved on and these cards have not. '
+    + 'They catch up the moment you decide.',
+  busy: 'Paused while you work here — the job queue above has moved on and these cards have not. '
+    + 'They catch up in a moment.',
+};
+
+/* Poll requests for a section: rebind jobs to cards every tick, and when a job
  * newly completes, refetch features so the runner's new/updated workspace card shows. */
 function startSectionRequestsPoll(kind) {
   let lastDone = new Set();
@@ -3234,8 +3498,12 @@ function startSectionRequestsPoll(kind) {
     // the two surfaces disagree about which jobs exist. Ask the predicate instead. It answers
     // identically for an `apply` today — the prId arm rejects every non-PR action — so this is one
     // rule where there were two, not a change of behaviour.
+    //
+    // The kind arm is KIND_ACTIONS now rather than `r.action === kind`: that test is true only
+    // because a PR review's action happens to be its workspace kind, and #/spec — whose jobs are
+    // `audit`/`re-audit`/`propose` — matched nothing at all under it.
     const known = state.section.features;
-    const rel = reqs.filter((r) => r.action === kind
+    const rel = reqs.filter((r) => actsOnKind(r, kind)
       || (r.action === 'apply' && known.some((f) => jobBindsTo(r, f))));
     // The manual-refresh pass has no workspace of its own — it drives the Refresh button
     // instead of a card. An unscoped (`kind: null`) poll covers every PR section.
@@ -3256,7 +3524,23 @@ function startSectionRequestsPoll(kind) {
       } catch { /* keep cache */ }
     }
     const zone = $('#features-grid-zone');
-    if (zone) zone.replaceChildren(sectionGrid(kind, state.section.features, rel));
+    if (!zone) return;
+    // Same DOM swap, same hands. This grid draws the same delete-confirm the inbox does and used to
+    // rebuild straight over it every four seconds — the hole featureCard's own doDelete() comment
+    // names. It stops being merely pre-existing the moment #/spec is polled: that section had no
+    // poller at all, so folding its jobs on would have handed it blocker 2 brand new. The same
+    // helpers as the inbox, deliberately — two rules for "may I repaint now" is how two surfaces
+    // that draw the same confirm come to disagree about whether it survives.
+    //
+    // No `pending` bookkeeping here, unlike the inbox: this grid repaints unconditionally on every
+    // tick, so a held repaint is redrawn by the next one four seconds later and cannot be lost.
+    const hold = zoneHold(zone);
+    if (holdStands(hold, gridHold)) { zoneHeldNote(zone, GRID_HELD_NOTE[hold]); return; }
+    const mark = hold ? zoneFocusMark(zone) : null;
+    gridHold.heldAt = 0;
+    zone.replaceChildren(sectionGrid(kind, state.section.features, rel));
+    clearZoneHeldNote(zone);   // takes the reservation the note left on the zone, not just the note
+    restoreZoneFocus(zone, mark);
   });
 }
 
@@ -3324,7 +3608,9 @@ function compactStamp(f, job, cat) {
  * nothing in these bands is waiting on a decision from you. Same element, same link, same delete
  * flow as a full card, so it stays recognisably the same object. */
 function compactCard(f, job, cat, cls, href) {
-  return h('a', { class: `${cls} fc-compact`, href },
+  // Same focus key as the full card: the density it happens to be drawn at is not part of WHICH
+  // control this is, and a band flip between the hold and the release must not lose the user.
+  return h('a', { class: `${cls} fc-compact`, href, dataset: { fk: `card:${f.id}` } },
     h('div', { class: 'fc-top' },
       h('div', { class: 'fc-titlewrap' },
         h('div', { class: 'fc-title' }, f.title || f.id),
@@ -3368,7 +3654,7 @@ function featureCard(f, job, density = 'full', cat = null) {
 
   const card = density === 'compact'
     ? compactCard(f, job, cat, cls, href)
-    : h('a', { class: cls, href },
+    : h('a', { class: cls, href, dataset: { fk: `card:${f.id}` } },
       h('div', { class: 'fc-top' },
         h('div', { class: 'fc-titlewrap' },
           h('div', { class: 'fc-title' }, f.title || f.id),
@@ -3396,6 +3682,7 @@ function featureCard(f, job, density = 'full', cat = null) {
     const trashBtn = h('button', {
       class: 'btn-icon fc-delete', type: 'button',
       'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
+      dataset: { fk: `card-del:${f.id}` },
       onclick: (e) => { e.preventDefault(); e.stopPropagation(); showConfirm(); },
     }, h('span', { class: 'icon', html: ICONS.trash }));
     wrap.replaceChildren(card, trashBtn);
