@@ -1329,9 +1329,47 @@ test('workspaceState: feature.status done wins over every other signal', () => {
   assert.equal(ledger.workspaceState(feature, findings, '2026-09-01T00:00:00.000Z'), 'done');
 });
 
-test('workspaceState: a finding with neither draft nor suggestion is not reviewable', () => {
-  // Nothing to decide on means nothing to ask the user about — otherwise a bare tracking finding
-  // would pin its workspace under "needs you" with no button to press.
+test('workspaceState: a finding with neither draft nor suggestion is still not REVIEWABLE', () => {
+  // isReviewable mirrors web/app.js's reviewableFindings(), which drives the stepper, so the
+  // settled backstop must NOT have widened it. If it had, this bare finding would join the
+  // reviewable set as undecided and drag the workspace back to needs-review.
   const bare = { fp: 'fp-bare', status: 'open', suggestion: '   ' };
-  assert.equal(ledger.workspaceState({ status: 'draft', review: {} }, [bare], null), 'settled');
+  const feature = { status: 'draft', review: {} };
+  assert.equal(ledger.workspaceState(feature, [f({ decision: 'approve' }), bare], null), 'ready-to-post');
+});
+
+test('workspaceState: a live finding with nothing attached never reads settled', () => {
+  // The failure this whole state machine exists to prevent. `ingestFindings` defaults `suggestion`
+  // to '', so an open finding with no draft and an empty suggestion is reachable through the
+  // documented path — and it is invisible to isReviewable. Falling through to `settled` would draw
+  // it in the "waiting on others" band while `counts.open` on the same row says there is open work.
+  const feature = { status: 'draft', review: {} };
+  const bare = { fp: 'fp-bare-1', status: 'open', suggestion: '' };
+  assert.equal(ledger.workspaceState(feature, [bare], null), 'needs-review');
+  // whitespace-only is the same nothing, and `reworking` is just as live as `open`
+  assert.equal(ledger.workspaceState(feature, [{ fp: 'fp-bare-2', status: 'reworking', suggestion: '   ' }], null), 'needs-review');
+});
+
+test('workspaceState: the live-finding backstop takes the same everPosted split', () => {
+  // Which pass the user is on still has to be said — a bare finding on a re-review round is a
+  // second look, not a first one.
+  const bare = { fp: 'fp-bare-3', status: 'open', suggestion: '' };
+  const posted = { status: 'draft', review: { lastPostedAt: '2026-08-17T11:47:58.373Z' } };
+  assert.equal(ledger.workspaceState(posted, [bare], null), 'needs-rereview');
+  // per-finding evidence alone is enough, exactly as on the reviewable path
+  const viaFinding = [bare, f({ status: 'resolved', postedAt: '2026-08-01T00:00:00.000Z' })];
+  assert.equal(ledger.workspaceState({ status: 'draft', review: {} }, viaFinding, null), 'needs-rereview');
+});
+
+test('workspaceState: the backstop only catches LIVE findings, and outranks nothing above it', () => {
+  // Posted / applied / pending / resolved findings are out of the reviewer's hands, so they must
+  // keep reaching the states that already claim them — the guard sits last for exactly that reason.
+  const feature = { status: 'ready', review: {} };
+  assert.equal(ledger.workspaceState(feature, [f({ status: 'resolved' }), f({ status: 'waived' })], null), 'settled');
+  assert.equal(ledger.workspaceState(feature, [], null), 'settled');
+  const bare = (fp, over = {}) => ({ fp, status: 'reworking', suggestion: '', ...over });
+  assert.equal(ledger.workspaceState(feature, [bare('b1', { appliedAt: '2026-09-10T00:00:00.000Z' })], null), 'awaiting-reaudit');
+  assert.equal(ledger.workspaceState(feature, [bare('b2', { postedAt: '2026-09-10T00:00:00.000Z' })], null), 'awaiting-author');
+  assert.equal(ledger.workspaceState(feature, [bare('b3', { pending: 'post' })], null), 'posting');
+  assert.equal(ledger.workspaceState({ status: 'done', review: {} }, [bare('b4')], null), 'done');
 });

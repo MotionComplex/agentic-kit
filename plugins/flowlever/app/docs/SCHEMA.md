@@ -265,6 +265,12 @@ first" list drift, and the symptom is a card drawn in one band but sorted as if 
 Order is the contract: the first rule that matches claims the workspace. `done` wins outright, then
 `posting` (while the runner writes, the ledger's other stamps still describe the pre-post world).
 
+`settled` is guarded: a workspace with any **live** finding (open/reworking, not posted, not applied, not
+`pending` — the same set `counts.open` reports) can never reach it, and falls to `needs-review` /
+`needs-rereview` on the same ever-posted split. Without the guard a finding with no `draft` and an empty
+`suggestion` — the `ingestFindings` default — is invisible to the undecided test and lands the workspace in
+the `waiting` band while its own row says there is open work.
+
 **`ledger.decisionOf(finding)`** backs the undecided test: `'approve' | 'edit' | 'fix-only' | 'waive' |
 'redirect' | 'reject' | null`, from persisted state only — `status:'waived'`, then the finding-level
 `decision`, then the draft's `redirect`/`reject` verdict, then the hunk path (every recorded
@@ -272,7 +278,12 @@ Order is the contract: the first rule that matches claims the workspace. `done` 
 is not optional: per-hunk Accept never writes `decision`, so ignoring it reads the commonest PR-review
 flow as undecided forever. **Known skew:** the ledger has no diff engine, so it reads the hunk ids off the
 recorded `review.hunks` keys, while the browser walks the hunk list it recomputes from `before`/`after`.
-A draft whose hunks are only *partly* decided therefore reads decided here and undecided there.
+A draft whose hunks are only *partly* decided therefore reads decided here and undecided there. The skew
+runs **one way only** and is bounded to a label: such a workspace states `ready-to-post` where the browser
+would say `needs-review`/`needs-rereview`, and all three sit in the same **`needs-you`** band — so it can
+change the wording and the rank within that band, never the band, and it can never hide a workspace. The
+dominant path cannot skew at all: Approve (`acceptAll`) writes an entry for every hunk id, so reaching the
+disagreement takes a strict-subset accept with the remainder left untouched.
 
 ## features/<featureId>.json
 ```jsonc

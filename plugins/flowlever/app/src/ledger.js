@@ -611,7 +611,13 @@ function decisionOf(finding) {
   // decision taken on it — so the recorded keys ARE the hunk ids here. The browser instead walks
   // the hunk list it recomputes from the before/after diff, which means a draft whose hunks are
   // only PARTLY decided reads as undecided there and decided here. Closing that skew would mean
-  // a second copy of the diff engine in the ledger, which costs more than the skew does.
+  // a second copy of the diff engine in the ledger, which costs more than the skew does — and what
+  // it costs is bounded. The skew only ever runs one way (decided here, undecided there), so the
+  // workspace reads `ready-to-post` where the browser would say `needs-review`/`needs-rereview`;
+  // all three sit in the SAME `needs-you` band, so it can change the label and the rank within that
+  // band and never the band itself. Nothing is hidden by it. The dominant path cannot skew at all:
+  // Approve in web/app.js (`acceptAll`) writes an entry for every hunk id, so it takes a
+  // strict-subset accept with the remainder left untouched to reach the disagreement.
   const statuses = Object.values(rv.hunks || {}).map((h) => h && h.status);
   if (!statuses.length) return null;
   if (!statuses.every((s) => s === 'accepted' || s === 'edited')) return null;
@@ -637,14 +643,36 @@ const WORKSPACE_STATES = [
   { state: 'done', band: 'done', label: 'Done' },
 ];
 
-// Is this finding still something the REVIEWER has to decide on? Open/reworking, not already out
-// of their hands, and carrying something decidable — a code-diff `draft` or a non-empty
-// `suggestion` (the proposed PR comment). PR-review findings usually carry only a suggestion, so
-// dropping the suggestion arm would make every PR workspace look like it had nothing to review.
+// Is this finding still LIVE work on the reviewer's side? Open/reworking and not already out of
+// their hands — nothing posted to the PR, nothing written back to the spec, no runner mid-write.
+// This is the same set `computeReadiness` scores as "open", i.e. the one the `counts.open` on a
+// list row is drawn from.
+function isLiveFinding(finding) {
+  return isOpen(finding) && !isPosted(finding) && !isApplied(finding) && !isPending(finding);
+}
+
+// Is this finding still something the REVIEWER has to decide on? Live (above) AND carrying
+// something decidable — a code-diff `draft` or a non-empty `suggestion` (the proposed PR comment).
+// PR-review findings usually carry only a suggestion, so dropping the suggestion arm would make
+// every PR workspace look like it had nothing to review.
+//
+// Deliberately NARROWER than isLiveFinding, and it must stay that way: this predicate mirrors
+// web/app.js's `reviewableFindings()`, which is what the review stepper walks. Widening it to take
+// in live findings with nothing attached would hand the stepper cards it cannot render a decision
+// for. Where the state machine needs "is there live work at all", it asks isLiveFinding instead.
 function isReviewable(finding) {
-  if (!isOpen(finding) || isPosted(finding) || isApplied(finding) || isPending(finding)) return false;
+  if (!isLiveFinding(finding)) return false;
   const hasSuggestion = typeof finding.suggestion === 'string' && finding.suggestion.trim() !== '';
   return Boolean(finding.draft) || hasSuggestion;
+}
+
+// Has anything on this workspace ever gone out? It is the only durable first-pass/second-pass
+// split: a re-review round reopens findings that look exactly like first-round ones. The
+// per-finding stamp is checked as well as the workspace one because a workspace posted before
+// feature.review existed carries the evidence only on its findings.
+function everPosted(feature, list) {
+  return Boolean(feature && feature.review && feature.review.lastPostedAt)
+    || list.some((f) => Boolean(f && f.postedAt));
 }
 
 // The single answer to "what is going on with this workspace?", computed here rather than in the
@@ -660,14 +688,8 @@ function workspaceState(feature, findings, lastRoundAt = null) {
 
   const reviewable = list.filter(isReviewable);
   if (reviewable.some((f) => decisionOf(f) === null)) {
-    // Whether this is a first pass or a second one changes what the user is being asked to do,
-    // and "have we ever posted?" is the only durable way to tell: a re-review round reopens
-    // findings that look exactly like first-round ones. The per-finding stamp is checked as well
-    // as the workspace one because a workspace posted before feature.review existed carries the
-    // evidence only on its findings.
-    const everPosted = Boolean(feature && feature.review && feature.review.lastPostedAt)
-      || list.some((f) => Boolean(f.postedAt));
-    return everPosted ? 'needs-rereview' : 'needs-review';
+    // Whether this is a first pass or a second one changes what the user is being asked to do.
+    return everPosted(feature, list) ? 'needs-rereview' : 'needs-review';
   }
   // Everything decidable has been decided and none of it has gone out yet — the user's next
   // move is the Post button, not another read-through.
@@ -681,6 +703,16 @@ function workspaceState(feature, findings, lastRoundAt = null) {
     return responded ? 'author-responded' : 'awaiting-author';
   }
   if (list.some(isApplied)) return 'awaiting-reaudit';
+
+  // Backstop, and the reason this whole function exists. A live finding carrying neither a draft
+  // nor a suggestion is invisible to isReviewable, so without this it walks past every rule above
+  // and lands on `settled` — drawn in the "waiting on others" band at minimum density, on a row
+  // whose own `counts.open` says there is open work. The user would be told to wait on somebody
+  // else for work that is nobody's but theirs, by the one list built to stop work going missing.
+  // `ingestFindings` defaults `suggestion` to '', so this arrives through the documented path.
+  // Reviewable or not, the state has to name it — the user decides what to do with an empty one.
+  if (list.some(isLiveFinding)) return everPosted(feature, list) ? 'needs-rereview' : 'needs-review';
+
   // Nothing open, nothing out, not marked done: the work is finished but the workspace has not
   // been closed. It is a real resting place, not an error — hence a name of its own.
   return 'settled';
