@@ -2808,10 +2808,69 @@ function homeSubtitle(total, needsYou) {
     : `All caught up · ${plural(total, 'workspace', 'workspaces')} under watch`;
 }
 
+/* The inbox repaints from ONE replaceChildren, and the poller calls it every 4 seconds — which is a
+ * DOM swap under the user's hands. It cost an open delete-confirm ("Delete "…"? This can't be
+ * undone.") within four seconds of opening it, focus dropped to <body>, the selection cleared, and
+ * the Done disclosure's <select> torn out mid-choice. Before ce22adf Home repainted only
+ * #requests-strip, so none of that could happen; binding jobs onto the rows is what put the whole
+ * list on the tick. Two rules keep it there without the cost.
+ *
+ * `sig` is everything the inbox actually draws — each row's id, the state/band it landed in, and
+ * the identity and status of the job folded onto it. Row CONTENT is not in it because it cannot
+ * change here: state.home.rows is only ever refilled by renderHome(), which rebuilds the zone
+ * outright. A tick whose signature matches the last painted one touches nothing at all, and that is
+ * the overwhelming majority of ticks.
+ *
+ * `pending` is the other half. A tick that DOES change something, arriving while a confirm is open
+ * or focus lives inside the zone, must not yank the DOM — but it must not drop the change either: a
+ * job that starts while you are hovering a trash icon still has to show up. So the repaint is held,
+ * and released the moment the interaction ends (see flushHomeInboxSoon) or, failing that, on the
+ * next tick. `sig` is set only when the paint actually lands, which is what makes the hold
+ * self-healing rather than a one-shot flag that can be lost. */
+const homeInbox = { sig: null, reqs: [], pending: false };
+
+/* The signature of the banded layout — see homeInbox. Job identity AND status, because "queued →
+ * running" is a visible change on the row even when the band doesn't move; `phase` too, since the
+ * job line spells it out. Done rows contribute their ids so the disclosure's count can't go stale. */
+function homeInboxSig(active, doneRows) {
+  const parts = active.map((e) => [
+    e.r.id,
+    e.cat,
+    wsState(e.cat).band,
+    e.job ? `${e.job.id}/${e.job.status}/${e.job.needsInput ? 1 : 0}/${e.job.phase || ''}` : '-',
+  ].join('~'));
+  parts.push(`done:${doneRows.map((r) => r.id).join(',')}`);
+  return parts.join('|');
+}
+
+/* Is the user in the middle of something inside the inbox? Both arms are things a replaceChildren
+ * destroys silently: an open confirm is a decision in progress, and rebuilding it answers "no" on
+ * the user's behalf; focus inside the zone means a keyboard user is somewhere in this list, and the
+ * swap drops them to <body> with the text selection. */
+function inboxInteracting(zone) {
+  if (!zone) return false;
+  if (zone.querySelector('.delete-confirm')) return true;
+  const a = document.activeElement;
+  return !!(a && a !== document.body && zone.contains(a));
+}
+
+/* Release a held repaint as soon as the interaction that held it is over, rather than up to a whole
+ * tick later — a Cancel that leaves four seconds of stale bands behind it is the same staleness the
+ * signature check exists to avoid, just from the other direction. Deferred by a turn of the event
+ * loop on purpose: during focusout document.activeElement is transiently <body>, so asking
+ * inboxInteracting() right now would answer "nobody is here" mid-Tab and destroy the element about
+ * to receive focus. */
+function flushHomeInboxSoon() {
+  setTimeout(() => {
+    if (homeInbox.pending && current.view === 'home') renderHomeInbox(homeInbox.reqs);
+  }, 0);
+}
+
 /* Draws the inbox from the cached rows against the jobs seen this tick, and answers WHICH of those
  * jobs it folded onto a row. The strip needs that answer: a job shown on a row and in the strip
  * states the same thing twice on one screen — the exact duplication the sections removed when they
- * folded jobs onto cards. Returns a Set of job ids. */
+ * folded jobs onto cards. Returns a Set of job ids — always, whether or not this call repainted,
+ * because the strip's dedupe is about what is ON SCREEN, not about what this tick happened to draw. */
 function renderHomeInbox(requests) {
   const rows = (state.home && state.home.rows) || [];
   const live = (requests || []).filter(isLiveJob);
@@ -2828,8 +2887,17 @@ function renderHomeInbox(requests) {
     active.push({ r, job, cat: categoryOf(r, job) });
   }
 
+  // Kept so a held repaint can be replayed from the interaction that ends, not only from the tick.
+  homeInbox.reqs = requests || [];
+
   const zone = $('#home-inbox-zone');
   if (!zone) return used;
+  const sig = homeInboxSig(active, doneRows);
+  // A tick that changes nothing must touch nothing.
+  if (sig === homeInbox.sig) { homeInbox.pending = false; return used; }
+  // Something did change — but not at the cost of whatever the user has open. Hold it.
+  if (inboxInteracting(zone)) { homeInbox.pending = true; return used; }
+
   const bands = bandSections(active, (e, density) => inboxRow(e.r, e.job, density, e.cat), 'inbox');
   const lists = bands.length
     ? bands
@@ -2839,6 +2907,10 @@ function renderHomeInbox(requests) {
       doneRows.map((r) => ({ sortable: r, el: inboxRow(r) })), 'inbox done-disc-body'));
   }
   zone.replaceChildren(h('div', { class: 'section-lists' }, ...lists));
+  // Recorded only now, after the paint actually landed: a signature stamped on a tick that skipped
+  // would make the skip permanent, which is how a deferred change turns into a dropped one.
+  homeInbox.sig = sig;
+  homeInbox.pending = false;
 
   const sub = $('#home-sub');
   if (sub) {
@@ -2896,8 +2968,19 @@ async function renderHome() {
       h('p', { class: 'view-sub', id: 'home-sub' }, homeSubtitle(rows.length, 0))),
     h('div', { class: 'section-actions' }, refreshZone(null), runnerZone(0)),
     requestsStripEl([]),
-    h('div', { id: 'home-inbox-zone' }),
+    h('div', {
+      id: 'home-inbox-zone',
+      // Where a held repaint gets released. A click is what ends a confirm (Cancel swaps the trash
+      // button back in before this bubbles), focusout is what ends a keyboard visit — so by the
+      // time flushHomeInboxSoon re-asks, the answer is the true one.
+      onclick: flushHomeInboxSoon,
+      onfocusout: flushHomeInboxSoon,
+    }),
   );
+  // A fresh zone is an EMPTY zone, so the signature from the last visit must not be allowed to
+  // match and skip the first paint into it.
+  homeInbox.sig = null;
+  homeInbox.pending = false;
   // No job is known until the queue answers, which startPolling asks for immediately below. Paint
   // the bands on the server's states now rather than holding the whole inbox back for a round trip.
   renderHomeInbox([]);
@@ -2915,11 +2998,21 @@ function startHomeRequestsPoll() {
     const used = renderHomeInbox(reqs);
     const active = reqs.filter((r) => r.status !== 'done');
     const unbound = active.filter((r) => !used.has(r.id));
+    // The strip's own header counts what it LISTS, so partial binding made the screen contradict
+    // itself: "2 jobs" beside "▶ Run 3 jobs", with nothing on the page joining the two numbers up.
+    // The remainder is the missing term, said once, so the arithmetic closes.
+    const onRows = active.length - unbound.length;
+    // A PR can carry two live jobs; jobForFeature folds only the most urgent, so the runner-up
+    // reaches the strip. Keeping it is right — hiding live work would be the worse lie — but
+    // unlabelled it reads as a job on some other PR, which is a third claim about the same one.
+    const alsoOnRow = (r) => (state.home.rows || [])
+      .some((row) => row.status !== 'done' && jobBindsTo(r, row));
     // With everything bound the strip has nothing left to add. Empty and silent reads as a broken
     // queue, so say where those jobs went instead.
     populateRequestsStrip($('#requests-strip'), unbound, active.length
       ? `${plural(active.length, 'job', 'jobs')} in flight — already shown on the rows below.`
-      : null);
+      : null,
+      { note: onRows ? `+ ${onRows} on the rows below` : null, onRow: alsoOnRow });
     // Home's Refresh button covers both PR sections, so any live poll job drives it.
     renderRefreshZone($('#refresh-zone'), null, pickPollJob(reqs, null));
     // Home's Run button offers to drain everything that's waiting, whatever section it belongs to.
@@ -3354,8 +3447,17 @@ function jobRank(r) {
  * shape) it learns here, once, and both callers learn it at the same moment. */
 function jobBindsTo(job, f) {
   if (!job || !f) return false;
+  // The wsId arm is an exact id match, so it is deliberately kind-agnostic: an `apply` on a spec
+  // workspace names that workspace and nothing else can answer to it.
   if (job.wsId && job.wsId === f.id) return true;
   if (job.action !== 'pr-review' && job.action !== 'pr-respond') return false;
+  // The job being PR-shaped is only half the question — the WORKSPACE has to be too. prNumber()
+  // falls back to "any digit run in the id" for any workspace at all, so without this a pr-review
+  // of PR 7001 binds `spec-7001-checkout`: that spec row drew "Re-reviewing" and was banded into
+  // "In progress" by a runner that has never heard of it. The kind sections never showed it because
+  // their poll pre-filters by `action === kind`; Home is the first surface that binds the whole
+  // queue, which is what made it reachable.
+  if (f.kind !== 'pr-review' && f.kind !== 'pr-respond') return false;
   const pr = prNumber(f);
   return !!(job.prId && pr && String(job.prId) === String(pr));
 }
@@ -3580,7 +3682,7 @@ function requestTarget(r) {
  * link (done). When the job is blocked waiting on the user (needsInput) it grows a
  * prominent amber "needs your input" banner carrying the instruction (note). All
  * text escaped. */
-function requestRow(r) {
+function requestRow(r, onRow = false) {
   const meta = REQ_STATUS[r.status] || REQ_STATUS.queued;
   const target = requestTarget(r);
   const linkable = r.status === 'done' && r.wsId;
@@ -3596,7 +3698,13 @@ function requestRow(r) {
     h('div', { class: 'req-top' },
       h('span', { class: 'req-action' }, REQ_ACTION_LABEL[r.action] || r.action),
       target ? h('span', { class: 'req-target num-line' }, target) : null,
-      r.title ? h('span', { class: 'req-title' }, r.title) : null),
+      r.title ? h('span', { class: 'req-title' }, r.title) : null,
+      // Not "this is a duplicate" — it is a SECOND job on a PR that is already listed, and saying
+      // so is what stops the two entries reading as two PRs.
+      onRow ? h('span', {
+        class: 'req-onrow',
+        title: 'This PR already has a row below — this is a second job on it',
+      }, 'also on a row below') : null),
     h('div', { class: 'req-sub meta-dim' },
       h('span', { class: `req-statetext req-state-${cssSafe(stale ? 'stalled' : r.status)}` },
         stale ? `Not running · ${meta.label.toLowerCase()} ${fmtAge(jobAgeMs(r))} ago` : meta.label + phaseText),
@@ -3676,20 +3784,27 @@ function requestsStripEl(requests, emptyText) {
   return strip;
 }
 
-function populateRequestsStrip(strip, requests, emptyText) {
+/* `opts.note` is the jobs this strip is NOT listing, and `opts.onRow(r)` says whether an entry's
+ * workspace is already on the page below. Both exist because a strip that only counts itself lets
+ * one screen state two different totals for one queue. Optional: the views that show the whole
+ * queue (nothing folded away) pass neither and read exactly as they did. */
+function populateRequestsStrip(strip, requests, emptyText, opts) {
   if (!strip) return;
+  const o = opts || {};
   if (!requests.length) {
     if (emptyText) strip.replaceChildren(h('p', { class: 'meta-dim requests-empty' }, emptyText));
     else strip.replaceChildren();
     return;
   }
+  const onRow = o.onRow || (() => false);
   // Jobs blocked on the user first, then errors/running/queued (stable within a rank).
   const ordered = [...requests].sort((a, b) => jobRank(b) - jobRank(a));
   strip.replaceChildren(
     h('div', { class: 'requests-head' },
       h('span', { class: 'f-suglabel' }, plural(requests.length, 'job', 'jobs')),
+      o.note ? h('span', { class: 'requests-head-note meta-dim' }, o.note) : null,
       requestsLegend()),
-    h('div', { class: 'requests-list' }, ordered.map(requestRow)));
+    h('div', { class: 'requests-list' }, ordered.map((r) => requestRow(r, onRow(r)))));
 }
 
 /* ---- runner control (the "▶ Run queued jobs" button) ------------------------

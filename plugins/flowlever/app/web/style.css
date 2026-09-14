@@ -1669,6 +1669,10 @@ a.backlink:focus-visible {
 .requests-strip:empty { display: none; }
 .requests-empty { font-size: 12.5px; margin: 0 0 14px; }
 .requests-head { margin-bottom: 8px; }
+/* "2 JOBS · + 1 on the rows below" is one sentence about one queue. Broken across two lines it
+   reads as two separate claims, which is the arithmetic this note exists to close. */
+.requests-head .f-suglabel { display: inline; margin-bottom: 0; }
+.requests-head-note { font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; margin-left: 7px; }
 .requests-list { display: flex; flex-direction: column; gap: 8px; }
 .req-row {
   display: flex; align-items: flex-start; gap: 11px;
@@ -1694,6 +1698,11 @@ a.backlink:focus-visible {
 .req-target { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim);
   background: var(--panel-3); border-radius: 6px; padding: 1px 7px; }
 .req-title { font-size: 12.5px; color: var(--fg-dim); }
+/* Marks a strip entry whose PR already has a row below — a second job on one PR, not a second PR. */
+.req-onrow {
+  font-size: 11px; color: var(--fg-mute); border: 1px solid var(--line-soft);
+  border-radius: 6px; padding: 1px 6px; white-space: nowrap;
+}
 .req-sub { font-size: 12px; margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
 .req-statetext { font-weight: 560; }
 .req-state-running { color: var(--accent-text); }

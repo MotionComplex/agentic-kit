@@ -1720,3 +1720,137 @@ test('U3: the inbox skips an empty band and keeps both edge cases', () => {
   assert.match(fnBody(ui, 'async function renderHome('), /if \(rows\.length === 0\)/,
     'an empty cockpit must still get the "Nothing in the cockpit yet" view');
 });
+
+/* U4 — the three findings an independent reviewer raised against ce22adf. Source assertions again
+ * (`node --test` cannot import browser code), and deliberately NOT of the shape the reviewer showed
+ * to be worthless: `/class: 'btn-icon ir-delete'/` was green for the whole time the delete-confirm
+ * was being destroyed every four seconds, because it proved the button was CONSTRUCTED and never
+ * that it SURVIVED. These pin ordering and control flow — which branch returns before which write —
+ * so breaking the property breaks the test. The rendering itself is verified in a real browser. */
+
+test('U4: a PR number may only bind a PR-kind workspace', () => {
+  const ui = readUi();
+  const bind = codeOnly(fnBody(ui, 'function jobBindsTo('));
+
+  // prNumber() falls back to `id.match(/(\d+)/)` — ANY digit run in ANY workspace id. So a
+  // pr-review of PR 7001 bound `spec-7001-checkout`: that spec row drew "Re-reviewing" and was
+  // banded into "In progress" by a runner that had never heard of it. Requiring the job to be
+  // PR-shaped was only half the rule; the workspace has to be too.
+  const gate = bind.indexOf("f.kind !== 'pr-review'");
+  const match = bind.indexOf('prNumber(f)');
+  assert.ok(gate > -1, 'jobBindsTo must reject a non-PR workspace before it compares PR numbers');
+  assert.ok(match > gate, 'the kind gate must GUARD the prId match — after it, it guards nothing');
+
+  // The wsId arm is an exact id match and stays kind-agnostic by design: an `apply` names its
+  // workspace and nothing else can answer to it, spec or PR.
+  const wsArm = bind.indexOf('job.wsId === f.id');
+  assert.ok(wsArm > -1 && wsArm < gate,
+    'the wsId arm must stay ahead of the kind gate — narrowing it would break apply on specs');
+
+  // One predicate, one place. A caller that re-states the rule is the drift 80c4f76 removed, and
+  // Home re-stating it would leave every OTHER call site still wrong.
+  const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
+  assert.ok(!/kind/.test(inbox),
+    'renderHomeInbox must not filter by kind itself — jobBindsTo owns the binding rule');
+});
+
+test('U4: a poll tick that changes nothing touches nothing', () => {
+  const ui = readUi();
+  const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
+  const sig = codeOnly(fnBody(ui, 'function homeInboxSig('));
+
+  const sigAt = inbox.indexOf('homeInboxSig(active, doneRows)');
+  const paintAt = inbox.indexOf('zone.replaceChildren(');
+  assert.ok(sigAt > -1, 'the tick must derive a signature of what the inbox renders');
+  assert.ok(paintAt > sigAt, 'and derive it BEFORE the repaint, or the comparison decides nothing');
+  assert.match(inbox.slice(sigAt, paintAt), /if \(sig === homeInbox\.sig\) \{[^}]*return used;\s*\}/,
+    'an unchanged signature must return without ever reaching replaceChildren');
+
+  // The signature has to be the banded layout itself, or it goes stale in the direction that
+  // matters: a band that moved and a screen that never repaints to say so.
+  assert.match(sig, /e\.r\.id/, 'the signature must carry which rows are drawn');
+  assert.match(sig, /e\.cat/, 'and the state each one landed in');
+  assert.match(sig, /wsState\(e\.cat\)\.band/, 'and the band that state puts it in');
+  assert.match(sig, /e\.job\.id/, 'and the identity of the job folded onto it');
+  assert.match(sig, /e\.job\.status/, 'and that job\'s status — "queued → running" is a visible change');
+  assert.match(sig, /doneRows\.map/, 'and the Done rows, whose count the disclosure prints');
+
+  // Recorded only once the paint has landed. Stamped earlier, a tick that skipped would make its
+  // own skip permanent — the deferred change becomes a dropped one.
+  assert.ok(inbox.indexOf('homeInbox.sig = sig') > paintAt,
+    'the signature must be recorded after the repaint, never before or instead of it');
+  // A fresh zone is an empty zone: a stale signature matching would skip the first paint into it.
+  assert.match(codeOnly(fnBody(ui, 'async function renderHome(')), /homeInbox\.sig = null/,
+    'renderHome must clear the signature when it rebuilds the inbox zone');
+  // Whether or not it painted, the strip still needs to know what is on screen.
+  assert.equal((inbox.match(/return used;/g) || []).length, 4,
+    'every exit from renderHomeInbox must still answer which jobs the rows hold');
+});
+
+test('U4: a repaint never lands on top of an interaction — and is never dropped either', () => {
+  const ui = readUi();
+  const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
+  const busy = codeOnly(fnBody(ui, 'function inboxInteracting('));
+  const flush = codeOnly(fnBody(ui, 'function flushHomeInboxSoon('));
+  const home = codeOnly(fnBody(ui, 'async function renderHome('));
+
+  const guardAt = inbox.indexOf('inboxInteracting(zone)');
+  const paintAt = inbox.indexOf('zone.replaceChildren(');
+  assert.ok(guardAt > -1, 'a tick must ask whether the user is mid-interaction before repainting');
+  assert.ok(guardAt < paintAt, 'and ask it before the write, not after');
+  assert.match(inbox.slice(guardAt, paintAt), /homeInbox\.pending = true;\s*return used;/,
+    'a tick arriving mid-interaction must HOLD the repaint and return, not perform it');
+
+  // The two interactions a replaceChildren destroys without a trace.
+  assert.match(busy, /querySelector\('\.delete-confirm'\)/,
+    'an open delete-confirm must block the repaint — rebuilding it answers "no" for the user');
+  assert.match(busy, /zone\.contains\(a\)/,
+    'so must focus inside the zone — the swap drops a keyboard user to <body>');
+
+  // Held, not dropped. Two independent releases, because either alone has a hole: the tick alone
+  // leaves up to four seconds of stale bands after a Cancel, and the event alone loses the change
+  // if the interaction ends some way that fires neither.
+  assert.match(flush, /homeInbox\.pending/, 'the flush must only fire when something is actually held');
+  assert.match(flush, /renderHomeInbox\(homeInbox\.reqs\)/,
+    'and must replay the held tick, not repaint from an empty queue');
+  assert.match(flush, /setTimeout\(/,
+    'deferred a turn: during focusout activeElement is transiently <body>, so asking now would '
+    + 'answer "nobody is here" mid-Tab and destroy the element about to receive focus');
+  assert.match(home, /onclick: flushHomeInboxSoon/,
+    'the zone must release the hold on the click that ends a confirm');
+  assert.match(home, /onfocusout: flushHomeInboxSoon/, 'and on the blur that ends a keyboard visit');
+  assert.match(inbox, /homeInbox\.reqs = requests/,
+    'and the tick must keep its requests, or the flush has nothing to replay');
+  // The tick-side release: a skipped tick must leave the signature stale so the NEXT tick still
+  // sees a difference and paints it.
+  assert.ok(!/homeInbox\.sig = sig/.test(inbox.slice(guardAt, paintAt)),
+    'a held tick must not record the signature it never painted');
+});
+
+test('U4: the strip accounts for the jobs it is not listing', () => {
+  const ui = readUi();
+  const poll = codeOnly(fnBody(ui, 'function startHomeRequestsPoll('));
+  const strip = codeOnly(fnBody(ui, 'function populateRequestsStrip('));
+  const row = codeOnly(fnBody(ui, 'function requestRow('));
+
+  // The dedupe only explained itself when it removed EVERYTHING. On partial binding the screen
+  // read "2 JOBS" in the strip beside "▶ Run 3 jobs" in the toolbar, with nothing joining them.
+  assert.match(poll, /const onRows = active\.length - unbound\.length/,
+    'the strip must compute the remainder it is not listing');
+  assert.match(poll, /note: onRows \?/, 'and hand it over only when there is one');
+  assert.match(strip, /o\.note \?/,
+    'and the strip must render it beside its own count, where the arithmetic closes');
+
+  // A PR with two live jobs folds one onto its row and leaks the runner-up into the strip. Keeping
+  // it visible is right — hiding live work is the worse lie — but unlabelled it reads as a second
+  // PR rather than a second job on the one already below.
+  assert.match(poll, /jobBindsTo\(r, row\)/,
+    '"does this strip entry already have a row" is jobBindsTo asked again, not a second matcher');
+  assert.match(poll, /onRow: alsoOnRow/, 'and the answer must reach the strip');
+  assert.match(strip, /requestRow\(r, onRow\(r\)\)/, 'which must pass it down to the entry');
+  assert.match(row, /also on a row below/, 'and the entry must say so');
+  assert.match(ui, /function requestRow\(r, onRow = false\)/,
+    'defaulted, so the strips that show the whole queue read exactly as they did');
+  assert.ok(!/unbound = unbound\.filter|unbound\.filter\(/.test(poll),
+    'the runner-up must be labelled, never suppressed');
+});
