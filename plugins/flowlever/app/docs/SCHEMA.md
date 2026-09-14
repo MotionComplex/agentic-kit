@@ -241,6 +241,39 @@ ingest, reconciliation auto-resolves posted findings the author addressed (gone 
 the still-flagged ones (stamp preserved), and inserts anything new as `open`. The reviewer can also close a
 posted finding manually at any time (Mark resolved / Reopen — reopening drops the `postedAt` stamp / Dismiss).
 
+### Workspace state — the one string every list view ranks by
+`ledger.workspaceState(feature, findings, lastRoundAt)` reduces a whole workspace to **one** state, and
+both list endpoints (`/api/home`, `/api/features`) serve it as `state`. It is computed here, not in the
+browser, so the inbox row and the section card for the same workspace can never tell different stories.
+
+`ledger.WORKSPACE_STATES` is the single ordered table behind it — `[{ state, band, label }, …]`, ranked by
+index, bands in contiguous runs. One table on purpose: a separate "which band" list and "which sorts
+first" list drift, and the symptom is a card drawn in one band but sorted as if it were in another.
+
+| band | states, in rank order | means |
+|---|---|---|
+| `needs-you` | `ready-to-post` | everything decidable is decided, nothing is out yet — press Post |
+| | `needs-review` | undecided items, nothing ever posted — first pass |
+| | `needs-rereview` | undecided items and this workspace has posted before |
+| | `author-responded` | comments are out and the other side moved (flag or clocks) |
+| `in-progress` | `posting` | a runner is mid-write (`pending`), so every other stamp is stale |
+| `waiting` | `awaiting-author` | comments out, no response yet |
+| | `awaiting-reaudit` | spec changes applied, waiting on a re-audit to reconcile |
+| | `settled` | nothing open, nothing out, not closed |
+| `done` | `done` | `feature.status === 'done'` — outranks everything |
+
+Order is the contract: the first rule that matches claims the workspace. `done` wins outright, then
+`posting` (while the runner writes, the ledger's other stamps still describe the pre-post world).
+
+**`ledger.decisionOf(finding)`** backs the undecided test: `'approve' | 'edit' | 'fix-only' | 'waive' |
+'redirect' | 'reject' | null`, from persisted state only — `status:'waived'`, then the finding-level
+`decision`, then the draft's `redirect`/`reject` verdict, then the hunk path (every recorded
+`draft.review.hunks` entry `accepted`/`edited` → `edit` if any is `edited`, else `approve`). The hunk path
+is not optional: per-hunk Accept never writes `decision`, so ignoring it reads the commonest PR-review
+flow as undecided forever. **Known skew:** the ledger has no diff engine, so it reads the hunk ids off the
+recorded `review.hunks` keys, while the browser walks the hunk list it recomputes from `before`/`after`.
+A draft whose hunks are only *partly* decided therefore reads decided here and undecided there.
+
 ## features/<featureId>.json
 ```jsonc
 {
@@ -613,10 +646,12 @@ Exit codes: 0 ok, 1 user error (bad args/not found), 2 internal. All output huma
 
 ## HTTP API (src/server.js, port 4173)
 ```
-GET  /api/home                      → [{ id, title, kind, readiness:{score,gate}, counts:{toReview,open,reworking,posted,resolved,waived}, lastRoundAt, stamps }] cross-kind inbox, most-actionable first (posted = awaiting author, never double-counted as reworking/toReview)
-GET  /api/features[?kind=spec|pr-review|pr-respond] → [featureSummary]  (incl. kind + readiness + stamps; optional kind filter)
+GET  /api/home                      → [{ id, title, kind, readiness:{score,gate}, counts:{toReview,open,reworking,posted,resolved,waived}, lastRoundAt, stamps, state }] cross-kind inbox, most-actionable first (posted = awaiting author, never double-counted as reworking/toReview)
+GET  /api/features[?kind=spec|pr-review|pr-respond] → [featureSummary]  (incl. kind + readiness + stamps + counts + state; optional kind filter)
      stamps = { lastReviewedAt, lastActivityAt, lastActivityBy, lastPostedAt, authorRespondedAt, newSinceReview }
               — the two review clocks (see "The two review clocks" above); newSinceReview ⇒ re-review is worthwhile
+     counts = the same tally on both endpoints (one helper serves them), so an inbox row and a section card never disagree
+     state  = the canonical workspace state (see "Workspace state" below) — ONE string, computed server-side
 GET  /api/features/:id              → { feature, ledger, rounds, readiness }
 DELETE /api/features/:id            → 200 { id, deleted: true, cancelledRequests: [<reqId>,...] }; 404 if missing. Removes features/<id>.json, ledger/<id>.json, rounds/<id>.json, and fails (status:'error') any queued/running request that targeted this workspace (`wsId`) instead of leaving it to stall forever or silently re-create the id.
 POST /api/features/:id/findings/:fp → body { status?, reason?, pinned?, suggestion?, decision? }  (lifecycle ops + comment-body edit + persisted triage decision; suggestion → setFindingDetails, decision ('approve'|'edit'|'fix-only'|null) → setFindingDecision; a status change clears decision)

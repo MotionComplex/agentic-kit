@@ -111,7 +111,7 @@ const DISCLOSURE_LINE = '🤖 AI comment posted by Claude';
  * gets the newest app.js, but src/server.js is only read when the cockpit process starts, so an
  * updated plugin + a long-running server means the page calls routes the server has never heard of.
  * That used to surface as a bare "Not found"; now it says which half is stale. */
-const EXPECTED_API_VERSION = '3';
+const EXPECTED_API_VERSION = '4';
 
 /* ============================== tiny DOM lib ============================== */
 

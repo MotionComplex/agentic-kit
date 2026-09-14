@@ -1243,3 +1243,98 @@ test('the Done sort menu and its comparator read one table, and undated rows sin
     && /'Last modified'/.test(table[0]),
     'and DONE_SORTS must use those same labels');
 });
+
+/* The canonical per-workspace `state`. It is computed in the ledger and served by BOTH list
+ * endpoints, because the inbox and the section lists show the same workspaces and a card that
+ * says "needs review" in one place and "awaiting author" in the other is worse than either. */
+test('GET /api/home and /api/features agree on one canonical state per workspace', async () => {
+  ledger.createFeature({ id: 'state-fresh', title: 'Fresh Review', kind: 'pr-review' });
+  ledger.setPriorThreads('state-fresh', []);   // pr-review ingest is gated on the prior-thread record
+  ledger.ingestRound('state-fresh', [mkFinding({ title: 'Untouched finding', locus: 'pr:1:a.cs:L1' })], { note: 'seed' });
+
+  const home = await (await fetch(`${base}/api/home`)).json();
+  const list = await (await fetch(`${base}/api/features?kind=pr-review`)).json();
+  const hrow = home.find((r) => r.id === 'state-fresh');
+  const lrow = list.find((r) => r.id === 'state-fresh');
+  assert.ok(hrow && lrow, 'the workspace appears on both endpoints');
+  assert.equal(hrow.state, 'needs-review', 'an undecided first-round finding needs a review');
+  assert.equal(lrow.state, hrow.state, 'the two endpoints must never disagree');
+  assert.ok(ledger.WORKSPACE_STATES.some((s) => s.state === hrow.state),
+    'every served state must be one the WORKSPACE_STATES table knows how to band');
+});
+
+/* /api/features served no counts at all, so a section card could not show the bits an inbox row
+ * shows. Both now read ONE count helper — asserting they agree is what stops a second copy of
+ * the loop being reintroduced and quietly drifting. */
+test('GET /api/features carries the same counts block as /api/home', async () => {
+  const home = await (await fetch(`${base}/api/home`)).json();
+  const list = await (await fetch(`${base}/api/features`)).json();
+  for (const hrow of home) {
+    const lrow = list.find((r) => r.id === hrow.id);
+    if (!lrow) continue;   // /api/home drops nothing, but don't let a skipped workspace fail this
+    assert.deepEqual(lrow.counts, hrow.counts, `counts differ for ${hrow.id}`);
+  }
+  const fresh = list.find((r) => r.id === 'state-fresh');
+  assert.deepEqual(Object.keys(fresh.counts).sort(),
+    ['open', 'posted', 'resolved', 'reworking', 'toReview', 'waived']);
+  assert.equal(fresh.counts.open, 1);
+});
+
+test('GET /api/features reports the real states of posted / decided / done workspaces', async () => {
+  // Posted, and the PR has NOT moved since our round → the user is waiting on the author.
+  ledger.createFeature({ id: 'state-posted', title: 'Posted Review', kind: 'pr-review' });
+  ledger.setPriorThreads('state-posted', []);   // pr-review ingest is gated on the prior-thread record
+  ledger.ingestRound('state-posted', [mkFinding({ title: 'Posted finding', locus: 'pr:2:a.cs:L1' })], { note: 'seed' });
+  const postedFp = ledger.loadLedger('state-posted').findings[0].fp;
+  await fetch(`${base}/api/features/state-posted/review/apply`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: [postedFp], status: 'posted' }),
+  });
+
+  // Decided but nothing out yet → the next move is the Post button.
+  ledger.createFeature({ id: 'state-ready', title: 'Ready Review', kind: 'pr-review' });
+  ledger.setPriorThreads('state-ready', []);   // pr-review ingest is gated on the prior-thread record
+  ledger.ingestRound('state-ready', [mkFinding({ title: 'Decided finding', locus: 'pr:3:a.cs:L1' })], { note: 'seed' });
+  const readyFp = ledger.loadLedger('state-ready').findings[0].fp;
+  await fetch(`${base}/api/features/state-ready/findings/${readyFp}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: 'approve' }),
+  });
+
+  const byId = new Map((await (await fetch(`${base}/api/features?kind=pr-review`)).json()).map((r) => [r.id, r]));
+  assert.equal(byId.get('state-posted').state, 'awaiting-author');
+  assert.equal(byId.get('state-ready').state, 'ready-to-post');
+
+  // Closing the workspace overrides everything still on its findings.
+  await fetch(`${base}/api/features/state-posted/status`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'done' }),
+  });
+  const after = (await (await fetch(`${base}/api/features?kind=pr-review`)).json()).find((r) => r.id === 'state-posted');
+  assert.equal(after.state, 'done');
+  const hafter = (await (await fetch(`${base}/api/home`)).json()).find((r) => r.id === 'state-posted');
+  assert.equal(hafter.state, 'done', 'and the inbox says the same');
+});
+
+/* The runner flipping "the author replied" must move the workspace out of the waiting band and
+ * back into needs-you — that transition is the whole reason the state is recomputed per request
+ * rather than stamped once. */
+test('activity flagged as author-responded moves a waiting workspace to author-responded', async () => {
+  ledger.createFeature({ id: 'state-responded', title: 'Responded Review', kind: 'pr-review' });
+  ledger.setPriorThreads('state-responded', []);   // pr-review ingest is gated on the prior-thread record
+  ledger.ingestRound('state-responded', [mkFinding({ title: 'Replied-to finding', locus: 'pr:4:a.cs:L1' })], { note: 'seed' });
+  const fp = ledger.loadLedger('state-responded').findings[0].fp;
+  await fetch(`${base}/api/features/state-responded/review/apply`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fps: [fp], status: 'posted' }),
+  });
+  const before = (await (await fetch(`${base}/api/features?kind=pr-review`)).json()).find((r) => r.id === 'state-responded');
+  assert.equal(before.state, 'awaiting-author');
+
+  await fetch(`${base}/api/features/state-responded/activity`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ authorResponded: true, note: '1 new reply' }),
+  });
+  const after = (await (await fetch(`${base}/api/features?kind=pr-review`)).json()).find((r) => r.id === 'state-responded');
+  assert.equal(after.state, 'author-responded');
+});
