@@ -1483,6 +1483,9 @@ test('U2: an empty band is not rendered', () => {
 
 test('U2: a job that already has a workspace card never gets a placeholder beside it', () => {
   const ui = readUi();
+  // The entries a section draws are decided in sectionEntries and DRAWN by sectionGrid — split so
+  // the poll can sign one decision and render it (see the idle-repaint test in U7).
+  const entries = codeOnly(fnBody(ui, 'function sectionEntries('));
   const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
 
   // The placeholder list is "every live job of this kind that has no card to be folded onto", and
@@ -1490,14 +1493,14 @@ test('U2: a job that already has a workspace card never gets a placeholder besid
   // shipped wrong twice: `used` alone holds the ONE job jobForFeature folded per workspace, so a PR
   // with two live jobs leaks its runner-up and is drawn twice; adding a wsId test on top still
   // misses a job that carries no wsId and binds by prId — which is what "+ New PR review" enqueues.
-  assert.match(grid, /!features\.some\(\(f\) => jobBindsTo\(r, f\)\)/,
+  assert.match(entries, /!features\.some\(\(f\) => jobBindsTo\(r, f\)\)/,
     'the placeholder filter must exclude any job that binds to ANY workspace on this page, through '
     + 'the same predicate that folds jobs onto cards');
   // The other half of the rule — a dangling wsId must KEEP its placeholder — has its own test
   // below, so this one is free to be about suppression alone.
 
   // And the placeholder is a card like any other, so it takes the band's density (finding 5).
-  assert.match(grid, /pendingJobCard\(e\.job, density\)/,
+  assert.match(grid, /pendingJobCard\(e\.job, density, kind\)/,
     'a placeholder must be drawn at the band density, not always full — a full-height placeholder '
     + 'among one-line compact rows breaks the only promise a compact band makes');
 });
@@ -1506,7 +1509,7 @@ test('U2: card-binding and placeholder-suppression are ONE predicate, stated onc
   const ui = readUi();
   const binds = codeOnly(fnBody(ui, 'function jobBindsTo('));
   const forFeature = codeOnly(fnBody(ui, 'function jobForFeature('));
-  const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
+  const entries = codeOnly(fnBody(ui, 'function sectionEntries('));
 
   // A job may arrive with a wsId, a prId, or both — the "+ New PR review" dialog enqueues
   // { action, prId, title } with no wsId at all. Both arms live in the predicate, so a caller that
@@ -1521,13 +1524,13 @@ test('U2: card-binding and placeholder-suppression are ONE predicate, stated onc
 
   // The whole point: neither call site may restate the matching. Two copies of this rule is how the
   // duplicate PR card shipped — one side learned about prId, the other never did.
-  for (const [name, body] of [['jobForFeature', forFeature], ['sectionGrid', grid]]) {
+  for (const [name, body] of [['jobForFeature', forFeature], ['sectionEntries', entries]]) {
     assert.match(body, /jobBindsTo\(/, `${name} must go through the shared predicate`);
     assert.ok(!/\.wsId\b/.test(body),
       `${name} must not read wsId at all — one rule, or the two call sites drift apart`);
-    // A comparison is a restatement; a bare truthiness check is not. sectionGrid keeps exactly one
-    // prId mention — "is this even a PR job", the reason a placeholder can exist at all — and it
-    // must never compare that prId to a workspace, which is the predicate's whole job.
+    // A comparison is a restatement; a bare truthiness check is not. sectionEntries must never
+    // compare a prId to a workspace, which is the predicate's whole job. (It no longer reads prId
+    // at all: what a placeholder needs is a NAME, and pendingJobTitle answers that.)
     assert.ok(!/String\([^)]*prId/.test(body) && !/prId\s*===/.test(body),
       `${name} must not compare prId to a workspace — that comparison lives in jobBindsTo`);
   }
@@ -1537,7 +1540,7 @@ test('U2: card-binding and placeholder-suppression are ONE predicate, stated onc
 
 test('U2: a wsId naming a workspace that is gone still gets its placeholder', () => {
   const ui = readUi();
-  const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
+  const grid = codeOnly(fnBody(ui, 'function sectionEntries('));
 
   // The rejected fix was `&& !r.wsId`, which reads "has a wsId ⇒ has a card". It does not: a
   // workspace can be deleted out from under a running review, and that review then vanishes from
@@ -1560,8 +1563,9 @@ test('U2: a full card names its state, so the band that demands action says the 
   // Without this, ready-to-post / needs-review / needs-rereview / author-responded render
   // pixel-identically: same lifecycle chip, same dial, same stamps. The compact cards parked
   // BELOW them were the only ones labelled.
-  assert.match(card, /cat \? wsStatePill\(cat\) : null/,
-    'a full card must render the state pill when it was given a category');
+  assert.match(card, /cat \? wsStatePill\(cat, kind\) : null/,
+    'a full card must render the state pill when it was given a category — in its own kind\'s '
+    + 'vocabulary, so a running spec audit is not labelled "Re-reviewing"');
   // The lifecycle chip is kept, not deleted — "where is this workspace in its life" is a different
   // question from "what is it waiting on" — but it is drawn through the gate that suppresses the
   // one value it always held inside a band (`draft`). See the U5 test for what the gate lets past.
@@ -1583,7 +1587,7 @@ test('U2: the category is decided once per render and handed to the card', () =>
   const grid = fnBody(ui, 'function sectionGrid(');
   const card = fnBody(ui, 'function featureCard(');
 
-  assert.match(grid, /featureCard\(e\.f, e\.job, density, e\.cat\)/,
+  assert.match(grid, /featureCard\(e\.ws, e\.job, density, e\.cat\)/,
     'the band loop already decided the category — it must travel with the card');
   // categoryOf reads the clock through isStaleJob, so a second call inside the card can disagree
   // with the one that chose the header the card is sitting under: banded as one state, pilled as
@@ -1624,7 +1628,7 @@ test('U3: the inbox bands come from the shared loop, not a second one of its own
 
   // The whole point of extracting bandSections: an inbox with its own copy of the loop is free to
   // order, label or count a band differently from the sections showing the same workspaces.
-  assert.match(inbox, /bandSections\(active, \(e, density\) => inboxRow\(e\.r, e\.job, density, e\.cat\), 'inbox'\)/,
+  assert.match(inbox, /bandSections\(active, \(e, density\) => inboxRow\(e\.ws, e\.job, density, e\.cat\), 'inbox'\)/,
     'renderHomeInbox must draw its bands through bandSections, handing each row the band density '
     + 'and the category the loop already decided');
   assert.ok(!/for \(const band of WS_BANDS\)/.test(inbox),
@@ -1658,8 +1662,9 @@ test('U3: Home folds each live job onto its row', () => {
     'the job must reach categoryOf, which is what lets it outrank the served state');
   // And the row has to SAY so, in the words the cards use — a stalled job must be as actionable
   // from the inbox as it is from a section.
-  assert.match(row, /cardJobRow\(job, hasFindingsOf\(r\)\)/,
-    'a row with a live job must render the same job line the cards do');
+  assert.match(row, /cardJobRow\(job, hasFindingsOf\(r\), r\.kind\)/,
+    'a row with a live job must render the same job line the cards do, in the workspace\'s own '
+    + 'kind vocabulary');
 });
 
 test('U3: the requests strip drops the jobs already shown on a row', () => {
@@ -1687,7 +1692,7 @@ test('U3: a needs-you row names its state, and a parked row drops the decision m
 
   // The inbox was the last surface where ready-to-post / needs-review / needs-rereview /
   // author-responded drew identically — the section cards gained the pill in 3d008a8.
-  assert.match(row, /cat \? wsStatePill\(cat\) : null/,
+  assert.match(row, /cat \? wsStatePill\(cat, r\.kind\) : null/,
     'a banded row must wear the state pill, whatever its density');
   assert.match(ui, /function inboxRow\(r, job = null, density = 'full', cat = null\)/,
     'and a row drawn outside the bands (the Done disclosure) must still be able to pass neither');
@@ -1716,7 +1721,7 @@ test('U3: the inbox skips an empty band and keeps both edge cases', () => {
     'the inbox draws whatever bands came back — it must not fill in the missing ones');
   assert.match(inbox, /No active workspaces — everything below is complete\./,
     'nothing active but something done must keep the all-done note');
-  assert.match(inbox, /doneDisclosure\('home',\s*\n?\s*doneRows\.map\(\(r\) => \(\{ sortable: r, el: inboxRow\(r\) \}\)\), 'inbox done-disc-body'\)/,
+  assert.match(inbox, /doneDisclosure\('home',\s*\n?\s*doneRows\.map\(\(e\) => \(\{ sortable: e\.ws, el: inboxRow\(e\.ws\) \}\)\), 'inbox done-disc-body'\)/,
     'and the Done disclosure and its date sort must be left exactly as they were');
   // The zero-workspace case never reaches here: renderHome answers it with the seeding empty state.
   assert.match(fnBody(ui, 'async function renderHome('), /if \(rows\.length === 0\)/,
@@ -1769,9 +1774,10 @@ test('U4: a PR number may only bind a workspace of the job\'s OWN kind', () => {
 test('U4: a poll tick that changes nothing touches nothing', () => {
   const ui = readUi();
   const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
-  const sig = codeOnly(fnBody(ui, 'function homeInboxSig('));
+  const sig = codeOnly(fnBody(ui, 'function listEntrySig('));
+  const list = codeOnly(fnBody(ui, 'function bandedListSig('));
 
-  const sigAt = inbox.indexOf('homeInboxSig(active, doneRows)');
+  const sigAt = inbox.indexOf('bandedListSig(active, doneRows)');
   const paintAt = inbox.indexOf('zone.replaceChildren(');
   assert.ok(sigAt > -1, 'the tick must derive a signature of what the inbox renders');
   assert.ok(paintAt > sigAt, 'and derive it BEFORE the repaint, or the comparison decides nothing');
@@ -1780,12 +1786,13 @@ test('U4: a poll tick that changes nothing touches nothing', () => {
 
   // The signature has to be the banded layout itself, or it goes stale in the direction that
   // matters: a band that moved and a screen that never repaints to say so.
-  assert.match(sig, /e\.r\.id/, 'the signature must carry which rows are drawn');
+  assert.match(sig, /e\.ws && e\.ws\.id/, 'the signature must carry which rows are drawn');
   assert.match(sig, /e\.cat/, 'and the state each one landed in');
   assert.match(sig, /wsState\(e\.cat\)\.band/, 'and the band that state puts it in');
   assert.match(sig, /e\.job\.id/, 'and the identity of the job folded onto it');
   assert.match(sig, /e\.job\.status/, 'and that job\'s status — "queued → running" is a visible change');
-  assert.match(sig, /doneRows\.map/, 'and the Done rows, whose count the disclosure prints');
+  assert.match(list, /done\.map\(listEntrySig\)/,
+    'and the Done entries, whose count the disclosure prints, through the same entry signature');
 
   // Recorded only once the paint has landed. Stamped earlier, a tick that skipped would make its
   // own skip permanent — the deferred change becomes a dropped one.
@@ -1893,15 +1900,19 @@ function fnSource(src, decl) {
   throw new Error(`unbalanced braces reading ${decl}`);
 }
 
-/* Lifts top-level declarations out of web/app.js and evaluates them, so a pure rule can be tested
- * by running it on real inputs instead of by pattern-matching its text. `decls` entries are either
- * `function <name>(` (lifted whole from the file) or a literal line to include verbatim; anything
- * the lifted code closes over is named in `env`. The env is itself a guard: a rule that quietly
- * grows a dependency on the DOM or on `state` stops lifting here rather than drifting unnoticed. */
+/* Lifts declarations out of a source string and evaluates them, so a rule can be tested by running
+ * it on real inputs instead of by pattern-matching its text. `decls` entries are either
+ * `function <name>(` / `async function <name>(` (lifted whole from the source) or a literal line to
+ * include verbatim; anything the lifted code closes over is named in `env`. The env is itself a
+ * guard: a rule that quietly grows a dependency on the DOM or on `state` stops lifting here rather
+ * than drifting unnoticed — and where the dependency is unavoidable, naming it in `env` is what
+ * makes it visible. `ui` is usually the whole file, but any string containing the declaration works,
+ * which is how a NESTED function (doDelete inside inboxRow) is reached: fnBody() the host first. */
 function liftUi(ui, decls, env = {}) {
-  const src = decls.map((d) => (d.startsWith('function ') ? fnSource(ui, d) : d)).join('\n');
-  const names = decls.filter((d) => d.startsWith('function '))
-    .map((d) => d.slice('function '.length, d.indexOf('(')));
+  const isDecl = (d) => d.startsWith('function ') || d.startsWith('async function ');
+  const src = decls.map((d) => (isDecl(d) ? fnSource(ui, d) : d)).join('\n');
+  const names = decls.filter(isDecl)
+    .map((d) => d.slice(d.indexOf('function ') + 'function '.length, d.indexOf('(')));
   const keys = Object.keys(env);
   // eslint-disable-next-line no-new-func
   return new Function(...keys, `${src}\nreturn { ${names.join(', ')} };`)(...keys.map((k) => env[k]));
@@ -1954,31 +1965,78 @@ test('U5: a PR job binds only the workspace of its own kind', () => {
     'a PR job with no prId and no wsId binds nothing — it must not fall through to a match');
 });
 
-test('U5: a deleted workspace is pruned from the cache the poller repaints from', () => {
+test('U5: a deleted workspace is pruned from the cache the poller repaints from', async () => {
   const ui = readUi();
 
   // Both list views cache their rows and repaint from that cache on every tick that sees a change,
   // and each cache is refilled only by a full re-render. Removing the element alone therefore
-  // un-deletes the workspace on the next live job: the row comes back, linking to a 404. This is
-  // DOM-and-module-state code, so it is pinned by ordering — the prune must sit on the success
-  // path, after the server confirmed, and never in the catch.
-  for (const [owner, host, cache, key] of [
-    ['the Home inbox', 'function inboxRow(', 'state.home.rows =', 'r.id'],
-    ['a section card', 'function featureCard(', 'state.section.features =', 'f.id'],
+  // un-deletes the workspace on the next live job: the row comes back, linking to a 404.
+  //
+  // What stood here was theatre, and an independent reviewer proved it: indexOf positions plus
+  // `del.includes('!== r.id')`. Mutating the filter to `row.label !== r.id` and the guard to
+  // `if (!state.home)` left the prune completely dead and the whole suite green. doDelete() closes
+  // over nothing but its caller's locals, so it can be LIFTED OUT AND RUN (fnSource/liftUi) against
+  // a real three-row cache — and then a dead prune, a cleared cache, a prune moved ahead of the
+  // await, and a prune moved into the catch all FAIL, because each one changes what the cache holds.
+  for (const spec of [
+    {
+      owner: 'the Home inbox',
+      host: 'function inboxRow(',
+      ws: 'r',
+      fresh: () => ({ home: { rows: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] } }),
+      read: (st) => st.home.rows,
+    },
+    {
+      owner: 'a section card',
+      host: 'function featureCard(',
+      ws: 'f',
+      fresh: () => ({ section: { features: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] } }),
+      read: (st) => st.section.features,
+    },
   ]) {
-    const del = codeOnly(fnBody(fnBody(ui, host), 'async function doDelete()'));
-    const sent = del.indexOf("method: 'DELETE'");
-    const pruned = del.indexOf(cache);
-    const caught = del.indexOf('} catch');
-    assert.ok(sent > -1, `${owner} must still issue the DELETE`);
-    assert.ok(pruned > -1, `${owner} must prune its cache when the delete succeeds`);
-    assert.ok(pruned > sent,
-      `${owner} must prune only AFTER the server confirmed — pruning first hides a workspace that `
-      + 'is still there when the request fails');
-    assert.ok(caught > -1 && pruned < caught,
-      `${owner} must prune on the success path, not in the failure handler`);
-    assert.ok(del.includes(`!== ${key}`),
-      `${owner} must drop exactly the deleted id from the cache, not clear it`);
+    const run = async (fail) => {
+      const state = spec.fresh();
+      const sent = [];
+      const seen = { removed: 0, restored: 0, toasts: [] };
+      const { doDelete } = liftUi(fnBody(ui, spec.host), ['async function doDelete('], {
+        state,
+        api: async (url, opts) => {
+          sent.push({ url, method: opts && opts.method });
+          if (fail) throw new Error('server said no');
+          return {};
+        },
+        wrap: { remove() { seen.removed++; } },
+        showDefault: () => { seen.restored++; },
+        toast: (msg) => seen.toasts.push(msg),
+        label: 'Checkout rewrite',
+        [spec.ws]: { id: 'pr-2' },
+      });
+      await doDelete();
+      return { state, sent, seen };
+    };
+
+    // The delete succeeds: exactly the deleted id leaves the cache, and the other two stay. A prune
+    // that matches nothing (`row.label !== r.id`), one skipped by an inverted guard, and one that
+    // clears the cache outright are three different wrong answers and all three fail here.
+    const ok = await run(false);
+    assert.deepEqual(ok.sent, [{ url: '/api/features/pr-2', method: 'DELETE' }],
+      `${spec.owner} must issue exactly one DELETE, for the workspace it is deleting`);
+    assert.deepEqual(spec.read(ok.state).map((x) => x.id), ['pr-1', 'pr-3'],
+      `${spec.owner} must drop exactly the deleted id from the cache the poller repaints from — `
+      + 'leave it in and the next live job paints the deleted workspace straight back onto the '
+      + 'screen, linking to a 404');
+    assert.equal(ok.seen.removed, 1, `${spec.owner} must also take the element out of the DOM`);
+    assert.equal(ok.seen.restored, 0, 'and must not put the trash button back after a success');
+
+    // The delete fails: the cache must be EXACTLY as it was. This is what makes "after the server
+    // confirmed" a behaviour rather than a source position — prune before the await, or in the
+    // catch, and a workspace that is still on the server vanishes from the list until a reload.
+    const bad = await run(true);
+    assert.deepEqual(spec.read(bad.state).map((x) => x.id), ['pr-1', 'pr-2', 'pr-3'],
+      `${spec.owner} must not prune when the server refused — the workspace is still there`);
+    assert.equal(bad.seen.removed, 0, 'nor remove the element');
+    assert.equal(bad.seen.restored, 1, 'and it must restore the default row/card');
+    assert.match(bad.seen.toasts.join(' '), /Delete failed/, 'and say so');
   }
 
   // And the prune is load-bearing only because these two still repaint from the caches. If either
@@ -1986,7 +2044,7 @@ test('U5: a deleted workspace is pruned from the cache the poller repaints from'
   assert.match(codeOnly(fnBody(ui, 'function renderHomeInbox(')), /state\.home && state\.home\.rows/,
     'the inbox must still draw from state.home.rows — that is what makes a stale entry visible');
   assert.match(codeOnly(fnBody(ui, 'function startSectionRequestsPoll(')),
-    /sectionGrid\(kind, state\.section\.features, rel\)/,
+    /sectionEntries\(kind, state\.section\.features, rel\)/,
     'and the section poll from state.section.features');
 });
 
@@ -2072,7 +2130,7 @@ test('U5: the lifecycle chip is drawn only when it says something', () => {
   assert.ok(!/statusChip\(f\.status\)/.test(card),
     'and never past it — one unguarded call puts `draft` back on every active card');
   // The pill it sits next to is the thing that actually discriminates, and it stays.
-  assert.match(card, /cat \? wsStatePill\(cat\) : null/,
+  assert.match(card, /cat \? wsStatePill\(cat, kind\) : null/,
     'the state pill must be untouched — it is what the chip was crowding');
 });
 
@@ -2108,12 +2166,22 @@ test('U5: a band names itself, and its name carries its size', () => {
     'the id must be minted before it is referenced and before it is placed');
 
   // The count must be a CHILD of the heading, not its sibling — that is the whole fix for heading
-  // navigation, and reverting it would leave aria-labelledby resolving to a nameless label.
+  // navigation, and reverting it would leave aria-labelledby resolving to a nameless label. And it
+  // must come AFTER the label: "the count is inside the h2" alone was satisfied by putting the count
+  // first, which announces "· 4 Needs you" and buries the name behind a number.
   const h2At = loop.indexOf("h('h2'");
+  const labelAt = loop.indexOf('band.label');
   const countAt = loop.indexOf("h('span', { class: 'band-count' }");
-  assert.ok(h2At > -1 && countAt > h2At, 'the count must come after the h2 opens');
+  assert.ok(h2At > -1 && labelAt > h2At, 'the band name must be the heading\'s first child');
+  assert.ok(countAt > labelAt, 'and its size must follow the name, never lead it');
   assert.ok(!/\}, band\.label\),/.test(loop),
     'the h2 must not close before the count — a sibling span is the arrangement being replaced');
+
+  // Name computation concatenates the heading's text nodes with nothing between them, so a count
+  // that starts at "·" is announced as "Needs you· 2". One leading space fixes it, and costs no
+  // layout: .band-count is a flex item, and a flex item's leading white space is trimmed.
+  assert.match(loop, /'band-count' \}, ` · \$\{rows\.length\}`\)/,
+    'the count must carry its own separating space, or the band\'s accessible name runs together');
 
   // A counter, not the band key: two banded lists on one page would mint the same key-derived id
   // twice, and a duplicate id makes aria-labelledby silently resolve to the wrong heading.
@@ -2186,9 +2254,27 @@ test('U6: the full-view refetch goes through the same guard as the repaint', () 
   // construction — drawing it first would paint the old rows and then throw them away.
   assert.ok(reloadAt < repaintAt, 'the reload must win over a repaint held beside it');
 
-  // And the flag must not outlive the view it was raised against.
-  assert.match(home, /homeInbox\.reload = false/,
-    'renderHome must clear the pending reload it has just satisfied, or the next tick does it again');
+  // And the flag must not outlive the view it was raised against. Presence alone was too weak —
+  // hoisting the line above the `await` satisfied it while breaking what it claims — so this pins
+  // WHERE: the clear belongs to the fresh-zone reset, which happens once the new data is in hand
+  // and before anything is drawn from it. Clear it before the fetch and the flag this very fetch
+  // satisfies survives into the new view, so the first poll tick calls renderHome() again and tears
+  // down the view it has just painted. Clear it after the first paint and the same tick re-enters.
+  const awaitAt = home.indexOf("await api('/api/home')");
+  const clearAt = home.indexOf('homeInbox.reload = false');
+  const firstPaintAt = home.indexOf('renderHomeInbox(');
+  const pollAt = home.indexOf('startHomeRequestsPoll()');
+  assert.ok(awaitAt > -1 && clearAt > awaitAt,
+    'renderHome must clear the reload it is satisfying AFTER the fetch that satisfies it');
+  assert.ok(firstPaintAt > clearAt && pollAt > clearAt,
+    'and before it paints or re-arms the poll, or the next tick reloads the view it just built');
+  // It is one reset with four fields, not four scattered writes: a zone that is fresh in three
+  // respects and stale in the fourth is the shape every one of these bugs has had.
+  for (const field of ['sig = null', 'pending = false', 'reload = false', 'heldAt = 0']) {
+    assert.ok(home.includes(`homeInbox.${field}`), `renderHome must reset homeInbox.${field}`);
+    assert.ok(home.indexOf(`homeInbox.${field}`) > awaitAt,
+      `and reset homeInbox.${field} after the fetch, with the rest of them`);
+  }
 });
 
 test('U6: the hold on a confirm is absolute; the hold on a cursor has a ceiling', () => {
@@ -2234,16 +2320,44 @@ test('U6: a forced repaint puts the user back where it found them', () => {
   const inbox = codeOnly(fnBody(ui, 'function renderHomeInbox('));
   const grid = codeOnly(fnBody(ui, 'function startSectionRequestsPoll('));
   const mark = codeOnly(fnBody(ui, 'function zoneFocusMark('));
-  const restore = codeOnly(fnBody(ui, 'function restoreZoneFocus('));
 
   // The ceiling would be a straight trade of one failure for another if it dropped the keyboard
   // user to <body> — that is exactly what the hold was added to prevent. A node reference cannot
   // survive replaceChildren, so the mark is a string looked up again in the rebuilt list.
   assert.match(mark, /\[data-fk\]/, 'the mark must be read off a stable key, not a node identity');
-  assert.match(restore, /querySelector\(`\[data-fk="\$\{CSS\.escape\(fk\)\}"\]`\)/,
-    'and redeemed by looking that key up in the NEW dom');
-  assert.match(restore, /preventScroll: true/,
-    'the user did not ask to move, so restoring focus must not scroll the page either');
+
+  // The restore itself is RUN, not read. Regexes over its body were the whole of this guard and they
+  // pinned nothing: an early `return;`, or `if (el && false) el.focus(...)`, left the function a
+  // no-op with every assertion still green. It touches only its two arguments, CSS.escape and
+  // .focus(), so it lifts cleanly (7eedee4's pattern) and a no-op fails outright.
+  const looked = [];
+  const focused = [];
+  const zone = (found) => ({
+    querySelector(sel) {
+      looked.push(sel);
+      return found ? { focus: (opts) => focused.push(opts) } : null;
+    },
+  });
+  const { restoreZoneFocus } = liftUi(ui, ['function restoreZoneFocus('],
+    { CSS: { escape: (s) => String(s).replace(/"/g, '\\"') } });
+
+  restoreZoneFocus(zone(true), 'row:pr-1');
+  assert.deepEqual(looked, ['[data-fk="row:pr-1"]'],
+    'the mark must be redeemed by looking the key up in the NEW dom, escaped');
+  assert.deepEqual(focused, [{ preventScroll: true }],
+    'and the element it finds must actually be focused — the user did not ask to move, so it must '
+    + 'not scroll the page either');
+
+  // The three shapes the callers really hand it, none of which may throw or focus anything: no
+  // zone (the view navigated away mid-repaint), no mark (a release the user's own click triggered,
+  // where focus was never taken), and a mark whose control is gone from the rebuilt list.
+  looked.length = 0; focused.length = 0;
+  restoreZoneFocus(null, 'row:pr-1');
+  restoreZoneFocus(zone(true), null);
+  assert.deepEqual(looked, [], 'a missing zone or a null mark must not even search');
+  restoreZoneFocus(zone(false), 'row:gone');
+  assert.deepEqual(looked, ['[data-fk="row:gone"]']);
+  assert.deepEqual(focused, [], 'and a key with nothing behind it must be dropped, not thrown on');
 
   // Order is the whole property: taken while the old dom is still there, redeemed after the new one
   // exists. Either side of the write and it marks or restores nothing.
@@ -2317,9 +2431,23 @@ test('U6: a held list says so, and nothing already on screen moves when it does'
   // The note arrives while a confirm is open and the pointer is already over the red Delete button.
   // Anything that reflows the list above it turns a status line into a misclick on an irreversible
   // action, so it may only ever be appended.
-  assert.match(note, /zone\.append\(note\)/, 'the note must be appended to the zone');
-  assert.ok(!/prepend|insertBefore|replaceChildren/.test(note),
-    'never prepended or inserted — that pushes an open confirm down under the pointer');
+  //
+  // "It calls append" was too weak on its own — `zone.append(note); note.remove();` satisfied it
+  // while leaving no note at all — so what is pinned is the control flow around the append: it
+  // happens ONLY on the branch that had to create the note, nothing removes it afterwards, and the
+  // text is written to the existing element rather than the element being replaced. Appending an
+  // element that is already in the DOM MOVES it, which is the same reflow under the same pointer.
+  const mintAt = note.indexOf('if (!note)');
+  const appendAt = note.indexOf('zone.append(note)');
+  const writeAt = note.indexOf("note.querySelector('.zone-held-text')");
+  assert.ok(mintAt > -1 && appendAt > mintAt,
+    'the note must be appended only where it was just created — re-appending an existing note '
+    + 'moves it, which is the reflow this whole arrangement exists to avoid');
+  assert.ok(writeAt > appendAt,
+    'and the sentence written into the note that is already placed, never by replacing it');
+  assert.ok(!/prepend|insertBefore|replaceChildren|note\.remove\(\)|removeChild|replaceWith/.test(note),
+    'never prepended, inserted, replaced or removed — that pushes an open confirm down under the '
+    + 'pointer, or takes away the admission the rows owe the strip above them');
   assert.match(note, /if \(t\.textContent !== text\)/,
     'and written only on a real change, or role="status" re-announces the same sentence every '
     + 'four seconds for as long as the hold lasts');
@@ -2329,23 +2457,38 @@ test('U6: a held list says so, and nothing already on screen moves when it does'
     'and pinned rather than placed, so a long held list still shows it');
   assert.match(css, /\.zone-held-text \{[^}]*min-width: 0/,
     'the sentence must wrap inside the note, or it forces the page wider than a 420px viewport');
-  // Pinned means it floats over the bottom row. That row has to stay reachable, and the room has to
-  // be made at the END — padding-bottom moves nothing already on screen, which is the same property
-  // that makes appending safe. The reservation must be taken down by the paint, not only the note:
-  // a zone left holding 90px of padding under a live list is a hole in the layout.
-  assert.match(css, /\.zone-holding \{[^}]*padding-bottom: calc\(var\(--zone-held-h, [^)]*\)/,
-    'the zone must reserve the note\'s measured height, with a fallback for the first frame');
-  assert.match(note, /zone\.classList\.add\('zone-holding'\)/, 'raised with the note');
-  assert.match(codeOnly(fnBody(ui, 'function clearZoneHeldNote(')), /classList\.remove\('zone-holding'\)/,
-    'and taken down with it');
-  for (const [where, decl] of [['the inbox', 'function renderHomeInbox('],
-    ['the section grid', 'function startSectionRequestsPoll(']]) {
+
+  // There is NO height reservation under the note, and that absence is the finding, not an
+  // omission. `.zone-holding { padding-bottom: calc(var(--zone-held-h, 72px) + 18px) }` stood here
+  // to keep the last row reachable under a pinned note — but sticky already keeps the note's own
+  // flow box at the end of the zone and only shifts it UP, so at maximum scroll it is back in its
+  // own space with the last row above it. Measured on a 26-row inbox at 1280px and 420px, at both
+  // scroll extremes, with the padding and without: identical coverage (two rows mid-scroll either
+  // way, which the reservation never addressed; none at maximum scroll either way), and ~56px less
+  // empty space. This is a source-shaped guard because the property is a rendered one — what makes
+  // it honest is that the browser measurement is what decided it, and it is written down in both
+  // files. If the reservation comes back, it comes back with a measurement that justifies it.
+  // codeOnly on both sides: BOTH files name the removed rule in the comment that explains why it
+  // went, and a regex over the raw text would read the explanation as the mistake.
+  assert.ok(!/zone-holding/.test(codeOnly(css)) && !/zone-holding/.test(codeOnly(ui)),
+    'the reservation was measured unnecessary and removed — bringing it back needs a measurement, '
+    + 'not a theory');
+  assert.ok(!/--zone-held-h/.test(codeOnly(css)) && !/--zone-held-h/.test(codeOnly(ui)),
+    'and the custom property that fed it must go with it, not linger unread');
+  // The note still has to come down when the list is no longer behind. On a repaint that happens
+  // through replaceChildren (it is a direct child of the zone); on the short-circuit, where nothing
+  // is replaced, it takes the explicit clear.
+  assert.match(note, /zone\.append\(note\)/,
+    'the note must be a direct child of the zone, which is what lets a repaint take it');
+  for (const [where, decl, skip] of [
+    ['the inbox', 'function renderHomeInbox(', 'if (sig === homeInbox.sig)'],
+    ['the section grid', 'function startSectionRequestsPoll(', 'if (sig === gridPaint.sig)'],
+  ]) {
     const body = codeOnly(fnBody(ui, decl));
-    const wrote = body.indexOf('zone.replaceChildren(');
-    const cleared = body.indexOf('clearZoneHeldNote(zone)', wrote);
-    assert.ok(cleared > wrote,
-      `${where} must clear the reservation after it repaints — replaceChildren removes the note's `
-      + 'element but leaves the padding its parent is carrying');
+    const at = body.indexOf(skip);
+    assert.ok(at > -1 && body.indexOf('clearZoneHeldNote(zone)', at) > at,
+      `${where} must take the note down on the tick that finds nothing outstanding — that tick `
+      + 'repaints nothing, so nothing else would');
   }
 });
 
@@ -2390,12 +2533,14 @@ test('U6: a rendered age is in the signature, and the clock is not', () => {
     'a job that is not stale prints no clock of its own, so it must add nothing');
 
   // And the signature has to actually carry it — for the Done rows as well, which print the same
-  // "Last reviewed 12m ago" and would freeze the same way.
-  const sig = codeOnly(fnBody(ui, 'function homeInboxSig('));
-  assert.match(sig, /rowAgeText\(e\.r, e\.job\)/, 'every active row must contribute its age text');
-  assert.match(sig, /doneRows\.map\(\(r\) => `\$\{r\.id\}~\$\{rowAgeText\(r, null\)\}`\)/,
-    'and every done row its own');
-  assert.ok(!/Date\.now\(\)/.test(sig),
+  // "Last reviewed 12m ago" and would freeze the same way. One entry signature, used for both the
+  // banded entries and the Done ones, so neither can be the half that forgets.
+  const sig = codeOnly(fnBody(ui, 'function listEntrySig('));
+  const list = codeOnly(fnBody(ui, 'function bandedListSig('));
+  assert.match(sig, /rowAgeText\(e\.ws, e\.job\)/, 'every entry must contribute its age text');
+  assert.match(list, /entries\.map\(listEntrySig\)/, 'every banded entry goes through it');
+  assert.match(list, /done\.map\(listEntrySig\)/, 'and every done one, through the same function');
+  assert.ok(!/Date\.now\(\)/.test(sig) && !/Date\.now\(\)/.test(list),
     'the signature must never read the clock directly — that repaints every single tick');
   assert.ok(!/Date\.now\(\)/.test(codeOnly(fnBody(ui, 'function renderHomeInbox('))),
     'nor may the tick that compares it');
@@ -2465,7 +2610,7 @@ test('U6: a section sees exactly the jobs that act on its own workspaces', () =>
 test('U6: #/spec is polled and banded like the PR sections, and guarded like them too', () => {
   const ui = readUi();
   const section = codeOnly(fnBody(ui, 'async function renderSection('));
-  const grid = codeOnly(fnBody(ui, 'function sectionGrid('));
+  const grid = codeOnly(fnBody(ui, 'function sectionEntries('));
   const poll = codeOnly(fnBody(ui, 'function startSectionRequestsPoll('));
 
   // `if (isPr) startSectionRequestsPoll(kind)` is what left #/spec with no runner at all.
@@ -2479,9 +2624,10 @@ test('U6: #/spec is polled and banded like the PR sections, and guarded like the
 
   // Both filters now read the one table, so a section cannot admit a job it does not own.
   assert.match(poll, /actsOnKind\(r, kind\)/, 'the relevance filter must ask the table');
-  assert.match(grid, /actsOnKind\(r, kind\) && r\.prId/,
-    'and so must the placeholder filter — with prId still required, because a placeholder has no '
-    + 'workspace to take a name from and spec actions never carry one');
+  assert.match(grid, /actsOnKind\(r, kind\) && pendingJobTitle\(r\)/,
+    'and so must the placeholder filter — gated on the placeholder having a NAME, which is the '
+    + 'requirement `r.prId` was standing in for, and the substitution that made a first spec '
+    + 'audit visible on its own page (U7)');
   assert.ok(!/r\.action === kind/.test(poll) && !/r\.action === kind/.test(grid),
     'the coincidence that a PR review\'s action equals its workspace kind must not be relied on '
     + 'anywhere — that is the whole bug');
@@ -2502,6 +2648,380 @@ test('U6: #/spec is polled and banded like the PR sections, and guarded like the
   // Its clock is its own, though: one shared record would carry a hold across a navigation between
   // two lists that are never on screen together.
   assert.match(ui, /^const gridHold = \{ heldAt: 0 \};$/m, 'the grid keeps its own hold clock');
-  assert.match(section, /gridHold\.heldAt = 0/,
-    'and a freshly rendered section must clear it — a fresh zone has no interaction in progress');
+  // Unconditionally, and before the poll can consult it. Merely mentioning the assignment was too
+  // weak — `if (false) gridHold.heldAt = 0;` satisfied it — so pin it as a statement in its own
+  // right, at statement position, ahead of the poll it exists to unblock.
+  const clearAt = section.search(/^\s*gridHold\.heldAt = 0;/m);
+  const armAt = section.indexOf('startSectionRequestsPoll(kind)');
+  assert.ok(clearAt > -1,
+    'a freshly rendered section must clear the hold clock unconditionally — a fresh zone has no '
+    + 'interaction in progress, and a clock carried in from the last section would spend this '
+    + 'section\'s ceiling before its first change arrived');
+  assert.ok(armAt > clearAt, 'and clear it before arming the poll that reads it');
+  // The same rule for the signature the grid gained: a fresh zone is an EMPTY one, so a signature
+  // left over from the section last visited must not match and skip the first paint into it.
+  const sigClearAt = section.search(/^\s*gridPaint\.sig = null;/m);
+  assert.ok(sigClearAt > -1 && armAt > sigClearAt,
+    'and clear the grid signature too, for the reason renderHome clears homeInbox.sig');
+});
+
+/* U7 — the final review's findings. Same discipline as U5/U6, pushed further where it can be: every
+ * rule here that is pure is LIFTED OUT AND RUN, including two that previously looked unliftable.
+ * wireConfirmDismiss touches only `document`, so `document` becomes an env entry and the whole
+ * dismissal is exercised for real; doDelete (U5, above) closes over its caller's locals, so the host
+ * function is fnBody'd first and the nested declaration lifted out of that. What remains a source
+ * assertion pins ORDERING and CONTROL FLOW, never the presence of a constructed string — and every
+ * one of these was mutation-proved by breaking the behaviour and watching it fail. The rendering,
+ * the live DOM and the accessibility tree are verified in a real browser. */
+
+test('U7: an abandoned delete-confirm has a way out, and the way out is Cancel', () => {
+  const ui = readUi();
+
+  // The hold an open confirm puts on a polled list has no ceiling (see U6), which is only
+  // defensible while a confirm is always ANSWERED. Nothing guaranteed that: Escape did nothing,
+  // clicking away did nothing. Measured — confirm open + 14s + a newly started job → rows unchanged,
+  // with no bound on how much longer. This is the exit that makes the uncapped hold honest.
+  //
+  // It reads `document` and nothing else, so it is run rather than read: a wiring that never
+  // cancels, one that cancels on the wrong event, and one that keeps listening after the confirm is
+  // gone are all visible here.
+  const mkDoc = () => {
+    const at = new Map();
+    return {
+      added: [],
+      addEventListener(type, fn, capture) {
+        this.added.push([type, capture]);
+        if (!at.has(type)) at.set(type, []);
+        at.get(type).push(fn);
+      },
+      removeEventListener(type, fn) {
+        const a = at.get(type) || [];
+        const i = a.indexOf(fn);
+        if (i > -1) a.splice(i, 1);
+      },
+      live(type) { return (at.get(type) || []).length; },
+      fire(type, ev) { for (const fn of [...(at.get(type) || [])]) fn(ev); },
+    };
+  };
+  const harness = ({ connected = true, inside = false } = {}) => {
+    const seen = { cancelled: 0, flushed: 0, prevented: 0 };
+    const doc = mkDoc();
+    const { wireConfirmDismiss } = liftUi(ui, ['function wireConfirmDismiss('], {
+      document: doc,
+      flushHomeInboxSoon: () => { seen.flushed++; },
+    });
+    const el = { isConnected: connected, contains: () => inside };
+    wireConfirmDismiss(el, () => { seen.cancelled++; });
+    return { doc, seen, el, key: (k) => doc.fire('keydown', { key: k, preventDefault: () => { seen.prevented++; } }), down: () => doc.fire('pointerdown', { target: {} }) };
+  };
+
+  // Both listeners, both in capture — a handler that stops propagation on the way up must not be
+  // able to swallow the only way out.
+  const esc = harness();
+  assert.deepEqual(esc.doc.added, [['keydown', true], ['pointerdown', true]],
+    'the confirm must listen for Escape and for a press outside, both in the capture phase');
+
+  // Escape cancels, exactly once, and unhooks — a listener still live after the confirm is gone
+  // cancels the NEXT confirm out from under the user.
+  esc.key('Escape');
+  assert.equal(esc.seen.cancelled, 1, 'Escape must dismiss the confirm');
+  assert.equal(esc.seen.prevented, 1, 'and claim the keystroke');
+  assert.equal(esc.doc.live('keydown') + esc.doc.live('pointerdown'), 0,
+    'and both listeners must come off with it');
+  esc.key('Escape');
+  assert.equal(esc.seen.cancelled, 1, 'a second Escape must reach nothing');
+  assert.equal(esc.seen.flushed, 1,
+    'and the dismissal must release the held repaint, as the Cancel click does through the zone');
+
+  // Any other key is not an answer.
+  const other = harness();
+  other.key('Enter'); other.key('a'); other.key('ArrowDown');
+  assert.equal(other.seen.cancelled, 0, 'only Escape dismisses');
+  assert.equal(other.doc.live('keydown'), 1, 'and the confirm keeps listening');
+
+  // A press OUTSIDE dismisses; a press inside is the user aiming at Delete or Cancel and must not.
+  const away = harness({ inside: false });
+  away.down();
+  assert.equal(away.seen.cancelled, 1, 'a press outside the confirm must dismiss it');
+  const within = harness({ inside: true });
+  within.down();
+  assert.equal(within.seen.cancelled, 0,
+    'a press inside must not — that is the user reaching for one of its own two buttons');
+  assert.equal(within.doc.live('pointerdown'), 1, 'and the confirm keeps listening');
+
+  // The confirm can also leave without either button: a repaint past the ceiling takes it. The
+  // listeners must then unhook and cancel NOTHING — running showDefault against a detached wrap is
+  // work on a DOM nobody is looking at.
+  const dead = harness({ connected: false });
+  dead.key('Escape');
+  assert.equal(dead.seen.cancelled, 0, 'a confirm already out of the DOM must not be cancelled');
+  assert.equal(dead.doc.live('keydown') + dead.doc.live('pointerdown'), 0,
+    'and its listeners must unhook themselves rather than wait for buttons that are gone');
+
+  // And the structural half: the dismissal is handed the CANCEL path, never the delete. This is
+  // what makes "a dismissal is never read as consent" a property of the wiring rather than a hope —
+  // wireConfirmDismiss is only ever given one function, and it is showDefault on both surfaces.
+  for (const host of ['function inboxRow(', 'function featureCard(']) {
+    const confirm = codeOnly(fnBody(fnBody(ui, host), 'function showConfirm()'));
+    assert.match(confirm, /wireConfirmDismiss\(confirmEl, showDefault\)/,
+      `${host} must give the dismissal the same function Cancel runs, never doDelete`);
+    assert.ok(!/wireConfirmDismiss\([^)]*doDelete/.test(confirm),
+      'a dismissal that deleted would be worse than the freeze it fixes');
+  }
+});
+
+test('U7: a reload paints the jobs it already knows, not an empty queue', () => {
+  const ui = readUi();
+  const home = codeOnly(fnBody(ui, 'async function renderHome('));
+
+  // renderHome() is how a completed job gets its fresh data (homeInbox.reload → releaseHomeInbox),
+  // so this first paint runs precisely when OTHER jobs are still running — and `renderHomeInbox([])`
+  // dropped every one of them. Measured 4.2s: a still-running job vanished from its row, the row
+  // fell back to "Needs you", homeInbox.reqs was overwritten with [] so the strip lost its dedupe
+  // too, and the next tick put it all back.
+  assert.match(home, /renderHomeInbox\(homeInbox\.reqs\)/,
+    'the first paint must use the jobs this view last saw');
+  assert.ok(!/renderHomeInbox\(\[\]\)/.test(home),
+    'never an empty queue — that blanks every live binding for a whole tick');
+  // And the cache it paints from must survive the reset above it, or this is the same blank by a
+  // different route: `reqs` is deliberately NOT one of the four fields a fresh zone clears.
+  assert.ok(!/homeInbox\.reqs = \[\]/.test(home),
+    'and the reset must not clear reqs — that would re-create the hole it is closing');
+  assert.match(codeOnly(fnBody(ui, 'function renderHomeInbox(')), /homeInbox\.reqs = requests/,
+    'the cache is refilled by the render that consumed it');
+});
+
+test('U7: a spec job is described in spec words', () => {
+  const ui = readUi();
+  const grab = (re, what) => { const m = ui.match(re); assert.ok(m, what); return m[0]; };
+  const states = grab(/const WS_STATES = \[[\s\S]*?\n\];/, 'WS_STATES must be one table');
+  const index = grab(/^const WS_STATE_INDEX = .*$/m, 'WS_STATE_INDEX must be module scope');
+  const fallback = grab(/^const WS_FALLBACK_STATE = .*$/m, 'WS_FALLBACK_STATE must be module scope');
+  const perKind = grab(/const JOB_LABELS_BY_KIND = \{[\s\S]*?\n\};/,
+    'the per-kind job labels must be one table, at module scope');
+  const applyVerb = grab(/const APPLY_VERB = \{[\s\S]*?\n\};/,
+    'where an apply is writing must be one table too');
+  const actionLabel = grab(/^const REQ_ACTION_LABEL = .*$/m, 'REQ_ACTION_LABEL must be module scope');
+
+  // All pure lookups, so they are run.
+  const { wsStateLabel } = liftUi(ui,
+    [states, index, fallback, perKind, 'function wsState(', 'function wsStateLabel(']);
+  const { jobVerb } = liftUi(ui, [applyVerb, actionLabel, 'function jobVerb(']);
+
+  // The bug: WS_STATES' labels are the pr-review ones, and every kind wore them. A running spec
+  // audit read "Re-reviewing" and a spec apply read "Posting review" / "Posting to PR" — all three
+  // naming a pull request that a spec workspace does not have.
+  assert.equal(wsStateLabel('job-reviewing', 'spec'), 'Auditing');
+  assert.equal(wsStateLabel('job-rereviewing', 'spec'), 'Re-auditing');
+  assert.equal(wsStateLabel('job-posting', 'spec'), 'Applying changes');
+  assert.equal(jobVerb({ action: 'audit' }, false, 'spec'), 'Auditing');
+  assert.equal(jobVerb({ action: 'audit' }, true, 'spec'), 'Re-auditing',
+    'and the verb splits on prior findings exactly as the pill does, so the two cannot disagree');
+  assert.equal(jobVerb({ action: 're-audit' }, true, 'spec'), 'Re-auditing');
+  assert.equal(jobVerb({ action: 'propose' }, true, 'spec'), 'Drafting changes',
+    'and `propose` must not fall through to its raw action name');
+  assert.match(jobVerb({ action: 'apply' }, true, 'spec'), /spec/i);
+  assert.ok(!/PR/.test(jobVerb({ action: 'apply' }, true, 'spec')),
+    'a spec apply writes back to the spec — there is no PR anywhere near it');
+
+  // pr-review is the vocabulary the defaults already were, and it must be untouched.
+  for (const [key, label] of [['job-reviewing', 'Reviewing'], ['job-rereviewing', 'Re-reviewing'],
+    ['job-posting', 'Posting review']]) {
+    assert.equal(wsStateLabel(key, 'pr-review'), label, `pr-review must keep "${label}"`);
+    assert.equal(wsStateLabel(key, undefined), label,
+      'and an unnamed kind must fall back to the table, not to a blank');
+    assert.equal(wsStateLabel(key, 'no-such-kind'), label, 'as must an unknown one');
+  }
+  assert.equal(jobVerb({ action: 'apply' }, true, 'pr-review'), 'Posting to PR');
+  assert.equal(jobVerb({ action: 'pr-review' }, true, 'pr-review'), 'Re-reviewing');
+  assert.equal(jobVerb({ action: 'apply' }, true, undefined), 'Posting to PR',
+    'and an apply with no kind keeps the wording every caller meant before');
+
+  // pr-respond is a third vocabulary, not a second copy of pr-review's: replying to reviewer
+  // threads is not reviewing, and its apply posts replies rather than a review.
+  assert.equal(wsStateLabel('job-reviewing', 'pr-respond'), 'Responding');
+  assert.equal(wsStateLabel('job-posting', 'pr-respond'), 'Posting replies');
+  assert.equal(jobVerb({ action: 'apply' }, true, 'pr-respond'), 'Posting replies');
+
+  // Labels only. The band a live job lands in is categoryOf's, and it must stay kind-free — "a
+  // runner is mid-way through this" is the same fact whatever the workspace is, and a per-kind band
+  // map is the WS_BANDS drift this whole arrangement exists to prevent.
+  const cat = codeOnly(fnBody(ui, 'function categoryOf('));
+  assert.ok(!/kind/.test(cat),
+    'categoryOf must not learn about kinds — only the words are per-kind, never the banding');
+  for (const key of ['job-posting', 'job-rereviewing', 'job-reviewing']) {
+    assert.match(perKind, new RegExp(`'${key}'`),
+      `${key} must have a per-kind wording, since it is a PR word by default`);
+  }
+  // Every key the table renames must be a real state, or it renames nothing and the PR word stands.
+  const known = new Set(wsTables(ui).states.map((s) => s.key));
+  for (const m of perKind.matchAll(/'(job-[a-z-]+)':/g)) {
+    assert.ok(known.has(m[1]), `JOB_LABELS_BY_KIND renames "${m[1]}", which is not in WS_STATES`);
+  }
+});
+
+test('U7: a workspace-less spec audit still has a card to appear on', () => {
+  const ui = readUi();
+  const { pendingJobTitle } = liftUi(ui, ['function pendingJobTitle(']);
+
+  // #/spec showed NOTHING for a brand-new audit: placeholders were gated on `r.prId`, which spec
+  // actions never carry (ledger.js takes wsId OR instructions), and that page has no requests strip.
+  // No card, no placeholder, no strip — the only surface a first audit had was Home's strip, one
+  // navigation away. What a placeholder actually needs is a NAME, and this is that requirement
+  // stated directly.
+  assert.equal(pendingJobTitle({ action: 'audit', title: 'Checkout redesign' }), 'Checkout redesign');
+  assert.equal(
+    pendingJobTitle({ action: 'audit', instructions: 'https://conf/spec/42\nhttps://ado/1234' }),
+    'https://conf/spec/42',
+    'with no title, the first line of what it was queued with identifies the run');
+  assert.equal(pendingJobTitle({ action: 'audit', instructions: '\n\n  just the payment flow  \n' }),
+    'just the payment flow', 'trimmed, and blank leading lines skipped');
+  // A title always wins, and the PR number is still the PR placeholder's name.
+  assert.equal(pendingJobTitle({ action: 'pr-review', prId: 7001 }), 'PR 7001');
+  assert.equal(pendingJobTitle({ action: 'pr-review', prId: 7001, title: 'Checkout #7001' }),
+    'Checkout #7001');
+  // And the refusal is still real: an anonymous job draws no card. A "starting…" box naming no work
+  // is worse than no box, and it is what an unconditional filter would have produced.
+  for (const job of [{ action: 'audit' }, { action: 'audit', instructions: '' },
+    { action: 'audit', instructions: '   \n  \n' }]) {
+    assert.equal(pendingJobTitle(job), null, 'a job with nothing to call itself draws no placeholder');
+  }
+
+  // The filter asks exactly that question, and the card takes its name from the same function, so
+  // "may it exist" and "what is it called" can never be two different answers.
+  const entries = codeOnly(fnBody(ui, 'function sectionEntries('));
+  const cardSrc = codeOnly(fnBody(ui, 'function pendingJobCard('));
+  assert.match(entries, /pendingJobTitle\(r\)/, 'the placeholder filter must gate on the name');
+  assert.ok(!/r\.prId/.test(entries),
+    'and no longer on prId, which is the gate that made a first spec audit invisible');
+  assert.match(cardSrc, /pendingJobTitle\(job\)/, 'and the card must take its title from it too');
+  // The instructions can BE the title; printing them twice says the same sentence under itself.
+  assert.match(cardSrc, /job\.instructions !== title/,
+    'a placeholder named from its instructions must not repeat them on its meta line');
+  // The placeholder's job line speaks the section's vocabulary, because that is the only kind it
+  // can have — actsOnKind is what let the job onto this page at all.
+  assert.match(cardSrc, /cardJobRow\(job, false, kind\)/,
+    'and the job line must be told which section it is on, or a spec audit says "Reviewing"');
+});
+
+test('U7: the strip does not deny the note beside it', () => {
+  const ui = readUi();
+  const poll = codeOnly(fnBody(ui, 'function startHomeRequestsPoll('));
+
+  // While held, the strip read "N jobs in flight — already shown on the rows below" while no row
+  // showed them, and the held note directly below said the queue above had moved on and the rows had
+  // not. The note is the true half. The strip must soften its dedupe clause rather than assert the
+  // opposite of the sentence underneath it — and must not go silent, because where the jobs went is
+  // still the thing worth saying.
+  const heldAt = poll.indexOf('homeInbox.pending');
+  const stripAt = poll.indexOf('populateRequestsStrip(');
+  assert.ok(heldAt > -1, 'the strip must know whether the rows below it are held');
+  assert.ok(stripAt > heldAt, 'and know it before it writes its sentence');
+  // Both clauses the strip writes must be BRANCHES of that question, not one sentence with a
+  // second one added beside it: asserting only that the softened wording exists somewhere passed
+  // with the dedupe claim left unconditional, which is the bug.
+  assert.match(poll, /behind \? '[^']*catching up[^']*' : '[^']*already shown on the rows below\.'/,
+    'the dedupe claim may only be made on the branch where the rows are NOT behind');
+  assert.match(poll, /behind \? '[^']*catching up[^']*' : '[^']*on the rows below'/,
+    'and the head-note that counts them must split the same way, or half the strip still denies it');
+  assert.match(poll, /plural\(active\.length, 'job', 'jobs'\)\} in flight/,
+    'either way the strip still says how much work is in flight');
+  // The rows' own admission is what the strip is being made consistent WITH, so it must still be
+  // the same table it always was (U6 pins its wording).
+  assert.match(ui, /const HOME_HELD_NOTE = \{[\s\S]*?queue above has moved on[\s\S]*?\n\};/,
+    'the note the strip must agree with stays where it is');
+});
+
+test('U7: an idle section grid repaints nothing', () => {
+  const ui = readUi();
+  const poll = codeOnly(fnBody(ui, 'function startSectionRequestsPoll('));
+
+  // The inbox has had "a tick that changes nothing touches nothing" since 316edb0; the grid
+  // repainted unconditionally every 4s. That was survivable only while the hold was unconditional
+  // too — with the busy ceiling above it (4406176) it became a GUARANTEED tear-down every 12
+  // seconds on a section nobody is changing. Measured on an idle grid with focus parked on a card:
+  // 2 focusout / 3 focusin across 40 seconds, and a text selection dying at ~16s.
+  const entriesAt = poll.indexOf('sectionEntries(kind, state.section.features, rel)');
+  const sigAt = poll.indexOf('sectionGridSig(entries)');
+  const skipAt = poll.indexOf('if (sig === gridPaint.sig)');
+  const holdAt = poll.indexOf('holdStands(hold, gridHold)');
+  const paintAt = poll.indexOf('zone.replaceChildren(');
+  const recordAt = poll.indexOf('gridPaint.sig = sig');
+  assert.ok(entriesAt > -1 && sigAt > entriesAt, 'the tick must sign the entries it is about to draw');
+  assert.ok(skipAt > sigAt && paintAt > skipAt,
+    'and compare BEFORE the repaint, or the comparison decides nothing');
+  assert.match(poll.slice(skipAt, holdAt), /return;/,
+    'an unchanged signature must return without ever reaching replaceChildren');
+  assert.match(poll.slice(skipAt, holdAt), /clearZoneHeldNote\(zone\)/,
+    'and with nothing outstanding it must take the held note down — a paused sign over a list that '
+    + 'is not behind is the same contradiction pointing the other way');
+  assert.ok(recordAt > paintAt,
+    'the signature must be recorded after the paint landed — stamped earlier, a held tick would '
+    + 'make its own skip permanent and the deferred change becomes a dropped one');
+  // ONE decision, signed and then drawn. categoryOf reads the clock through isStaleJob, so deciding
+  // twice per tick lets the comparison and the render disagree about the same job.
+  assert.equal((poll.match(/sectionEntries\(/g) || []).length, 1,
+    'the entries must be computed once per tick and handed to the render');
+  assert.match(poll, /sectionGrid\(kind, entries\)/, 'which draws exactly what was signed');
+
+  // And the signature is the inbox's, not a second one. Two signature functions for two lists drawn
+  // by one band loop is the drift WS_BANDS/WS_STATES exist to prevent, one level up again.
+  assert.match(codeOnly(fnBody(ui, 'function sectionGridSig(')), /bandedListSig\(/,
+    'the grid must sign itself with the shared signature');
+  assert.ok(!/function (sectionSig|gridSig)\(/.test(ui), 'and grow no second one of its own');
+
+  // Run it. The shapes the grid adds over the inbox are a placeholder entry (no workspace at all)
+  // and `rev`, and both have to move the answer.
+  const grab = (re) => { const m = ui.match(re); assert.ok(m, `web/app.js must declare ${re}`); return m[0]; };
+  const gridPaint = { sig: null, rev: 0 };
+  const { sectionGridSig } = liftUi(ui, [
+    'function fmtDate(', 'function fmtDateTime(', 'function fmtAgo(', 'function fmtAge(',
+    'function reviewStampsOf(', grab(/^const JOB_STALE_MS = .*$/m), 'function jobAgeMs(',
+    'function isStaleJob(', 'function rowAgeText(',
+    grab(/const WS_STATES = \[[\s\S]*?\n\];/), grab(/^const WS_STATE_INDEX = .*$/m),
+    grab(/^const WS_FALLBACK_STATE = .*$/m), 'function wsState(',
+    'function listEntrySig(', 'function bandedListSig(', 'function sectionGridSig(',
+  ], { runnerBusy: () => false, gridPaint });
+
+  const ws = (id) => ({ id, title: id });
+  const job = (over = {}) => ({ id: 'j1', status: 'running', action: 'pr-review', updatedAt: new Date().toISOString(), ...over });
+  const board = () => ({
+    pending: [{ ws: null, job: job({ id: 'j9' }), cat: 'job-reviewing' }],
+    active: [{ ws: ws('pr-1'), job: job(), cat: 'job-reviewing' },
+      { ws: ws('pr-2'), job: null, cat: 'awaiting-author' }],
+    done: [{ ws: ws('pr-3'), job: null }],
+  });
+
+  assert.equal(sectionGridSig(board()), sectionGridSig(board()),
+    'an unchanged grid must sign identically — this is the whole of "an idle tick touches nothing"');
+
+  const moved = board(); moved.active[1].cat = 'author-responded';
+  assert.notEqual(sectionGridSig(board()), sectionGridSig(moved), 'a card changing band must show');
+  const stopped = board(); stopped.active[0].job = null;
+  assert.notEqual(sectionGridSig(board()), sectionGridSig(stopped), 'a job ending must show');
+  const queued = board(); queued.active[0].job = job({ status: 'queued' });
+  assert.notEqual(sectionGridSig(board()), sectionGridSig(queued),
+    'and "queued → running" is a visible change on the card even when the band does not move');
+  const gone = board(); gone.pending = [];
+  assert.notEqual(sectionGridSig(board()), sectionGridSig(gone),
+    'a placeholder appearing or leaving must show, exactly as a card does');
+  const other = board(); other.pending[0].job = job({ id: 'j8' });
+  assert.notEqual(sectionGridSig(board()), sectionGridSig(other),
+    'and one placeholder is not another');
+  const finished = board(); finished.done = [];
+  assert.notEqual(sectionGridSig(board()), sectionGridSig(finished),
+    'the Done disclosure prints a count, so its contents are in the signature too');
+
+  // `rev` is the term the inbox does not need: state.home.rows is only refilled by renderHome(),
+  // which rebuilds the zone outright, but state.section.features is replaced IN PLACE by this poll —
+  // and what comes back is exactly the scores, counts and stamps the cards draw. Without this, a
+  // refetch that changed every number on the page but no band would be skipped.
+  const before = sectionGridSig(board());
+  gridPaint.rev++;
+  assert.notEqual(before, sectionGridSig(board()),
+    'a refetch of the cards\' own data must move the signature even when no band did');
+  assert.match(poll, /gridPaint\.rev\+\+/, 'and the refetch must be what bumps it');
+  const bumpAt = poll.indexOf('gridPaint.rev++');
+  assert.ok(bumpAt > -1 && bumpAt < entriesAt,
+    'before the signature is taken, or the tick that refetched is the tick that skips');
 });

@@ -340,12 +340,15 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   box-shadow: var(--glass-shadow);
   color: var(--fg-dim); font-size: 12.5px; line-height: 1.45;
 }
-/* The room the pinned note needs at the end of the list, so the row it floats over is still
-   reachable by scrolling. `--zone-held-h` is the note's measured height, set by zoneHeldNote()
-   because the sentence wraps to one line at 1280px and three at 420px; the fallback covers the
-   frame before that measurement lands. Bottom padding is the only way to make room that moves
-   nothing already on screen — the same reason the note is appended rather than prepended. */
-.zone-holding { padding-bottom: calc(var(--zone-held-h, 72px) + 18px); }
+/* There is deliberately NO height reservation under a held list. A `.zone-holding` padding-bottom of
+   the note's measured height used to sit here, on the theory that a pinned note floats over the last
+   row and that row has to stay reachable — but `position: sticky` keeps the element's own flow box,
+   and that box is already at the END of the zone. Sticky only shifts it UP, and only while the end
+   of the zone is below the fold; at the scroll extreme where it would otherwise land on the last
+   row, it is back in its own space with the row above it. Measured both ways on a 26-row inbox, at
+   1280px and at 420px, at both scroll extremes: the same rows are covered mid-scroll (which the
+   reservation never addressed, since it only ever added room at the end) and no row is covered at
+   maximum scroll either way. What it did add was ~56px of empty space under every held list. */
 .zone-held-glyph { color: var(--fg-mute); line-height: 1.45; }
 /* min-width: 0 so the sentence wraps inside the flex row instead of forcing the note — and with it
    the page — wider than the viewport at 420px. */
