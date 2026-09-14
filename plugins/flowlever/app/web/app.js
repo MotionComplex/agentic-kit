@@ -23,6 +23,48 @@ const STATUS_COLS = [
   { key: 'resolved',  label: 'Resolved' },
   { key: 'waived',    label: 'Waived' },
 ];
+/* The bands a list view draws, top to bottom, and how much of each card it spends on them.
+ * "Needs you" earns the full card because that is where you actually decide something; the rest
+ * only has to identify the row and say why it is parked, so it gets a compact one. Four bands with
+ * every card at full detail is the thing this replaces — a flat wall in which the two PRs waiting
+ * on YOU look exactly like the nine that are waiting on someone else. */
+const WS_BANDS = [
+  { key: 'needs-you',   label: 'Needs you',         density: 'full'    },
+  { key: 'in-progress', label: 'In progress',       density: 'compact' },
+  { key: 'waiting',     label: 'Waiting on others', density: 'compact' },
+];
+/* Every state a card can be in, ordered: position in this array IS the rank, across the whole
+ * list. One table, deliberately — the same reason ledger.js's WORKSPACE_STATES is one table. A
+ * separate "which band" map and "which sorts first" list drift apart, and the symptom is a card
+ * drawn under one header but ordered as if it belonged under another. A `rank:` number here would
+ * be that second copy in miniature, so there isn't one.
+ *
+ * The `job-*` states are the browser's own: they describe what a live runner is doing right now,
+ * which outranks whatever the ledger last computed. The rest mirror ledger.js's WORKSPACE_STATES
+ * one-for-one (minus `done`, which keeps its collapsed disclosure) — test/server.test.js pins that
+ * agreement, because two taxonomies that disagree is the whole risk of splitting them. */
+const WS_STATES = [
+  { key: 'job-attention',    band: 'needs-you',   label: 'Needs attention'     },
+  { key: 'ready-to-post',    band: 'needs-you',   label: 'Ready to post'       },
+  { key: 'needs-review',     band: 'needs-you',   label: 'New — to review'     },
+  { key: 'needs-rereview',   band: 'needs-you',   label: 'Re-review'           },
+  { key: 'author-responded', band: 'needs-you',   label: 'Author responded'    },
+  { key: 'job-posting',      band: 'in-progress', label: 'Posting review'      },
+  { key: 'job-rereviewing',  band: 'in-progress', label: 'Re-reviewing'        },
+  { key: 'job-reviewing',    band: 'in-progress', label: 'Reviewing'           },
+  { key: 'job-polling',      band: 'in-progress', label: 'Checking for updates'},
+  { key: 'posting',          band: 'in-progress', label: 'Posting…'            },
+  { key: 'awaiting-author',  band: 'waiting',     label: 'Waiting on author'   },
+  { key: 'awaiting-reaudit', band: 'waiting',     label: 'Waiting on re-audit' },
+  { key: 'settled',          band: 'waiting',     label: 'Settled'             },
+];
+/* Rank = index, resolved once. Nothing else may express the order. */
+const WS_STATE_INDEX = new Map(WS_STATES.map((s, i) => [s.key, { ...s, rank: i }]));
+/* Where an unrecognised state lands. A summary served by an older cockpit carries no `state` at
+ * all, and an unlabelled band — or a crash — is a far worse answer than "parked, nothing to do". */
+const WS_FALLBACK_STATE = 'settled';
+function wsState(key) { return WS_STATE_INDEX.get(key) || WS_STATE_INDEX.get(WS_FALLBACK_STATE); }
+
 // Defaults matching ledger.js's DEFAULT_CONFIG — used only for the optimistic readiness
 // recompute, and only until GET /api/config answers (fetched at boot, see loadLiveConfig
 // below). The server's value is authoritative either way and reconciled after every POST;
@@ -2846,9 +2888,32 @@ async function renderSection(kind) {
   if (isPr) startSectionRequestsPoll(kind);
 }
 
-/* The cards for a section, with each workspace's live job folded onto its card and a
- * placeholder card for any in-flight review whose workspace doesn't exist yet. No
- * separate jobs strip — the status lives on the card it belongs to. */
+/* Which WS_STATES key a card belongs under. A live runner job OUTRANKS the workspace's own state:
+ * what a runner is doing to this PR right now is the truer answer to "what is happening to it"
+ * than a state computed from stamps the runner is in the middle of invalidating.
+ *
+ * `f` may be null — a pending placeholder has a job and no workspace yet. Deliberately free of any
+ * `kind` assumption, so the inbox can band the same way the sections do. */
+function categoryOf(f, job) {
+  if (job) {
+    // These three are the same "a human has to unstick this" pool jobRank() puts at the top, and
+    // they must not be buried under "In progress": nothing is progressing.
+    const needsInput = !!job.needsInput && job.status !== 'done' && job.status !== 'error';
+    if (needsInput || job.status === 'error' || isStaleJob(job)) return 'job-attention';
+    if (job.action === 'apply') return 'job-posting';
+    if (job.action === 'poll') return 'job-polling';
+    // A re-run against a workspace that already has findings/rounds is a re-review, not a first
+    // pass — the same distinction cardJobRow's verb makes, read from the same derivation.
+    return hasFindingsOf(f) ? 'job-rereviewing' : 'job-reviewing';
+  }
+  // No job: the server's canonical state, if this build of the cockpit knows the word.
+  return WS_STATE_INDEX.has(f && f.state) ? f.state : WS_FALLBACK_STATE;
+}
+
+/* The cards for a section, drawn as ordered bands: what needs you, what a runner is mid-way
+ * through, what is parked on somebody else — then the collapsed Done list, unchanged. Each
+ * workspace's live job is folded onto its card, and an in-flight review whose workspace doesn't
+ * exist yet gets a placeholder. No separate jobs strip — the status lives on the card it belongs to. */
 function sectionGrid(kind, features, requests) {
   const live = (requests || []).filter(isLiveJob);
   const used = new Set();
@@ -2857,27 +2922,40 @@ function sectionGrid(kind, features, requests) {
     if (job) used.add(job.id);
     return { f, job };
   });
-  // Cards sort by how urgently they need the user: needs-input first, then
-  // errored, running, queued jobs, then idle workspaces (stable within a rank).
-  const urgency = (job) => (job ? jobRank(job) : 0);
-  // Active workspaces stay on top; finished ones drop into a collapsed "Done" section.
-  const activeCards = withJob
-    .filter(({ f }) => f.status !== 'done')
-    .map(({ f, job }) => ({ rank: urgency(job), el: featureCard(f, job) }));
+  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, banded
+  // by the same rule as everything else. They lead the list so that, at equal rank, the work that
+  // has no card of its own yet still appears where its real card will land.
+  const pending = live
+    .filter((r) => r.action === kind && r.prId && !used.has(r.id))
+    .map((r) => ({ f: null, job: r, cat: categoryOf(null, r) }));
+  // Active workspaces get banded; finished ones drop into a collapsed "Done" section.
+  const active = withJob.filter(({ f }) => f.status !== 'done')
+    .map(({ f, job }) => ({ f, job, cat: categoryOf(f, job) }));
+  // Rank is the WS_STATES index, and .sort() is stable, so ties keep insertion order.
+  const ranked = [...pending, ...active].sort((a, b) => wsState(a.cat).rank - wsState(b.cat).rank);
   // Kept as { sortable, el } pairs so the Done disclosure can reorder them by date — the card
   // element alone carries no timestamp to sort on.
   const doneCards = withJob.filter(({ f }) => f.status === 'done')
     .map(({ f, job }) => ({ sortable: f, el: featureCard(f, job) }));
-  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards,
-  // ranked in the same urgency pool as the workspace cards.
-  const pending = live
-    .filter((r) => r.action === kind && r.prId && !used.has(r.id))
-    .map((r) => ({ rank: jobRank(r), el: pendingJobCard(r) }));
-  const top = [...pending, ...activeCards].sort((a, b) => b.rank - a.rank).map((c) => c.el);
-  if (!top.length && !doneCards.length) return sectionEmpty(kind);
-  const lists = [];
-  if (top.length) lists.push(h('div', { class: 'features-grid' }, top));
-  else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
+
+  const bands = [];
+  for (const band of WS_BANDS) {
+    const rows = ranked.filter((e) => wsState(e.cat).band === band.key);
+    // A header with nothing under it reads as "you have none of these", which is a claim the list
+    // doesn't need to make three times per view. Omit the band entirely.
+    if (!rows.length) continue;
+    bands.push(h('section', { class: `band band-${cssSafe(band.key)}` },
+      h('div', { class: 'band-head' },
+        h('h2', { class: 'band-label' }, band.label),
+        h('span', { class: 'band-count' }, `· ${rows.length}`)),
+      h('div', { class: 'features-grid' },
+        rows.map((e) => (e.f ? featureCard(e.f, e.job, band.density) : pendingJobCard(e.job))))));
+  }
+
+  if (!bands.length && !doneCards.length) return sectionEmpty(kind);
+  const lists = bands.length
+    ? bands
+    : [h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.')];
   if (doneCards.length) lists.push(doneDisclosure(kind, doneCards, 'features-grid done-disc-body'));
   return h('div', { class: 'section-lists' }, ...lists);
 }
@@ -2945,7 +3023,52 @@ function lastRoundDate(f) {
   return fmtDate(at);
 }
 
-function featureCard(f, job) {
+/* Does this workspace already have review work behind it? Used both to pick the runner's verb
+ * ("Reviewing" vs "Re-reviewing") and to band a live job, which is why it isn't inlined in
+ * either — two copies of this test would let a card's verb and its band disagree. */
+function hasFindingsOf(f) {
+  if (!f) return false;   // a pending placeholder has no workspace yet, so nothing can be behind it
+  const r = summaryReadiness(f);
+  return Boolean((r.openBySeverity && Object.values(r.openBySeverity).some(Boolean))
+    || f.lastRoundAt || (f.rounds && f.rounds.length));
+}
+
+/* The state pill a compact card wears in place of the dial and the severity counts: the band
+ * table's own label, so the card names the same thing the header above it sorted it by. */
+function wsStatePill(cat) {
+  const meta = wsState(cat);
+  return h('span', { class: `chip ws-pill ws-pill-${cssSafe(meta.band)}` }, meta.label);
+}
+
+/* The ONE timestamp a compact card earns. Which stamp answers "why is this still here?" depends
+ * on the state: a posted review is waiting on the clock since WE posted; anything else parked is
+ * waiting since our last round. A card with a job gets none — cardJobRow already says what is
+ * happening and how long it has been happening for, and two clocks read as two events. */
+function compactStamp(f, job, cat) {
+  if (job) return null;
+  const s = reviewStampsOf(f);
+  if (cat === 'awaiting-author') return stampEl('Posted', s.lastPostedAt);
+  return stampEl('Last round', s.lastReviewedAt || f.lastRoundAt || null);
+}
+
+/* A compact card: title, why it is parked, the one stamp that explains it, and the live job row if
+ * there is one. No dial, no severity counts, no sources line — those are decision material, and
+ * nothing in these bands is waiting on a decision from you. Same element, same link, same delete
+ * flow as a full card, so it stays recognisably the same object. */
+function compactCard(f, job, cat, cls, href) {
+  return h('a', { class: `${cls} fc-compact`, href },
+    h('div', { class: 'fc-top' },
+      h('div', { class: 'fc-titlewrap' },
+        h('div', { class: 'fc-title' }, f.title || f.id),
+        h('div', { class: 'fc-why' },
+          wsStatePill(cat),
+          compactStamp(f, job, cat)))),
+    job ? cardJobRow(job, hasFindingsOf(f)) : null);
+}
+
+/* `density` comes from the band the card is drawn in (WS_BANDS), not from the card itself — the
+ * same workspace is worth a full card under "Needs you" and a one-liner under "Waiting on others". */
+function featureCard(f, job, density = 'full') {
   const r = summaryReadiness(f);
   const kind = f.kind || 'spec';
   const metaBits = [];
@@ -2961,27 +3084,30 @@ function featureCard(f, job) {
   if (!(isPrKind && lr)) metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
 
   // A re-run on a workspace that already has findings reads as "re-reviewing".
-  const hasFindings = (r.openBySeverity && Object.values(r.openBySeverity).some(Boolean))
-    || (f.lastRoundAt || (f.rounds && f.rounds.length));
+  const hasFindings = hasFindingsOf(f);
   const busyState = job
     ? (job.needsInput && job.status !== 'error' ? 'needs' : (isStaleJob(job) ? 'stale' : job.status))
     : null;
   const busyClass = job ? ` fc-busy fc-busy-${cssSafe(busyState)}` : '';
+  const cls = `card feature-card ${f.status === 'done' ? 'fc-done' : ''}${busyClass}`.trim();
+  const href = `#/feature/${encodeURIComponent(f.id)}`;
 
-  const card = h('a', { class: `card feature-card ${f.status === 'done' ? 'fc-done' : ''}${busyClass}`.trim(), href: `#/feature/${encodeURIComponent(f.id)}` },
-    h('div', { class: 'fc-top' },
-      h('div', { class: 'fc-titlewrap' },
-        h('div', { class: 'fc-title' }, f.title || f.id),
-        h('div', {}, statusChip(f.status)),
+  const card = density === 'compact'
+    ? compactCard(f, job, categoryOf(f, job), cls, href)
+    : h('a', { class: cls, href },
+      h('div', { class: 'fc-top' },
+        h('div', { class: 'fc-titlewrap' },
+          h('div', { class: 'fc-title' }, f.title || f.id),
+          h('div', {}, statusChip(f.status)),
+        ),
+        dialEl(r.score, r.gate, 64, 'dial-sm'),
       ),
-      dialEl(r.score, r.gate, 64, 'dial-sm'),
-    ),
-    job ? cardJobRow(job, hasFindings) : (f.awaitingAuthor ? cardReviewRow(f) : null),
-    // Reviewed-vs-updated stamps: on a PR card this is what tells you a re-review is due.
-    reviewStampsRow(f, kind, { compact: true, cls: 'review-stamps fc-stamps' }),
-    sevCountsRow(r.openBySeverity),
-    metaBits.length ? h('div', { class: 'fc-meta' }, metaBits) : null,
-  );
+      job ? cardJobRow(job, hasFindings) : (f.awaitingAuthor ? cardReviewRow(f) : null),
+      // Reviewed-vs-updated stamps: on a PR card this is what tells you a re-review is due.
+      reviewStampsRow(f, kind, { compact: true, cls: 'review-stamps fc-stamps' }),
+      sevCountsRow(r.openBySeverity),
+      metaBits.length ? h('div', { class: 'fc-meta' }, metaBits) : null,
+    );
 
   const label = f.title || f.id;
   const wrap = h('div', { class: 'fc-wrap' });

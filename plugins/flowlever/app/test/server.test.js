@@ -1338,3 +1338,125 @@ test('activity flagged as author-responded moves a waiting workspace to author-r
   const after = (await (await fetch(`${base}/api/features?kind=pr-review`)).json()).find((r) => r.id === 'state-responded');
   assert.equal(after.state, 'author-responded');
 });
+
+/* U2: the kind sections draw four ordered bands. The renderer is browser code the Node suite
+ * cannot import, so these are source assertions — but they pin the properties that would actually
+ * break it: the order must be expressed once (the DECIDE_KEYS failure mode), the browser's
+ * taxonomy must agree with the ledger's, an unknown state must fall back rather than crash, and an
+ * empty band must not be drawn. The rendering itself is verified in a real browser. */
+function readUi() { return fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8'); }
+
+/* Parses WS_BANDS/WS_STATES out of web/app.js. Reading the real tables rather than restating them
+ * here is the point: a test carrying its own copy of the order is the very duplication it exists
+ * to forbid. */
+function wsTables(ui) {
+  const bandsSrc = ui.match(/const WS_BANDS = \[[\s\S]*?\n\];/);
+  const statesSrc = ui.match(/const WS_STATES = \[[\s\S]*?\n\];/);
+  assert.ok(bandsSrc, 'web/app.js must declare WS_BANDS as the single source of band order');
+  assert.ok(statesSrc, 'web/app.js must declare WS_STATES as the single source of state rank');
+  const bands = [...bandsSrc[0].matchAll(/\{\s*key:\s*'([^']+)',\s*label:\s*'([^']+)',\s*density:\s*'([^']+)'/g)]
+    .map((m) => ({ key: m[1], label: m[2], density: m[3] }));
+  const states = [...statesSrc[0].matchAll(/\{\s*key:\s*'([^']+)',\s*band:\s*'([^']+)',\s*label:\s*'([^']+)'/g)]
+    .map((m) => ({ key: m[1], band: m[2], label: m[3] }));
+  assert.equal(bands.length, 3, 'WS_BANDS must parse as three bands');
+  assert.ok(states.length >= 9, 'WS_STATES must parse as the full state list');
+  return { bands, states, bandsSrc: bandsSrc[0], statesSrc: statesSrc[0] };
+}
+
+test('U2: WS_BANDS/WS_STATES are the only place band order and rank are expressed', () => {
+  const ui = readUi();
+  const { bands, states, statesSrc } = wsTables(ui);
+
+  // Rank is the index. A `rank:` field would be a second copy of the order to keep in step, which
+  // is the exact drift the one-table rule exists to prevent.
+  assert.ok(!/\brank\s*:/.test(statesSrc),
+    'WS_STATES must not carry an explicit rank — position in the array IS the rank');
+  const bandKeys = bands.map((b) => b.key);
+  for (const s of states) {
+    assert.ok(bandKeys.includes(s.band), `WS_STATES "${s.key}" names a band WS_BANDS doesn't define`);
+  }
+  // Bands must occupy contiguous runs, or "iterate bands, sort by rank" would draw a card above a
+  // higher-ranked sibling in the same band.
+  const runs = states.map((s) => s.band).filter((b, i, a) => b !== a[i - 1]);
+  assert.deepEqual(runs, [...new Set(runs)], 'each band must be one contiguous run of WS_STATES');
+
+  const grid = fnBody(ui, 'function sectionGrid(');
+  assert.match(grid, /for \(const band of WS_BANDS\)/,
+    'sectionGrid must walk WS_BANDS, not a hand-listed set of bands');
+  assert.match(grid, /wsState\(a\.cat\)\.rank - wsState\(b\.cat\)\.rank/,
+    'rank must come from the WS_STATES table, not a parallel comparator');
+  for (const b of bands) {
+    assert.ok(!grid.includes(`'${b.key}'`),
+      `sectionGrid must not name the "${b.key}" band itself — that is a second copy of the order`);
+    assert.ok(!grid.includes(`'${b.label}'`), `sectionGrid must not hand-write the "${b.label}" header`);
+  }
+  // Density is the band's property, read from the table and handed to the card.
+  assert.match(grid, /band\.density/, 'the card density must come from the band table');
+  assert.match(fnBody(ui, 'function featureCard('), /density === 'compact'/,
+    'featureCard must branch on the density the band gave it');
+
+  // One index built from the table, and exactly one.
+  const indexSites = (ui.match(/WS_STATES\.map\(/g) || []).length;
+  assert.equal(indexSites, 1, 'WS_STATE_INDEX must be the single derivation of WS_STATES');
+});
+
+test('U2: the browser band table and the ledger WORKSPACE_STATES are one taxonomy', () => {
+  const { states } = wsTables(readUi());
+  const byKey = new Map(states.map((s) => [s.key, s]));
+  const server = new Map(ledger.WORKSPACE_STATES.map((s) => [s.state, s]));
+
+  // Every non-job state the browser knows must be a real server state, in the SAME band. A state
+  // banded one way in the core and another in the UI is two taxonomies wearing one name.
+  for (const s of states) {
+    if (s.key.startsWith('job-')) continue;   // the live-runner states are the browser's own
+    const srv = server.get(s.key);
+    assert.ok(srv, `web/app.js WS_STATES has "${s.key}", which ledger.js does not serve`);
+    assert.equal(s.band, srv.band, `"${s.key}" lands in a different band in the browser than in the ledger`);
+  }
+  // And every state the server can serve must have somewhere to go. `done` is the one exception:
+  // it keeps the collapsed Done disclosure instead of a band.
+  for (const srv of ledger.WORKSPACE_STATES) {
+    if (srv.state === 'done') continue;
+    assert.ok(byKey.has(srv.state),
+      `ledger.js serves "${srv.state}" but web/app.js has no band for it — it would render unlabelled`);
+  }
+  assert.ok(!byKey.has('done'), 'done must NOT be a band — it keeps its collapsed disclosure');
+});
+
+test('U2: categoryOf falls back instead of crashing on a missing or unknown state', () => {
+  const ui = readUi();
+  const { states } = wsTables(ui);
+  const body = fnBody(ui, 'function categoryOf(');
+
+  // A summary from an older cockpit carries no `state` at all, and an unknown word must not
+  // produce an unlabelled band — the lookup is guarded and the fallback is a real WS_STATES key.
+  assert.match(body, /WS_STATE_INDEX\.has\(f && f\.state\) \? f\.state : WS_FALLBACK_STATE/,
+    'categoryOf must check the state against the table before trusting it, and null-guard `f`');
+  const fallback = ui.match(/const WS_FALLBACK_STATE = '([^']+)';/);
+  assert.ok(fallback, 'WS_FALLBACK_STATE must be declared');
+  assert.ok(states.some((s) => s.key === fallback[1]),
+    `the fallback "${fallback[1]}" must itself be a WS_STATES key, or the fallback renders no band`);
+  // wsState() is the other half of the same guard: an unknown key still yields a labelled entry.
+  assert.match(fnBody(ui, 'function wsState('), /\|\| WS_STATE_INDEX\.get\(WS_FALLBACK_STATE\)/,
+    'wsState must never return undefined — the renderer reads .band and .rank off it');
+
+  // A live job outranks the workspace's own state, and the three "a human must unstick this"
+  // job conditions must stay in one branch: an errored job banded as "in progress" is the lie.
+  assert.match(body, /job\.status === 'error' \|\| isStaleJob\(job\)/,
+    'errored and stalled jobs must share the attention branch');
+  assert.ok(!/function isStaleJob/.test(body), 'categoryOf must reuse isStaleJob, not re-derive it');
+});
+
+test('U2: an empty band is not rendered', () => {
+  const grid = fnBody(readUi(), 'function sectionGrid(');
+  assert.match(grid, /if \(!rows\.length\) continue;/,
+    'a band with no cards must be skipped entirely — never a header with zero under it');
+  // The pre-band behaviour at the two edges must survive: nothing at all → the empty state,
+  // nothing active but something done → the note above the disclosure.
+  assert.match(grid, /if \(!bands\.length && !doneCards\.length\) return sectionEmpty\(kind\);/,
+    'an utterly empty section must still return sectionEmpty(kind)');
+  assert.match(grid, /No active workspaces — everything below is complete\./,
+    'bands empty but Done non-empty must keep the all-done note');
+  assert.match(grid, /doneDisclosure\(kind, doneCards, 'features-grid done-disc-body'\)/,
+    'the Done disclosure and its date sort must be left exactly as they were');
+});
