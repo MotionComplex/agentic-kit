@@ -1562,9 +1562,11 @@ test('U2: a full card names its state, so the band that demands action says the 
   // BELOW them were the only ones labelled.
   assert.match(card, /cat \? wsStatePill\(cat\) : null/,
     'a full card must render the state pill when it was given a category');
-  assert.match(card, /statusChip\(f\.status\)/,
-    'and keep the lifecycle chip — "is this workspace still open" is a different question from '
-    + '"what is it waiting on"');
+  // The lifecycle chip is kept, not deleted — "where is this workspace in its life" is a different
+  // question from "what is it waiting on" — but it is drawn through the gate that suppresses the
+  // one value it always held inside a band (`draft`). See the U5 test for what the gate lets past.
+  assert.match(card, /statusChipIfMeaningful\(f\.status\)/,
+    'and keep the lifecycle chip, gated so it draws only when it discriminates');
 
   // .chip.ws-pill-needs-you was unreachable dead CSS while only compact cards wore a pill and no
   // needs-you card was ever compact. Every band must have a reachable tint.
@@ -1728,7 +1730,7 @@ test('U3: the inbox skips an empty band and keeps both edge cases', () => {
  * that it SURVIVED. These pin ordering and control flow — which branch returns before which write —
  * so breaking the property breaks the test. The rendering itself is verified in a real browser. */
 
-test('U4: a PR number may only bind a PR-kind workspace', () => {
+test('U4: a PR number may only bind a workspace of the job\'s OWN kind', () => {
   const ui = readUi();
   const bind = codeOnly(fnBody(ui, 'function jobBindsTo('));
 
@@ -1736,9 +1738,19 @@ test('U4: a PR number may only bind a PR-kind workspace', () => {
   // pr-review of PR 7001 bound `spec-7001-checkout`: that spec row drew "Re-reviewing" and was
   // banded into "In progress" by a runner that had never heard of it. Requiring the job to be
   // PR-shaped was only half the rule; the workspace has to be too.
-  const gate = bind.indexOf("f.kind !== 'pr-review'");
+  //
+  // And "a PR kind" is not narrow enough either. One PR can carry BOTH a pr-review workspace and a
+  // pr-respond one; a membership test binds each job to both, which puts "Re-reviewing" on the row
+  // where you are answering reviewer threads and lets one job claim two cards. The gate must be
+  // EQUALITY — a job's action names the kind of workspace it acts on.
+  const gate = bind.indexOf('job.action !== f.kind');
   const match = bind.indexOf('prNumber(f)');
-  assert.ok(gate > -1, 'jobBindsTo must reject a non-PR workspace before it compares PR numbers');
+  assert.ok(gate > -1,
+    'the kind gate must compare the job action to the feature kind, not test membership of a set: '
+    + "a `pr-respond` job binding a `pr-review` workspace of the same PR is the bug this closes");
+  assert.ok(!/f\.kind !== 'pr-review'|f\.kind !== 'pr-respond'/.test(bind),
+    'and the old "is it any PR kind" membership test must be gone, not merely joined — two gates '
+    + 'means the looser one is still deciding something');
   assert.ok(match > gate, 'the kind gate must GUARD the prId match — after it, it guards nothing');
 
   // The wsId arm is an exact id match and stays kind-agnostic by design: an `apply` names its
@@ -1853,4 +1865,272 @@ test('U4: the strip accounts for the jobs it is not listing', () => {
     'defaulted, so the strips that show the whole queue read exactly as they did');
   assert.ok(!/unbound = unbound\.filter|unbound\.filter\(/.test(poll),
     'the runner-up must be labelled, never suppressed');
+});
+
+/* U5 — the loose ends. Two shapes of test here, and the difference is deliberate.
+ *
+ * Where a rule is PURE it is lifted out of web/app.js and RUN (fnSource + liftUi below), because a
+ * source assertion can only ever say the code looks right. Where a rule is inseparable from the DOM
+ * or from module state it stays a source assertion — and then it pins ORDERING and CONTROL FLOW,
+ * never the presence of a constructed string. That distinction is the lesson of
+ * `/class: 'btn-icon ir-delete'/`, which was green throughout the period the delete-confirm was
+ * being destroyed every four seconds: it proved the button was built, never that it survived.
+ * What the source assertions cannot reach is verified in a real browser. */
+
+/* Like fnBody, but keeps the signature, so the text can be evaluated as a function. */
+function fnSource(src, decl) {
+  const at = src.indexOf(decl);
+  assert.ok(at > -1, `web/app.js must declare ${decl}`);
+  const open = src.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return src.slice(at, i + 1);
+  }
+  throw new Error(`unbalanced braces reading ${decl}`);
+}
+
+/* Lifts top-level declarations out of web/app.js and evaluates them, so a pure rule can be tested
+ * by running it on real inputs instead of by pattern-matching its text. `decls` entries are either
+ * `function <name>(` (lifted whole from the file) or a literal line to include verbatim; anything
+ * the lifted code closes over is named in `env`. The env is itself a guard: a rule that quietly
+ * grows a dependency on the DOM or on `state` stops lifting here rather than drifting unnoticed. */
+function liftUi(ui, decls, env = {}) {
+  const src = decls.map((d) => (d.startsWith('function ') ? fnSource(ui, d) : d)).join('\n');
+  const names = decls.filter((d) => d.startsWith('function '))
+    .map((d) => d.slice('function '.length, d.indexOf('(')));
+  const keys = Object.keys(env);
+  // eslint-disable-next-line no-new-func
+  return new Function(...keys, `${src}\nreturn { ${names.join(', ')} };`)(...keys.map((k) => env[k]));
+}
+
+test('U5: a PR job binds only the workspace of its own kind', () => {
+  const ui = readUi();
+  // jobBindsTo reads nothing but its two arguments and prNumber, so it can be run rather than read.
+  const { jobBindsTo } = liftUi(ui, ['function prNumber(', 'function jobBindsTo(']);
+
+  // The two workspaces one pull request can carry at the same time. They are different work on
+  // different findings: on the first you are the reviewer, on the second you are the author.
+  const review = { id: 'pr-7001-checkout', kind: 'pr-review', title: 'Checkout rewrite #7001' };
+  const respond = { id: 'pr-7001-checkout-respond', kind: 'pr-respond', title: 'Checkout rewrite #7001' };
+
+  // The regression: a pr-respond job used to bind the pr-review workspace (and the reverse), so the
+  // runner's verb landed on the wrong row — "Re-reviewing" printed on the workspace where you are
+  // answering reviewer threads — and one job claimed two cards, making a band count name more
+  // workspaces than the band held.
+  assert.equal(jobBindsTo({ id: 'j1', action: 'pr-respond', prId: 7001 }, review), false,
+    'a pr-respond job must not bind the pr-review workspace for the same PR');
+  assert.equal(jobBindsTo({ id: 'j2', action: 'pr-review', prId: 7001 }, respond), false,
+    'nor a pr-review job the pr-respond workspace');
+  // And each still binds its own — the narrowing must not cost the binding that was right.
+  assert.equal(jobBindsTo({ id: 'j3', action: 'pr-respond', prId: 7001 }, respond), true);
+  assert.equal(jobBindsTo({ id: 'j4', action: 'pr-review', prId: 7001 }, review), true);
+  assert.equal(jobBindsTo({ id: 'j5', action: 'pr-review', prId: '7001' }, review), true,
+    'and the ids compare as strings, because the queue and the title carry different types');
+
+  // The earlier half of the same rule, still holding: prNumber() falls back to any digit run in any
+  // id, so an ungated match let a PR job bind a spec workspace that merely contains the number.
+  assert.equal(jobBindsTo({ id: 'j6', action: 'pr-review', prId: 7001 },
+    { id: 'spec-7001-checkout', kind: 'spec' }), false,
+  'a PR job must never bind a spec workspace whose id merely contains the number');
+
+  // The wsId arm stays exact and kind-agnostic: it names one workspace outright, and an `apply` on
+  // a spec has no other way to find its target. Narrowing this arm by kind would break Apply.
+  assert.equal(jobBindsTo({ id: 'j7', action: 'apply', wsId: 'spec-7001-checkout' },
+    { id: 'spec-7001-checkout', kind: 'spec' }), true);
+  assert.equal(jobBindsTo({ id: 'j8', action: 'apply', wsId: 'pr-7001-checkout' }, review), true);
+  assert.equal(jobBindsTo({ id: 'j9', action: 'apply', wsId: 'pr-7001-checkout' }, respond), false,
+    'and it is an id match, not a PR match — an apply names one workspace');
+  // A non-PR action with no wsId can never reach the number comparison at all.
+  assert.equal(jobBindsTo({ id: 'j10', action: 'apply', prId: 7001 }, review), false);
+  assert.equal(jobBindsTo({ id: 'j11', action: 'poll', prId: 7001 }, review), false);
+  // Defensive edges the callers actually hand it: a missing side, and a PR-less workspace.
+  assert.equal(jobBindsTo(null, review), false);
+  assert.equal(jobBindsTo({ id: 'j12', action: 'pr-review', prId: 7001 }, null), false);
+  assert.equal(jobBindsTo({ id: 'j13', action: 'pr-review' }, review), false,
+    'a PR job with no prId and no wsId binds nothing — it must not fall through to a match');
+});
+
+test('U5: a deleted workspace is pruned from the cache the poller repaints from', () => {
+  const ui = readUi();
+
+  // Both list views cache their rows and repaint from that cache on every tick that sees a change,
+  // and each cache is refilled only by a full re-render. Removing the element alone therefore
+  // un-deletes the workspace on the next live job: the row comes back, linking to a 404. This is
+  // DOM-and-module-state code, so it is pinned by ordering — the prune must sit on the success
+  // path, after the server confirmed, and never in the catch.
+  for (const [owner, host, cache, key] of [
+    ['the Home inbox', 'function inboxRow(', 'state.home.rows =', 'r.id'],
+    ['a section card', 'function featureCard(', 'state.section.features =', 'f.id'],
+  ]) {
+    const del = codeOnly(fnBody(fnBody(ui, host), 'async function doDelete()'));
+    const sent = del.indexOf("method: 'DELETE'");
+    const pruned = del.indexOf(cache);
+    const caught = del.indexOf('} catch');
+    assert.ok(sent > -1, `${owner} must still issue the DELETE`);
+    assert.ok(pruned > -1, `${owner} must prune its cache when the delete succeeds`);
+    assert.ok(pruned > sent,
+      `${owner} must prune only AFTER the server confirmed — pruning first hides a workspace that `
+      + 'is still there when the request fails');
+    assert.ok(caught > -1 && pruned < caught,
+      `${owner} must prune on the success path, not in the failure handler`);
+    assert.ok(del.includes(`!== ${key}`),
+      `${owner} must drop exactly the deleted id from the cache, not clear it`);
+  }
+
+  // And the prune is load-bearing only because these two still repaint from the caches. If either
+  // stopped, the assertions above would be guarding nothing.
+  assert.match(codeOnly(fnBody(ui, 'function renderHomeInbox(')), /state\.home && state\.home\.rows/,
+    'the inbox must still draw from state.home.rows — that is what makes a stale entry visible');
+  assert.match(codeOnly(fnBody(ui, 'function startSectionRequestsPoll(')),
+    /sectionGrid\(kind, state\.section\.features, rel\)/,
+    'and the section poll from state.section.features');
+});
+
+test('U5: the section poll asks the binding predicate instead of restating it', () => {
+  const ui = readUi();
+  const poll = codeOnly(fnBody(ui, 'function startSectionRequestsPoll('));
+
+  // `r.action === 'apply' && r.wsId && wsIds.has(r.wsId)` was the wsId arm of jobBindsTo, copied
+  // out one function beyond the guarded zone. It is the exact shape that shipped wrong twice: the
+  // predicate learns an arm, the copy does not, and two surfaces disagree about which jobs exist.
+  assert.ok(!/wsIds/.test(poll), 'the poll must not build its own set of workspace ids');
+  assert.ok(!/\.wsId\b/.test(poll),
+    'nor read wsId at all — which field decides a binding is jobBindsTo\'s business alone');
+  assert.match(poll, /jobBindsTo\(/, 'it must go through the shared predicate');
+
+  // Behaviour preserved exactly, which is the whole requirement: this is a RELEVANCE filter, not
+  // the binding rule. Same-kind jobs reach the grid whether or not they bind a workspace — that is
+  // what lets an in-flight review with no workspace yet draw its pending placeholder — and the
+  // predicate guards only the `apply` arm, where the old copy sat.
+  const kindArm = poll.indexOf('r.action === kind');
+  const applyArm = poll.indexOf("r.action === 'apply'");
+  const asked = poll.indexOf('jobBindsTo(');
+  assert.ok(kindArm > -1, 'every job of this section\'s own kind must still be relevant to it');
+  assert.ok(applyArm > -1 && asked > applyArm,
+    'and the predicate must guard the apply arm — asking it of the kind arm would drop the '
+    + 'workspace-less reviews that placeholders are made of');
+  assert.ok(kindArm < applyArm, 'with the unconditional kind arm first, as it was');
+
+  // The filter must be computed before the grid is drawn from it, or it decides nothing.
+  const relAt = poll.indexOf('const rel =');
+  const drawAt = poll.indexOf('sectionGrid(');
+  assert.ok(relAt > -1 && drawAt > relAt, 'the grid must be drawn from the filter, not beside it');
+
+  // No copy left anywhere. A caller may ask "is this even a PR job" (a bare truthiness read), but
+  // comparing an id or a PR number to a workspace is the predicate's job and only its job.
+  for (const fn of ['startSectionRequestsPoll', 'startHomeRequestsPoll', 'renderHomeInbox',
+    'jobForFeature', 'sectionGrid']) {
+    const body = codeOnly(fnBody(ui, `function ${fn}(`));
+    assert.ok(!/\.wsId\b/.test(body), `${fn} must not read wsId — one rule, or the call sites drift`);
+    assert.ok(!/prId\s*===|String\([^)]*prId/.test(body),
+      `${fn} must not compare prId to a workspace — that comparison lives in jobBindsTo`);
+  }
+});
+
+test('U5: the lifecycle chip is drawn only when it says something', () => {
+  const ui = readUi();
+  const card = codeOnly(fnBody(ui, 'function featureCard('));
+
+  // One spelling of the default, shared by the chip's own fallback and by the gate. Two copies and
+  // the gate starts hiding a value the chip would have rendered, or the reverse.
+  const defaultDecl = ui.match(/^const DEFAULT_STATUS = '[^']+';$/m);
+  assert.ok(defaultDecl, 'the default lifecycle value must be declared once, at module scope');
+  assert.equal((ui.match(/const DEFAULT_STATUS\s*=/g) || []).length, 1,
+    'and exactly once — the gate and the chip must read the same word');
+  assert.match(codeOnly(fnBody(ui, 'function statusChip(')), /status \?\? DEFAULT_STATUS/,
+    'statusChip must fall back to that same constant rather than its own literal');
+
+  // The gate is pure, so run it. `draft` — what ingest writes and every active workspace carries —
+  // is suppressed; every other value still reaches the real chip. This is a suppression, not a
+  // deletion: auditing / reworking / ready / implementing arrive through
+  // POST /api/features/:id/status, and `done` is what the Done disclosure shows.
+  const drawn = [];
+  const { statusChipIfMeaningful } = liftUi(ui,
+    [defaultDecl[0], 'function statusChipIfMeaningful('],
+    { statusChip: (s) => { drawn.push(s); return { chip: String(s) }; } });
+
+  assert.equal(statusChipIfMeaningful('draft'), null, '`draft` must draw nothing');
+  assert.equal(statusChipIfMeaningful(undefined), null,
+    'and so must a missing status, which statusChip itself reads as `draft`');
+  assert.equal(statusChipIfMeaningful(null), null);
+  assert.deepEqual(drawn, [], 'none of those may reach the chip at all');
+  for (const s of ['done', 'auditing', 'reworking', 'ready', 'implementing']) {
+    assert.ok(statusChipIfMeaningful(s), `"${s}" discriminates and must still draw`);
+  }
+  assert.deepEqual(drawn, ['done', 'auditing', 'reworking', 'ready', 'implementing'],
+    'and must be rendered by the real chip, unchanged — the gate decides whether, never what');
+
+  // The card goes through the gate, and must not keep an unguarded call beside it.
+  assert.match(card, /statusChipIfMeaningful\(f\.status\)/,
+    'featureCard must draw the lifecycle chip through the gate');
+  assert.ok(!/statusChip\(f\.status\)/.test(card),
+    'and never past it — one unguarded call puts `draft` back on every active card');
+  // The pill it sits next to is the thing that actually discriminates, and it stays.
+  assert.match(card, /cat \? wsStatePill\(cat\) : null/,
+    'the state pill must be untouched — it is what the chip was crowding');
+});
+
+test('U5: the Home subtitle agrees with its own count', () => {
+  const ui = readUi();
+  // Pure string assembly, so run it. plural() inflects the noun only; the verb was left at the
+  // plural, so the landing screen read "1 workspace need you" — and one is the ordinary case.
+  const { homeSubtitle } = liftUi(ui, ['function plural(', 'function homeSubtitle(']);
+
+  assert.equal(homeSubtitle(1, 1), '1 workspace needs you · 1 workspace total');
+  assert.equal(homeSubtitle(7, 1), '1 workspace needs you · 7 workspaces total');
+  // The n>1 wording is the one that was already right, and it must be untouched.
+  assert.equal(homeSubtitle(9, 3), '3 workspaces need you · 9 workspaces total');
+  assert.equal(homeSubtitle(2, 2), '2 workspaces need you · 2 workspaces total');
+  // Nothing needing you takes the other branch entirely, singular included.
+  assert.equal(homeSubtitle(1, 0), 'All caught up · 1 workspace under watch');
+  assert.equal(homeSubtitle(4, 0), 'All caught up · 4 workspaces under watch');
+});
+
+test('U5: a band names itself, and its name carries its size', () => {
+  const ui = readUi();
+  const loop = codeOnly(fnBody(ui, 'function bandSections('));
+
+  // The <section> had no accessible name, so three bands appeared in a landmark list as three
+  // anonymous regions; and the count sat in a span OUTSIDE the <h2>, so heading navigation
+  // announced "Needs you" without the one number that decides whether you enter the band.
+  assert.match(loop, /'aria-labelledby': headId/,
+    'the band section must be named by its own heading');
+  const mint = loop.indexOf('const headId');
+  const use = loop.indexOf("'aria-labelledby': headId");
+  const onHead = loop.indexOf('id: headId');
+  assert.ok(mint > -1 && use > mint && onHead > mint,
+    'the id must be minted before it is referenced and before it is placed');
+
+  // The count must be a CHILD of the heading, not its sibling — that is the whole fix for heading
+  // navigation, and reverting it would leave aria-labelledby resolving to a nameless label.
+  const h2At = loop.indexOf("h('h2'");
+  const countAt = loop.indexOf("h('span', { class: 'band-count' }");
+  assert.ok(h2At > -1 && countAt > h2At, 'the count must come after the h2 opens');
+  assert.ok(!/\}, band\.label\),/.test(loop),
+    'the h2 must not close before the count — a sibling span is the arrangement being replaced');
+
+  // A counter, not the band key: two banded lists on one page would mint the same key-derived id
+  // twice, and a duplicate id makes aria-labelledby silently resolve to the wrong heading.
+  assert.match(loop, /\+\+bandHeadSeq/, 'each band head must get an id of its own');
+  assert.ok(!/band-head-\$\{cssSafe\(band\.key\)\}/.test(loop),
+    'and it must not be derived from the band key, which repeats across lists');
+
+  // Semantics only: the header must stay the quiet divider it is. Making it focusable or clickable
+  // would put it in the tab order beside the Done disclosure, which IS a control.
+  assert.ok(!/role:\s*'button'|tabindex|onclick/.test(loop),
+    'the band header is structure, not a control — it must gain no interactive affordance');
+
+  // The stylesheet has to hold the count's own metrics now that it inherits from the heading, or
+  // this tree change becomes a visible one.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
+  const countRule = css.slice(css.indexOf('.band-count'), css.indexOf('.band-count') + 260);
+  assert.match(countRule, /line-height:/,
+    'the count must pin its line-height — inheriting the heading\'s 1.2 shortens the whole header');
+  assert.match(countRule, /letter-spacing:/,
+    'and restate its tracking, or it picks up the heading\'s uppercase .07em and pads "· N"');
+  assert.ok(!/letter-spacing:\s*(inherit|\.07em|0\.07em)/.test(countRule),
+    'and that restatement must not be the heading\'s own value');
+  assert.match(css.slice(css.indexOf('.band-label {')), /^[^}]*display: flex/,
+    'and the heading must become the flex row .band-head was, so the gap is unchanged');
 });

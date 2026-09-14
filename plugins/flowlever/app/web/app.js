@@ -458,9 +458,25 @@ async function setFeatureStatus(status) {
   }
 }
 
+/* The lifecycle value a workspace carries until something moves it — and the value `statusChip`
+ * itself falls back to, so the two cannot drift apart. */
+const DEFAULT_STATUS = 'draft';
 function statusChip(status) {
-  const s = String(status ?? 'draft');
+  const s = String(status ?? DEFAULT_STATUS);
   return h('span', { class: `chip status-${cssSafe(s)}` }, s);
+}
+/* The same chip, drawn only when it discriminates. Inside the bands every active workspace reads
+ * `draft` — the ingest default — so the chip was a word repeated on every card beside the state
+ * pill that actually says what the workspace is waiting on, and pure width: `.fc-chips` wraps, so
+ * "Checking for updates" plus "draft" cost a second line on a narrow card for no information.
+ *
+ * Deliberately a suppression and not a deletion. `auditing`, `reworking`, `ready` and
+ * `implementing` are all reachable through POST /api/features/:id/status even though the real
+ * corpus has none today, and each of them IS news next to the state pill. `done` is news too, and
+ * still draws for the same reason: the Done disclosure's cards are drawn by featureCard like any
+ * other, and `done` is not the default, so the only value this hides is the one that said nothing. */
+function statusChipIfMeaningful(status) {
+  return String(status ?? DEFAULT_STATUS) === DEFAULT_STATUS ? null : statusChip(status);
 }
 
 function gateBadge(gate) {
@@ -2667,6 +2683,12 @@ function inboxRow(r, job = null, density = 'full', cat = null) {
   async function doDelete() {
     try {
       await api(`/api/features/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+      // Taking the row out of the DOM is not enough: the inbox is repainted from state.home.rows
+      // on every tick that sees a change, and that cache is only refilled by renderHome(). Leave
+      // the deleted id in it and the NEXT real change — a job starting anywhere on the page —
+      // paints the workspace you just deleted straight back onto the screen, linking to a 404.
+      // Prune where the delete actually succeeded, so the cache and the server agree from here on.
+      if (state.home) state.home.rows = (state.home.rows || []).filter((row) => row.id !== r.id);
       wrap.remove();
       toast(`Deleted "${label}"`, 'success');
     } catch (e) {
@@ -2766,6 +2788,12 @@ function doneDisclosure(key, pairs, bodyClass) {
     body);
 }
 
+/* Ids for the band headings, so a <section> can point at the one that names it. A counter rather
+ * than the band key: two banded lists on one page (a section grid and, later, anything else) would
+ * mint the same key-derived id twice, and a duplicate id makes aria-labelledby resolve to whichever
+ * came first — the wrong heading, silently. */
+let bandHeadSeq = 0;
+
 /* The banding every list view draws: WS_BANDS top to bottom, WS_STATES rank within a band, a
  * header carrying its own count, and no header over an empty band. ONE implementation, on purpose
  * — a second copy of this loop is how the kind sections and the inbox would come to disagree about
@@ -2789,10 +2817,22 @@ function bandSections(entries, render, itemsClass) {
     // The density rides out as a class so the stylesheet can space a band by how much card it
     // holds without keeping its own list of which bands are compact — that second list is the
     // WS_BANDS/band-map drift again, just spelled in CSS, and it survives a `density` flip here.
-    bands.push(h('section', { class: `band band-${cssSafe(band.key)} band-density-${cssSafe(band.density)}` },
+    // The count moves INSIDE the <h2> and the <section> is named by that heading. Two things were
+    // wrong and both are the same omission: the section had no accessible name at all, so a screen
+    // reader's landmark/region list held three anonymous entries; and the "· 4" sat in a sibling
+    // span, so jumping heading-to-heading announced "Needs you" with no idea whether that meant one
+    // workspace or nine — which is the single most useful thing a triage band can tell you before
+    // you decide to enter it. Sighted readers already got the number for free, right beside the
+    // label. This is the same information, delivered through the tree instead of the pixels; the
+    // rendering is unchanged (style.css keeps the count's own metrics so nothing shifts).
+    const headId = `band-head-${++bandHeadSeq}`;
+    bands.push(h('section', {
+      class: `band band-${cssSafe(band.key)} band-density-${cssSafe(band.density)}`,
+      'aria-labelledby': headId,
+    },
       h('div', { class: 'band-head' },
-        h('h2', { class: 'band-label' }, band.label),
-        h('span', { class: 'band-count' }, `· ${rows.length}`)),
+        h('h2', { class: 'band-label', id: headId }, band.label,
+          h('span', { class: 'band-count' }, `· ${rows.length}`))),
       h('div', { class: itemsClass }, rows.map((e) => render(e, band.density)))));
   }
   return bands;
@@ -2803,8 +2843,12 @@ function bandSections(entries, render, itemsClass) {
  * blind to a PR finding carrying only a suggestion, so the header undercounted exactly the PR rows
  * it was meant to be about. The band is the same answer the rows below it are grouped by. */
 function homeSubtitle(total, needsYou) {
+  // plural() inflects the noun and nothing else, so the verb has to agree separately or the very
+  // first line of the landing screen reads "1 workspace need you" — and n=1 is the ordinary case
+  // on a quiet morning, not an edge one. The n>1 wording is untouched.
   return needsYou
-    ? `${plural(needsYou, 'workspace', 'workspaces')} need you · ${plural(total, 'workspace', 'workspaces')} total`
+    ? `${plural(needsYou, 'workspace', 'workspaces')} ${needsYou === 1 ? 'needs' : 'need'} you`
+      + ` · ${plural(total, 'workspace', 'workspaces')} total`
     : `All caught up · ${plural(total, 'workspace', 'workspaces')} under watch`;
 }
 
@@ -3181,9 +3225,18 @@ function startSectionRequestsPoll(kind) {
   let lastDone = new Set();
   startPolling(`section:${kind}`, async (reqs) => {
     if (current.view !== 'section' || current.kind !== kind) return;
-    // Jobs relevant to this section: same-kind reviews + apply jobs targeting its workspaces.
-    const wsIds = new Set(state.section.features.map((f) => f.id));
-    const rel = reqs.filter((r) => r.action === kind || (r.action === 'apply' && r.wsId && wsIds.has(r.wsId)));
+    // Jobs relevant to this section: same-kind reviews (including ones with no workspace yet, which
+    // is what draws a pending placeholder) + apply jobs targeting a workspace this page draws.
+    //
+    // That second arm USED to be `r.wsId && wsIds.has(r.wsId)` — a hand-rolled copy of the wsId arm
+    // of jobBindsTo, sitting one function outside the guarded zone. It is the exact shape that has
+    // shipped wrong twice: the rule grows an arm (prId, and now same-kind), the copy does not, and
+    // the two surfaces disagree about which jobs exist. Ask the predicate instead. It answers
+    // identically for an `apply` today — the prId arm rejects every non-PR action — so this is one
+    // rule where there were two, not a change of behaviour.
+    const known = state.section.features;
+    const rel = reqs.filter((r) => r.action === kind
+      || (r.action === 'apply' && known.some((f) => jobBindsTo(r, f))));
     // The manual-refresh pass has no workspace of its own — it drives the Refresh button
     // instead of a card. An unscoped (`kind: null`) poll covers every PR section.
     renderRefreshZone($('#refresh-zone'), kind, pickPollJob(reqs, kind));
@@ -3322,9 +3375,10 @@ function featureCard(f, job, density = 'full', cat = null) {
           // The state pill leads, and it is the whole reason a full card is readable: without it
           // ready-to-post, needs-review, needs-rereview and author-responded drew identically —
           // the band that demands action said less about itself than the parked compact rows
-          // below it. statusChip stays because it answers a different question (is this workspace
-          // still open) from the pill (what is it waiting on).
-          h('div', { class: 'fc-chips' }, cat ? wsStatePill(cat) : null, statusChip(f.status)),
+          // below it. The lifecycle chip stays because it answers a different question (where is
+          // this workspace in its life) from the pill (what is it waiting on) — but only when it
+          // has an answer: `draft`, which every active card carried, discriminated nothing.
+          h('div', { class: 'fc-chips' }, cat ? wsStatePill(cat) : null, statusChipIfMeaningful(f.status)),
         ),
         dialEl(r.score, r.gate, 64, 'dial-sm'),
       ),
@@ -3359,6 +3413,12 @@ function featureCard(f, job, density = 'full', cat = null) {
   async function doDelete() {
     try {
       await api(`/api/features/${encodeURIComponent(f.id)}`, { method: 'DELETE' });
+      // The section grid has the same hole as the inbox: startSectionRequestsPoll redraws it from
+      // state.section.features every tick that changes anything, and that cache only refills when
+      // a job newly completes. Unpruned, the deleted card comes back on the next live job.
+      if (state.section) {
+        state.section.features = (state.section.features || []).filter((x) => x.id !== f.id);
+      }
       wrap.remove();
       toast(`Deleted "${label}"`, 'success');
     } catch (e) {
@@ -3451,13 +3511,21 @@ function jobBindsTo(job, f) {
   // workspace names that workspace and nothing else can answer to it.
   if (job.wsId && job.wsId === f.id) return true;
   if (job.action !== 'pr-review' && job.action !== 'pr-respond') return false;
-  // The job being PR-shaped is only half the question — the WORKSPACE has to be too. prNumber()
-  // falls back to "any digit run in the id" for any workspace at all, so without this a pr-review
-  // of PR 7001 binds `spec-7001-checkout`: that spec row drew "Re-reviewing" and was banded into
-  // "In progress" by a runner that has never heard of it. The kind sections never showed it because
-  // their poll pre-filters by `action === kind`; Home is the first surface that binds the whole
-  // queue, which is what made it reachable.
-  if (f.kind !== 'pr-review' && f.kind !== 'pr-respond') return false;
+  // The job being PR-shaped is only half the question — the WORKSPACE has to be the SAME shape,
+  // not merely a PR one. Two things break without the equality:
+  //
+  // prNumber() falls back to "any digit run in the id" for any workspace at all, so with no kind
+  // gate at all a pr-review of PR 7001 binds `spec-7001-checkout`: that spec row drew "Re-reviewing"
+  // and was banded into "In progress" by a runner that has never heard of it. And a gate that only
+  // asks "is this workspace a PR kind" still crosses the two PR kinds, which is the subtler loss:
+  // ONE pull request can carry both a `pr-review` workspace (you reviewing it) and a `pr-respond`
+  // one (you answering its reviewers), and they are different work on different findings. Binding
+  // across them puts the wrong verb on the wrong row — "Re-reviewing" on the workspace where you
+  // are replying to reviewer threads — and lets one job claim two cards, which is a band count
+  // naming more workspaces than the band holds.
+  //
+  // A job's action IS the kind of workspace it acts on, so equality is the whole rule.
+  if (job.action !== f.kind) return false;
   const pr = prNumber(f);
   return !!(job.prId && pr && String(job.prId) === String(pr));
 }

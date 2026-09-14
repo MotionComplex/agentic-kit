@@ -265,6 +265,15 @@ first" list drift, and the symptom is a card drawn in one band but sorted as if 
 Order is the contract: the first rule that matches claims the workspace. `done` wins outright, then
 `posting` (while the runner writes, the ledger's other stamps still describe the pre-post world).
 
+The `band` column is a **shared vocabulary**, not a private one. `web/app.js` keeps its own ordered
+table for the list views and layers extra, browser-only states (what a live runner is doing right
+now) into these same band names — so adding a state here, or moving one between bands, is a two-file
+change. `test/server.test.js` pins the agreement: every non-runner state the browser knows must be a
+state this table serves, in the *same* band, and every state served here except `done` must have a
+band there (`done` keeps a collapsed disclosure instead). A consumer that meets a `state` it doesn't
+recognise must fall back to a band rather than render it unlabelled — an older client reading a
+newer server is the case that makes this a contract and not a convention.
+
 `settled` is guarded: a workspace with any **live** finding (open/reworking, not posted, not applied, not
 `pending` — the same set `counts.open` reports) can never reach it, and falls to `needs-review` /
 `needs-rereview` on the same ever-posted split. Without the guard a finding with no `draft` and an empty

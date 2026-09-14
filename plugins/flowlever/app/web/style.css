@@ -283,18 +283,37 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
  * (The Done disclosure right below IS clickable, which is exactly why these must not look alike.) */
 .band-head { display: flex; align-items: center; gap: 8px; padding: 2px 2px 10px; }
 .band-head::after { content: ''; flex: 1; height: 1px; background: var(--line-soft); }
+/* The count lives INSIDE the <h2> so heading navigation announces the band's size along with its
+   name (web/app.js, bandSections). That is a tree change, not a design one, so the h2 becomes the
+   flex row .band-head used to be — same 8px gap, same centring — and the count below re-declares
+   the two things it would otherwise inherit from its new parent. */
 .band-label {
+  display: flex; align-items: center; gap: 8px;
   margin: 0; font-size: 11px; font-weight: 640; line-height: 1.2;
   text-transform: uppercase; letter-spacing: .07em; color: var(--fg-mute);
 }
-.band-count { font-size: 11px; font-weight: 500; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
+/* `line-height` and `letter-spacing` restate what the count inherited when it was a SIBLING of the
+   h2 — body's 1.55 and body's -0.005em. Taking the heading's instead would shorten the whole header
+   by ~4px (1.2 against 1.55 on the tallest item in the row) and pad "· N" by its .07em uppercase
+   tracking. Both are visible, and moving the count into the heading is meant to be invisible. */
+.band-count {
+  font-size: 11px; font-weight: 500; line-height: 1.55; letter-spacing: -0.005em;
+  color: var(--fg-mute); font-variant-numeric: tabular-nums;
+}
 /* The only band you must act on carries the brand accent — one tint, so it reads as first. */
 .band-needs-you .band-label { color: var(--accent-text); }
 /* Compact bands pack tighter: less air between rows that hold one line each. Keyed off the density
    the band emits, never off which bands happen to be compact today — a list of band names here is
    a second copy of WS_BANDS' `density` column, and flipping that column would leave the spacing
    behind on a band that no longer holds one-liners. Both containers the one band loop can draw
-   into, because the sections and the inbox are banded by the same code and must breathe alike. */
+   into, because the sections and the inbox are banded by the same code and must breathe alike.
+
+   8px, and chosen rather than inherited: it arrived as an unremarked 10px → 8px in the commit that
+   added the .inbox selector, so it is restated here with its reason. .inbox already sits at 10px in
+   its full-density form, so a compact override of 10px would be no override at all — the rule would
+   claim to pack the parked bands tighter while leaving the inbox exactly as loose as the band that
+   demands action. 8px is the smallest step that still reads as a gap between one-line rows, and it
+   is the only value that makes this rule true of BOTH containers it names. */
 .band-density-compact .features-grid,
 .band-density-compact .inbox { gap: 8px; }
 
