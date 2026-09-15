@@ -119,6 +119,23 @@ function findingError(f, idx) {
 
 // ---------- API handlers ----------
 
+// The "what's in this workspace" tally both list endpoints serve. It lives here, once, because
+// the two shapes are read side by side — an inbox row and a section card for the SAME workspace —
+// and a second copy of this loop would eventually disagree with the first about what counts as
+// what, which reads to the user as the cockpit contradicting itself.
+function findingCounts(findings) {
+  const counts = { toReview: 0, open: 0, reworking: 0, posted: 0, resolved: 0, waived: 0 };
+  for (const fd of findings) {
+    const live = fd.status === 'open' || fd.status === 'reworking';
+    // Posted findings are awaiting the author, not the reviewer: count them under `posted`,
+    // never as `reworking` or `toReview`, so the inbox stops re-surfacing what's already out.
+    if (live && fd.postedAt) { counts.posted += 1; continue; }
+    if (counts[fd.status] !== undefined) counts[fd.status] += 1;
+    if (live && fd.draft) counts.toReview += 1;
+  }
+  return counts;
+}
+
 function handleFeatureList(res, kindFilter) {
   const listed = ledger.listFeatures({ withSkipped: true });
   let features = listed.features || [];
@@ -156,6 +173,10 @@ function handleFeatureList(res, kindFilter) {
       awaitingAuthor,                                          // has posted, unaddressed comments
       authorResponded: !!(f.review && f.review.authorRespondedAt),
       reviewNote: (f.review && f.review.note) || null,
+      counts: findingCounts(findings),
+      // The one canonical answer to "what is going on here" (ledger.WORKSPACE_STATES). Computed
+      // server-side so the inbox and the section lists can never disagree about it.
+      state: ledger.workspaceState(f, findings, lastRoundAt),
       // When we last reviewed vs. when the PR was last touched by the other side — so a card
       // can say "reviewed 3h ago · PR updated 20m ago" and flag that a re-review is worthwhile.
       stamps: ledger.reviewStamps(f, lastRoundAt),
@@ -177,15 +198,7 @@ function handleHome(res) {
   const skippedWorkspaces = listed.skipped || [];
   const rows = features.map((f) => {
     const findings = (ledger.loadLedger(f.id).findings) || [];
-    const counts = { toReview: 0, open: 0, reworking: 0, posted: 0, resolved: 0, waived: 0 };
-    for (const fd of findings) {
-      const live = fd.status === 'open' || fd.status === 'reworking';
-      // Posted findings are awaiting the author, not the reviewer: count them under `posted`,
-      // never as `reworking` or `toReview`, so the inbox stops re-surfacing what's already out.
-      if (live && fd.postedAt) { counts.posted += 1; continue; }
-      if (counts[fd.status] !== undefined) counts[fd.status] += 1;
-      if (live && fd.draft) counts.toReview += 1;
-    }
+    const counts = findingCounts(findings);
     let readiness = { score: 0, gate: 'in-progress' };
     try {
       const r = ledger.readiness(f.id);
@@ -206,6 +219,9 @@ function handleHome(res) {
       // this one did not — the two shapes had drifted for no reason.
       updatedAt: f.updatedAt,
       stamps: ledger.reviewStamps(f, lastRoundAt),
+      // The one canonical answer to "what is going on here" (ledger.WORKSPACE_STATES); the
+      // grouping the inbox draws from it is the browser's job, so the sort below is unchanged.
+      state: ledger.workspaceState(f, findings, lastRoundAt),
     };
   });
   rows.sort((a, b) =>

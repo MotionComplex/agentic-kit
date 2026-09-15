@@ -23,6 +23,81 @@ const STATUS_COLS = [
   { key: 'resolved',  label: 'Resolved' },
   { key: 'waived',    label: 'Waived' },
 ];
+/* The bands a list view draws, top to bottom, and how much of each card it spends on them.
+ * "Needs you" earns the full card because that is where you actually decide something; the rest
+ * only has to identify the row and say why it is parked, so it gets a compact one. Four bands with
+ * every card at full detail is the thing this replaces — a flat wall in which the two PRs waiting
+ * on YOU look exactly like the nine that are waiting on someone else. */
+const WS_BANDS = [
+  { key: 'needs-you',   label: 'Needs you',         density: 'full'    },
+  { key: 'in-progress', label: 'In progress',       density: 'compact' },
+  { key: 'waiting',     label: 'Waiting on others', density: 'compact' },
+];
+/* Every state a card can be in, ordered: position in this array IS the rank, across the whole
+ * list. One table, deliberately — the same reason ledger.js's WORKSPACE_STATES is one table. A
+ * separate "which band" map and "which sorts first" list drift apart, and the symptom is a card
+ * drawn under one header but ordered as if it belonged under another. A `rank:` number here would
+ * be that second copy in miniature, so there isn't one.
+ *
+ * The `job-*` states are the browser's own: they describe what a live runner is doing right now,
+ * which outranks whatever the ledger last computed. The rest mirror ledger.js's WORKSPACE_STATES
+ * one-for-one (minus `done`, which keeps its collapsed disclosure) — test/server.test.js pins that
+ * agreement, because two taxonomies that disagree is the whole risk of splitting them. */
+const WS_STATES = [
+  { key: 'job-attention',    band: 'needs-you',   label: 'Needs attention'     },
+  { key: 'ready-to-post',    band: 'needs-you',   label: 'Ready to post'       },
+  { key: 'needs-review',     band: 'needs-you',   label: 'New — to review'     },
+  { key: 'needs-rereview',   band: 'needs-you',   label: 'Re-review'           },
+  { key: 'author-responded', band: 'needs-you',   label: 'Author responded'    },
+  { key: 'job-posting',      band: 'in-progress', label: 'Posting review'      },
+  { key: 'job-rereviewing',  band: 'in-progress', label: 'Re-reviewing'        },
+  { key: 'job-reviewing',    band: 'in-progress', label: 'Reviewing'           },
+  { key: 'job-polling',      band: 'in-progress', label: 'Checking for updates'},
+  { key: 'posting',          band: 'in-progress', label: 'Posting…'            },
+  { key: 'awaiting-author',  band: 'waiting',     label: 'Waiting on author'   },
+  { key: 'awaiting-reaudit', band: 'waiting',     label: 'Waiting on re-audit' },
+  { key: 'settled',          band: 'waiting',     label: 'Settled'             },
+];
+/* Rank = index, resolved once. Nothing else may express the order. */
+const WS_STATE_INDEX = new Map(WS_STATES.map((s, i) => [s.key, { ...s, rank: i }]));
+/* Where an unrecognised state lands. A summary served by an older cockpit carries no `state` at
+ * all, and an unlabelled band — or a crash — is a far worse answer than "parked, nothing to do". */
+const WS_FALLBACK_STATE = 'settled';
+function wsState(key) { return WS_STATE_INDEX.get(key) || WS_STATE_INDEX.get(WS_FALLBACK_STATE); }
+
+/* The `job-*` labels in each kind's OWN words. Only the words: which band a live job lands in is
+ * categoryOf()'s decision and does not move, because "a runner is mid-way through this" is the same
+ * fact whatever the workspace is. What is not the same is what the runner is DOING.
+ *
+ * WS_STATES' defaults are the pr-review ones, and they leaked: a running spec audit wore the pill
+ * "Re-reviewing" and a spec apply wore "Posting review" — both naming a pull request the workspace
+ * does not have. (True on Home since ce22adf; 4406176 put it on #/spec too, beside a card whose own
+ * loop strip says "Audit".) The repo already has the vocabulary, in REVIEW_NOUN and
+ * LOOP_STAGES_BY_KIND: a spec is AUDITED and its accepted changes are APPLIED back to Confluence and
+ * ADO, a pr-review is reviewed and POSTED as comments, a pr-respond REPLIES to reviewer threads.
+ *
+ * Only the states a kind can actually reach need an entry — `job-polling` is PR discovery and never
+ * binds a spec, and the non-job states are the server's own and already kind-neutral. Anything
+ * missing falls through to the WS_STATES label, which is where pr-review's own words stay. */
+const JOB_LABELS_BY_KIND = {
+  spec: {
+    'job-posting':     'Applying changes',
+    'job-rereviewing': 'Re-auditing',
+    'job-reviewing':   'Auditing',
+  },
+  'pr-respond': {
+    'job-posting':     'Posting replies',
+    'job-rereviewing': 'Re-checking threads',
+    'job-reviewing':   'Responding',
+  },
+};
+/* The label for a state as THIS kind says it. `kind` may be absent — a card drawn before its
+ * workspace exists has none — and then the table's default wording stands, exactly as it did. */
+function wsStateLabel(key, kind) {
+  const per = JOB_LABELS_BY_KIND[kind];
+  return (per && per[key]) || wsState(key).label;
+}
+
 // Defaults matching ledger.js's DEFAULT_CONFIG — used only for the optimistic readiness
 // recompute, and only until GET /api/config answers (fetched at boot, see loadLiveConfig
 // below). The server's value is authoritative either way and reconciled after every POST;
@@ -99,6 +174,7 @@ const state = {
   // review API, this just records which path the reviewer chose.
   flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null, persistFailed: {} },
   section: { kind: null, features: [] },   // cached cards for the open PR section, re-bound to live jobs each poll
+  home: { rows: [] },      // cached inbox rows, re-banded against the live jobs on every poll tick
   runner: null,            // last GET /api/runner — is a session draining the queue right now?
 };
 const current = { view: null, id: null, tab: null };
@@ -111,7 +187,7 @@ const DISCLOSURE_LINE = '🤖 AI comment posted by Claude';
  * gets the newest app.js, but src/server.js is only read when the cockpit process starts, so an
  * updated plugin + a long-running server means the page calls routes the server has never heard of.
  * That used to surface as a bare "Not found"; now it says which half is stale. */
-const EXPECTED_API_VERSION = '3';
+const EXPECTED_API_VERSION = '4';
 
 /* ============================== tiny DOM lib ============================== */
 
@@ -415,9 +491,25 @@ async function setFeatureStatus(status) {
   }
 }
 
+/* The lifecycle value a workspace carries until something moves it — and the value `statusChip`
+ * itself falls back to, so the two cannot drift apart. */
+const DEFAULT_STATUS = 'draft';
 function statusChip(status) {
-  const s = String(status ?? 'draft');
+  const s = String(status ?? DEFAULT_STATUS);
   return h('span', { class: `chip status-${cssSafe(s)}` }, s);
+}
+/* The same chip, drawn only when it discriminates. Inside the bands every active workspace reads
+ * `draft` — the ingest default — so the chip was a word repeated on every card beside the state
+ * pill that actually says what the workspace is waiting on, and pure width: `.fc-chips` wraps, so
+ * "Checking for updates" plus "draft" cost a second line on a narrow card for no information.
+ *
+ * Deliberately a suppression and not a deletion. `auditing`, `reworking`, `ready` and
+ * `implementing` are all reachable through POST /api/features/:id/status even though the real
+ * corpus has none today, and each of them IS news next to the state pill. `done` is news too, and
+ * still draws for the same reason: the Done disclosure's cards are drawn by featureCard like any
+ * other, and `done` is not the default, so the only value this hides is the one that said nothing. */
+function statusChipIfMeaningful(status) {
+  return String(status ?? DEFAULT_STATUS) === DEFAULT_STATUS ? null : statusChip(status);
 }
 
 function gateBadge(gate) {
@@ -2507,8 +2599,13 @@ function syncNav() {
 
 /* ============================== home (unified inbox) ============================== */
 
-/* Which "what needs you" bits to show for an inbox row. toReview/reworking/open are
- * the actionable states; a row with none of them is settled (shown as a check). */
+/* The supporting detail a needs-you row prints UNDER its state pill — how much is waiting, in
+ * counts. Deliberately not the headline any more: `state` is, and it is the only one of the two
+ * that can be trusted here. These bits read `counts`, and counts.toReview only counts findings
+ * carrying a `draft` — a PR-review finding usually carries just a `suggestion` — so toReview reads
+ * 0 on most PR workspaces and the row said "3 open" where it meant "3 to review". The counts
+ * themselves are left exactly as they are (the server's inbox sort reads them); what changed is
+ * that no row's headline, and no header count, depends on them. */
 function needsYouBits(c) {
   const bits = [];
   if (c.toReview) bits.push(`${c.toReview} to review`);
@@ -2538,30 +2635,122 @@ function doneDatesRow(r) {
   return h('div', { class: 'review-stamps ir-stamps ir-done-stamps' }, parts);
 }
 
-function inboxRow(r) {
+/* The two ways out of an inline delete-confirm that are not its own two buttons.
+ *
+ * The hold an open confirm puts on a polled list has NO ceiling on purpose (holdStands): a repaint
+ * would answer a destructive question "no" on the user's behalf, silently, with nothing to put back.
+ * That trade is only defensible while every confirm is eventually ANSWERED — and a confirm whose
+ * only exits are two buttons is not: measured, an abandoned one held the rows past 14 seconds and a
+ * newly started job, with no bound on how much longer. Escape and a click outside are the answers a
+ * user expects to be able to give without aiming at Cancel, and wiring them is what makes "it lasts
+ * until the user answers" true rather than hopeful.
+ *
+ * Both run `cancel` — the SAME function the Cancel button runs, never the delete. A dismissal is the
+ * user stepping away from something irreversible; reading it as consent would be the one failure
+ * worse than the freeze it fixes.
+ *
+ * `pointerdown` rather than `click`, because a drag that starts on Cancel and ends outside the
+ * confirm would otherwise dismiss on the up-stroke — from a press the user aimed INSIDE. Capture, so
+ * a handler that stops propagation on the way up cannot swallow it. Escape is not stopped, so a
+ * second open confirm elsewhere on the page dismisses on the same keystroke.
+ *
+ * The listeners unhook themselves once the confirm is out of the DOM: Cancel and Delete both replace
+ * the wrap's children, and a repaint past the ceiling can take the element with neither pressed, so
+ * "the confirm went away" cannot be left to the buttons to report. */
+function wireConfirmDismiss(confirmEl, cancel) {
+  const off = () => {
+    document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('pointerdown', onDown, true);
+  };
+  const gone = () => {
+    if (confirmEl.isConnected) return false;
+    off();
+    return true;
+  };
+  function onKey(e) {
+    if (gone() || e.key !== 'Escape') return;
+    e.preventDefault();
+    off();
+    dismiss();
+  }
+  function onDown(e) {
+    if (gone() || confirmEl.contains(e.target)) return;
+    off();
+    dismiss();
+  }
+  function dismiss() {
+    cancel();
+    // A Cancel click reaches the zone's own onclick and releases whatever the hold deferred; a click
+    // outside the zone, and every Escape, reaches nothing. Without this the list would sit on a
+    // stale repaint until the next tick for no reason. No-op off Home, which is where it belongs.
+    flushHomeInboxSoon();
+  }
+  document.addEventListener('keydown', onKey, true);
+  document.addEventListener('pointerdown', onDown, true);
+}
+
+/* `density` is the band's, exactly as a card's is (WS_BANDS): a needs-you row earns the dial and
+ * the counts, a parked one earns only what identifies it and the one stamp that says why it is
+ * parked. `cat` is the WS_STATES key the band loop already decided, handed down rather than
+ * recomputed — the same rule featureCard follows, and for the same reason: categoryOf() reads the
+ * clock, so a second call can label a row as something other than the header it sits under. A row
+ * drawn outside the bands (the Done disclosure) passes neither and looks exactly as it did. */
+function inboxRow(r, job = null, density = 'full', cat = null) {
   const done = r.status === 'done';
-  const bits = done ? [] : needsYouBits(r.counts);   // a completed workspace never nags
+  const compact = density === 'compact';
+  // A completed workspace never nags; a parked one has nothing to act on either, and its pill and
+  // stamp already say why it is here — counts underneath would only invite a read it doesn't need.
+  const bits = done || compact ? [] : needsYouBits(r.counts);
   const rd = r.readiness || { score: 0, gate: 'in-progress' };
   const wrap = h('div', { class: `ir-wrap ${done ? 'ir-done' : ''}`.trim() });
 
-  const link = h('a', { class: 'inbox-row', href: `#/feature/${encodeURIComponent(r.id)}` },
-    dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
+  // Same job tints as a card, from the same classes — a row with a failed or stalled runner must
+  // read as failed or stalled here too, or Home is where a stuck Post goes unnoticed.
+  const busyState = job
+    ? (job.needsInput && job.status !== 'error' ? 'needs' : (isStaleJob(job) ? 'stale' : job.status))
+    : null;
+  const cls = ['inbox-row', compact ? 'ir-compact' : '', job ? `fc-busy fc-busy-${cssSafe(busyState)}` : '']
+    .filter(Boolean).join(' ');
+
+  const link = h('a', {
+    class: cls,
+    href: `#/feature/${encodeURIComponent(r.id)}`,
+    // A key for this control that outlives the element: the rows are rebuilt on every repaint, so a
+    // forced one puts focus back by looking this string up again (zoneFocusMark/restoreZoneFocus).
+    dataset: { fk: `row:${r.id}` },
+  },
+    // The dial is decision material — a score you weigh before opening something. Nothing in the
+    // compact bands is waiting on that decision, so it goes with the rest of the full row.
+    compact ? null : dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
     h('div', { class: 'ir-main' },
       h('div', { class: 'ir-top' }, kindBadge(r.kind), h('span', { class: 'ir-title' }, r.title || r.id),
         done ? h('span', { class: 'chip status-done ir-done-chip' }, 'done') : null),
       h('div', { class: 'ir-needs' },
+        // The state leads, and the counts follow it as the detail they are. Without the pill,
+        // ready-to-post / needs-review / needs-rereview / author-responded drew identically on the
+        // first screen you land on — the inbox was the last surface still hiding the distinction
+        // the section cards gained.
+        cat ? wsStatePill(cat, r.kind) : null,
         done
           ? h('span', { class: 'ir-clear' }, '✓ Review complete')
           : bits.length
             ? bits.map((b) => h('span', { class: 'ir-bit' }, b))
-            : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you')),
+            // The pre-band fallback, and only reachable without a pill: a row that says neither
+            // what it is waiting on nor what is outstanding says nothing at all.
+            : (cat ? null : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you')),
+        // The ONE stamp a compact row earns, chosen by the same rule a compact card uses: a posted
+        // review is waiting on the clock since WE posted, anything else since our last round.
+        compact ? compactStamp(r, job, cat) : null),
       // PR rows carry the reviewed-vs-updated stamps, so the inbox shows at a glance which
       // PRs have moved since we last looked at them. A completed row has no use for that
       // comparison — but it does need its dates visible, because the Done list can now be sorted
       // by them, and a list ordered by something you cannot see is not a list you can trust.
       done
         ? doneDatesRow(r)
-        : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
+        : (compact ? null : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
+      // The live job in the same words the cards use. A row banded by a state a runner is in the
+      // middle of invalidating, with no line saying so, is the inbox lying about what is happening.
+      job ? cardJobRow(job, hasFindingsOf(r), r.kind) : null),
     h('span', { class: 'ir-arrow', 'aria-hidden': 'true' }, '→'));
 
   const label = r.title || r.id;
@@ -2570,23 +2759,34 @@ function inboxRow(r) {
     const trashBtn = h('button', {
       class: 'btn-icon ir-delete', type: 'button',
       'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
+      dataset: { fk: `row-del:${r.id}` },
       onclick: (e) => { e.preventDefault(); e.stopPropagation(); showConfirm(); },
     }, h('span', { class: 'icon', html: ICONS.trash }));
     wrap.replaceChildren(link, trashBtn);
   }
 
   function showConfirm() {
-    wrap.replaceChildren(h('div', { class: 'delete-confirm' },
+    const confirmEl = h('div', { class: 'delete-confirm' },
       h('span', { class: 'delete-confirm-msg' },
         `Delete "${label}"? This removes its findings and history. This can't be undone.`),
       h('div', { class: 'delete-confirm-actions' },
         h('button', { class: 'btn btn-danger', type: 'button', onclick: doDelete }, 'Delete'),
-        h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel'))));
+        h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel')));
+    wrap.replaceChildren(confirmEl);
+    // Escape / outside-click, both taking the Cancel path. Without a way out, the uncapped hold this
+    // confirm puts on the inbox never ends.
+    wireConfirmDismiss(confirmEl, showDefault);
   }
 
   async function doDelete() {
     try {
       await api(`/api/features/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+      // Taking the row out of the DOM is not enough: the inbox is repainted from state.home.rows
+      // on every tick that sees a change, and that cache is only refilled by renderHome(). Leave
+      // the deleted id in it and the NEXT real change — a job starting anywhere on the page —
+      // paints the workspace you just deleted straight back onto the screen, linking to a 404.
+      // Prune where the delete actually succeeded, so the cache and the server agree from here on.
+      if (state.home) state.home.rows = (state.home.rows || []).filter((row) => row.id !== r.id);
       wrap.remove();
       toast(`Deleted "${label}"`, 'success');
     } catch (e) {
@@ -2668,6 +2868,9 @@ function doneDisclosure(key, pairs, bodyClass) {
 
   const select = h('select', {
     class: 'done-sort-select', 'aria-label': 'Sort completed workspaces',
+    // Focus keys, so a forced repaint (see zoneFocusMark) puts the keyboard back on the control it
+    // took away. Keyed by the list, because two disclosures can share one page.
+    dataset: { fk: `done-sort:${key}` },
     // This sits inside the <summary>, where any click would otherwise toggle the section shut the
     // moment you reach for the menu.
     onclick: (e) => e.stopPropagation(),
@@ -2680,10 +2883,404 @@ function doneDisclosure(key, pairs, bodyClass) {
       class: 'done-disc', open: !!doneOpen[key],
       ontoggle: (e) => { doneOpen[key] = e.currentTarget.open; },
     },
-    h('summary', { class: 'done-disc-sum' },
+    h('summary', { class: 'done-disc-sum', dataset: { fk: `done-sum:${key}` } },
       h('span', {}, `Done (${pairs.length})`),
       h('span', { class: 'done-sort' }, h('span', { class: 'done-sort-label' }, 'Sort'), select)),
     body);
+}
+
+/* Ids for the band headings, so a <section> can point at the one that names it. A counter rather
+ * than the band key: two banded lists on one page (a section grid and, later, anything else) would
+ * mint the same key-derived id twice, and a duplicate id makes aria-labelledby resolve to whichever
+ * came first — the wrong heading, silently. */
+let bandHeadSeq = 0;
+
+/* The banding every list view draws: WS_BANDS top to bottom, WS_STATES rank within a band, a
+ * header carrying its own count, and no header over an empty band. ONE implementation, on purpose
+ * — a second copy of this loop is how the kind sections and the inbox would come to disagree about
+ * which band a workspace belongs in, which is the same drift the single WS_BANDS/WS_STATES tables
+ * exist to prevent, just one level up.
+ *
+ * `entries` are `{ cat, ... }`: the category is decided ONCE by the caller and travels with the
+ * entry, because categoryOf() reads the clock through isStaleJob and a second call can answer
+ * differently from the one that chose the header. `render(entry, density)` draws one item at the
+ * band's density, and `itemsClass` is the container the view stacks them in — a card grid for a
+ * section, the inbox list for Home. */
+function bandSections(entries, render, itemsClass) {
+  // Rank is the WS_STATES index, and .sort() is stable, so ties keep insertion order.
+  const ranked = entries.slice().sort((a, b) => wsState(a.cat).rank - wsState(b.cat).rank);
+  const bands = [];
+  for (const band of WS_BANDS) {
+    const rows = ranked.filter((e) => wsState(e.cat).band === band.key);
+    // A header with nothing under it reads as "you have none of these", which is a claim the list
+    // doesn't need to make three times per view. Omit the band entirely.
+    if (!rows.length) continue;
+    // The density rides out as a class so the stylesheet can space a band by how much card it
+    // holds without keeping its own list of which bands are compact — that second list is the
+    // WS_BANDS/band-map drift again, just spelled in CSS, and it survives a `density` flip here.
+    // The count moves INSIDE the <h2> and the <section> is named by that heading. Two things were
+    // wrong and both are the same omission: the section had no accessible name at all, so a screen
+    // reader's landmark/region list held three anonymous entries; and the "· 4" sat in a sibling
+    // span, so jumping heading-to-heading announced "Needs you" with no idea whether that meant one
+    // workspace or nine — which is the single most useful thing a triage band can tell you before
+    // you decide to enter it. Sighted readers already got the number for free, right beside the
+    // label. This is the same information, delivered through the tree instead of the pixels; the
+    // rendering is unchanged (style.css keeps the count's own metrics so nothing shifts).
+    const headId = `band-head-${++bandHeadSeq}`;
+    bands.push(h('section', {
+      class: `band band-${cssSafe(band.key)} band-density-${cssSafe(band.density)}`,
+      'aria-labelledby': headId,
+    },
+      h('div', { class: 'band-head' },
+        h('h2', { class: 'band-label', id: headId }, band.label,
+          // The leading space is for the accessibility tree, not the pixels. Name computation
+          // concatenates the heading's text nodes with nothing between them, so "Needs you" + "· 2"
+          // was announced as "Needs you· 2". It costs no layout: .band-count is a flex item, and a
+          // flex item's leading white space is trimmed, so the 8px gap is still the only gap.
+          h('span', { class: 'band-count' }, ` · ${rows.length}`))),
+      h('div', { class: itemsClass }, rows.map((e) => render(e, band.density)))));
+  }
+  return bands;
+}
+
+/* The subtitle's count of what needs you comes from the TOP band — which is what ordering WS_BANDS
+ * by urgency means — and no longer from needsYouBits: those bits read `counts`, whose toReview is
+ * blind to a PR finding carrying only a suggestion, so the header undercounted exactly the PR rows
+ * it was meant to be about. The band is the same answer the rows below it are grouped by. */
+function homeSubtitle(total, needsYou) {
+  // plural() inflects the noun and nothing else, so the verb has to agree separately or the very
+  // first line of the landing screen reads "1 workspace need you" — and n=1 is the ordinary case
+  // on a quiet morning, not an edge one. The n>1 wording is untouched.
+  return needsYou
+    ? `${plural(needsYou, 'workspace', 'workspaces')} ${needsYou === 1 ? 'needs' : 'need'} you`
+      + ` · ${plural(total, 'workspace', 'workspaces')} total`
+    : `All caught up · ${plural(total, 'workspace', 'workspaces')} under watch`;
+}
+
+/* The inbox repaints from ONE replaceChildren, and the poller calls it every 4 seconds — which is a
+ * DOM swap under the user's hands. It cost an open delete-confirm ("Delete "…"? This can't be
+ * undone.") within four seconds of opening it, focus dropped to <body>, the selection cleared, and
+ * the Done disclosure's <select> torn out mid-choice. Before ce22adf Home repainted only
+ * #requests-strip, so none of that could happen; binding jobs onto the rows is what put the whole
+ * list on the tick. Three rules keep it there without the cost.
+ *
+ * `sig` is everything the inbox actually draws — each row's id, the state/band it landed in, the
+ * identity and status of the job folded onto it, and the age STRINGS it prints (rowAgeText). Row
+ * content beyond that is not in it because it cannot change here: state.home.rows is only ever
+ * refilled by renderHome(), which rebuilds the zone outright. A tick whose signature matches the
+ * last painted one touches nothing at all, and that is the overwhelming majority of ticks.
+ *
+ * `pending` is the second. A tick that DOES change something, arriving while the user is mid-
+ * something, must not yank the DOM — but it must not drop the change either: a job that starts
+ * while you are hovering a trash icon still has to show up. So the repaint is held, and released
+ * the moment the interaction ends (see releaseHomeInbox) or, failing that, on the next tick. `sig`
+ * is set only when the paint actually lands, which is what makes the hold self-healing rather than
+ * a one-shot flag that can be lost.
+ *
+ * `reload` is the third, and it is the same rule one level up. startHomeRequestsPoll refetches the
+ * whole view when a job newly completes, because a completed job means new server data — and
+ * renderHome() does app.replaceChildren() on the ENTIRE view, outside both the signature and the
+ * hold. That is blocker 2 again by a narrower path, and it was still reproducible: confirm open,
+ * focus on the red Delete button, a second job completes → {"confirms":0,"active":"BODY."}. The
+ * refetch must still happen — dropping it would leave the view stale — so it is flagged here and
+ * performed by releaseHomeInbox() through the SAME guard, never a second one of its own. */
+const homeInbox = { sig: null, reqs: [], pending: false, reload: false, heldAt: 0 };
+
+/* Every "N ago" a row will print, as the text it will print — not the clock behind it.
+ *
+ * These strings are rendered and derived from nothing else in the signature, so once "a tick that
+ * changes nothing touches nothing" landed they froze: at ce22adf the inbox repainted every 4s and
+ * they kept up; after it, a row reading "queued 27m ago" went on saying so at 40m. Putting
+ * Date.now() in the signature is the other way to lose — every tick would differ, every tick would
+ * repaint, and the DOM-swap pressure this whole mechanism exists to remove would be back in full.
+ * Rendered text changes at the granularity fmtAgo/fmtAge print at (a minute, then an hour, then a
+ * day, then an absolute date that never moves), so that is when this repaints: when the words would
+ * actually differ, not when the clock does.
+ *
+ * Deliberately EVERY stamp the workspace owns, not only the ones this row's density happens to
+ * draw. Re-deriving "which stamp shows at which density" here would be a second copy of
+ * inboxRow/compactStamp/reviewStampsRow's rule, and a copy like that drifts silently — with a
+ * frozen string as the symptom, which is the bug. Over-including costs at most one extra repaint a
+ * minute on a workspace whose stamps are under an hour old; under-including costs the regression. */
+function rowAgeText(f, job) {
+  const s = f ? reviewStampsOf(f) : {};
+  return [
+    fmtAgo(s.lastReviewedAt), fmtAgo(s.lastActivityAt), fmtAgo(s.lastPostedAt),
+    fmtAgo(f && f.lastRoundAt), fmtAgo(f && f.updatedAt),
+    // cardJobRow prints exactly one clock of its own, on a stalled job ("started 27m ago"). Whether
+    // the job IS stale already reaches the signature through `cat`; this is the number beside it.
+    job && isStaleJob(job) ? fmtAge(jobAgeMs(job)) : null,
+  ].map((x) => x || '').join('/');
+}
+
+/* One banded entry's contribution to the signature. Job identity AND status, because "queued →
+ * running" is a visible change on the row even when the band doesn't move; `phase` too, since the
+ * job line spells it out. A placeholder entry has no workspace, so the job it stands for is its
+ * identity — the only one it has. */
+function listEntrySig(e) {
+  return [
+    (e.ws && e.ws.id) || (e.job ? `job:${e.job.id}` : '-'),
+    e.cat || '-',
+    e.cat ? wsState(e.cat).band : '-',
+    e.job ? `${e.job.id}/${e.job.status}/${e.job.needsInput ? 1 : 0}/${e.job.phase || ''}` : '-',
+    rowAgeText(e.ws, e.job),
+  ].join('~');
+}
+
+/* The signature of a banded list — see homeInbox. ONE function for both banded lists, for the same
+ * reason bandSections is one loop: the inbox and the section grid are the same list of the same
+ * entries drawn two ways, and a second signature is a second answer to "did anything change".
+ *
+ * Done entries are in it too: the disclosure's count would otherwise go stale, and a Done row prints
+ * "Last reviewed 12m ago" exactly as an active one does, so it would freeze exactly as one. They
+ * carry no band (they are outside the bands by construction), which costs nothing — a constant term
+ * in every signature is a constant term in both sides of the comparison. */
+function bandedListSig(entries, done) {
+  return [...entries.map(listEntrySig), `done:${done.map(listEntrySig).join(',')}`].join('|');
+}
+
+/* How long a polled list may hold a repaint for a cursor: three ticks of the 4s poller.
+ *
+ * 316edb0 held on focus exactly as it held on a confirm — until the interaction ends — and focusout
+ * only fires when the user MOVES. A keyboard user resting on a row link therefore stopped seeing
+ * new work indefinitely: measured frozen across 5+ ticks with the data changing on every one. A
+ * list that is silently wrong about the world is the worse of the two failures, so focus gets a
+ * ceiling. Long enough that ordinary tabbing, reading, and reaching for a control are never
+ * interrupted; short enough that "frozen" is never the right word for what you are looking at. */
+const ZONE_BUSY_HOLD_MS = 12000;
+
+/* Why a polled list is holding its repaint, or null. The two answers are different in kind, and
+ * telling them apart IS the ceiling:
+ *
+ *  'confirm' — an unanswered destructive question ("Delete X? This can't be undone."). A repaint
+ *    answers it "no" on the user's behalf, silently, and there is nothing to put back afterwards.
+ *    No poll tick is worth that, so this hold has NO ceiling: it lasts until the user answers, and
+ *    the note the list shows while held (zoneHeldNote) is what keeps that honest on screen.
+ *  'busy' — focus, or a live text selection, inside the list: a place the user is keeping, not a
+ *    decision they are making. A swap drops them to <body> and clears the selection, which is why
+ *    holding here is right at all — but only up to ZONE_BUSY_HOLD_MS, after which the list repaints.
+ *
+ *    What the repaint puts back is FOCUS, and only focus (zoneFocusMark / restoreZoneFocus). Two
+ *    things it does not put back, named here rather than glossed, because a comment that promises
+ *    more than the code delivers is how the next reader stops checking:
+ *      · a native <select> left open past the ceiling closes — focus survives and the chosen value
+ *        is unchanged, so this one is recoverable and visible;
+ *      · a text SELECTION is destroyed outright, and nothing restores it. Re-selecting a title you
+ *        were half-way through copying is the cost, and it is real.
+ *    Neither is worth an indefinite freeze, and both are recoverable by the user in a way that a
+ *    silently dismissed delete confirm is not — which is the whole reason the two holds differ. A
+ *    restore was considered and not built: the only honest one spans replaceChildren by re-finding
+ *    the anchor and offset in rebuilt nodes, which is a large mechanism for a rare loss, and the
+ *    signature short-circuits (homeInbox.sig, gridPaint.sig) removed the case that made it common —
+ *    an idle list no longer repaints at all, so reaching the ceiling now needs the data to be
+ *    genuinely changing under the selection for twelve seconds. */
+function zoneHold(zone) {
+  if (!zone) return null;
+  if (zone.querySelector('.delete-confirm')) return 'confirm';
+  const a = document.activeElement;
+  if (a && a !== document.body && zone.contains(a)) return 'busy';
+  // Selecting a title to copy leaves activeElement on <body>, so the focus arm never sees it — and
+  // a repaint collapses the selection with no way to restore it.
+  const sel = typeof getSelection === 'function' ? getSelection() : null;
+  if (sel && sel.rangeCount && !sel.isCollapsed && sel.anchorNode && zone.contains(sel.anchorNode)) {
+    return 'busy';
+  }
+  return null;
+}
+
+/* May this hold still stand? `g.heldAt` is stamped by the first held decision and cleared by the
+ * paint that ends it, so what this measures is CONTINUOUS held time rather than a count of calls —
+ * a user clicking around inside the zone must not burn the budget faster than a user sitting still,
+ * because they are equally entitled to a list that is telling the truth. */
+function holdStands(hold, g) {
+  if (!hold) return false;
+  if (!g.heldAt) g.heldAt = Date.now();
+  return hold === 'confirm' || Date.now() - g.heldAt < ZONE_BUSY_HOLD_MS;
+}
+
+/* Where focus is, in terms that survive the rebuild. Every element in the zone is replaced, so a
+ * node reference is worthless; what survives is WHICH control it was, and each focusable in a
+ * polled list carries a stable `data-fk` for exactly this. Without it the ceiling would trade one
+ * failure for another — the list unfreezes and the keyboard user is dumped to <body>, which is the
+ * thing the hold was added to prevent in the first place. */
+function zoneFocusMark(zone) {
+  const a = document.activeElement;
+  if (!zone || !a || !a.closest || !zone.contains(a)) return null;
+  const el = a.closest('[data-fk]');
+  return el ? el.dataset.fk : null;
+}
+
+function restoreZoneFocus(zone, fk) {
+  if (!zone || !fk) return;
+  const el = zone.querySelector(`[data-fk="${CSS.escape(fk)}"]`);
+  // preventScroll: the user did not ask to move, so putting them back must not move the page either.
+  if (el) el.focus({ preventScroll: true });
+}
+
+/* What a held list says about itself, and why it says anything at all.
+ *
+ * While the rows were held the page contradicted itself outright: the requests strip and the
+ * "▶ Run N jobs" toolbar sit OUTSIDE this guard and keep updating, so the strip read "1 job in
+ * flight — already shown on the rows below" while no row showed it. The answer is NOT to freeze
+ * them too. The toolbar is a control whose count you act on — freezing it means pressing a button
+ * that promises the wrong number — and the strip is the cross-section queue view, so freezing it
+ * hides live work at the exact moment work is happening. What was missing was never their liveness;
+ * it was the rows admitting they are not live. Now they do, and one story covers the whole screen.
+ *
+ * Appended, never prepended, and never through replaceChildren: this element has to arrive without
+ * moving anything already on screen. A confirm's red Delete button is under the pointer when this
+ * appears, and a banner that pushes the list down by its own height turns a status line into a
+ * misclick on something irreversible. It pins itself to the bottom of the viewport in CSS instead. */
+function zoneHeldNote(zone, text) {
+  if (!zone) return;
+  let note = zone.querySelector(':scope > .zone-held');
+  if (!note) {
+    note = h('div', { class: 'zone-held', role: 'status' },
+      h('span', { class: 'zone-held-glyph', 'aria-hidden': 'true' }, '⏸'),
+      h('span', { class: 'zone-held-text' }));
+    zone.append(note);
+  }
+  const t = note.querySelector('.zone-held-text');
+  // Written only on a real change, or role="status" re-announces the same sentence every four
+  // seconds to a screen reader for as long as the hold lasts.
+  if (t.textContent !== text) t.textContent = text;
+  // Nothing else to do. There WAS a height reservation here (`--zone-held-h` + a .zone-holding
+  // padding-bottom), added on the theory that a pinned note floats over the row at the bottom edge
+  // and that row has to stay reachable. `position: sticky` already makes that true: sticky keeps the
+  // element's own flow box, which is at the END of the zone, and only shifts it UP while the end of
+  // the zone is below the fold — so at the scroll extreme where the note would sit on the last row,
+  // it is back in its own box with the row above it. Measured on a 26-row inbox at 1280px and at
+  // 420px, at both scroll extremes, with the reservation and without: the same rows are covered at
+  // mid-scroll (which the reservation never addressed) and NO row is covered at maximum scroll
+  // either way. What it did do was leave ~56px of empty space under every held list.
+}
+
+function clearZoneHeldNote(zone) {
+  if (!zone) return;
+  const note = zone.querySelector(':scope > .zone-held');
+  if (note) note.remove();
+}
+
+/* One sentence per reason, and each one answers the strip directly. The measured contradiction was
+ * the strip reading "1 job in flight — already shown on the rows below" while no row showed it, so
+ * it is not enough to say "paused": the note has to say that the queue above is AHEAD of these
+ * rows, which is exactly the gap the strip's sentence would otherwise deny. */
+const HOME_HELD_NOTE = {
+  confirm: 'Paused while you answer — the job queue above has moved on and these rows have not. '
+    + 'They catch up the moment you decide.',
+  busy: 'Paused while you work here — the job queue above has moved on and these rows have not. '
+    + 'They catch up in a moment.',
+};
+
+/* Release whatever Home is holding, in the order that keeps the newest answer: a pending RELOAD
+ * refetches and rebuilds the whole view, so a repaint queued behind it is stale by construction and
+ * is dropped rather than drawn first. Called from BOTH release edges — the interaction ending
+ * (flushHomeInboxSoon, wired to the zone's click/focusout) and the next poll tick — because either
+ * alone has a hole: the tick alone leaves up to four seconds of stale bands after a Cancel, and the
+ * event alone loses the change when the interaction ends in a way that fires neither. */
+function releaseHomeInbox() {
+  if (current.view !== 'home') return;
+  // Nothing held ⇒ nothing to decide, and in particular no hold clock to start: stamping heldAt on
+  // a quiet tick would spend the ceiling before the first change that needed it ever arrived.
+  if (!homeInbox.reload && !homeInbox.pending) return;
+  const zone = $('#home-inbox-zone');
+  const hold = zoneHold(zone);
+  if (holdStands(hold, homeInbox)) { zoneHeldNote(zone, HOME_HELD_NOTE[hold]); return; }
+  // Past the ceiling with focus still inside, the mark is how the user keeps their place across a
+  // rebuild they did not ask for. A release triggered by the user's OWN click or blur has no hold
+  // left to read, so `mark` is null there and focus is left exactly where they put it.
+  const mark = hold ? zoneFocusMark(zone) : null;
+  if (homeInbox.reload) {
+    homeInbox.reload = false;
+    homeInbox.pending = false;
+    homeInbox.heldAt = 0;
+    // renderHome() replaces the view, so the mark can only be redeemed once the new zone exists.
+    renderHome()
+      .then(() => restoreZoneFocus($('#home-inbox-zone'), mark))
+      .catch(() => { /* renderHome reports its own failures in the view it drew */ });
+    return;
+  }
+  renderHomeInbox(homeInbox.reqs);
+}
+
+/* Deferred by a turn of the event loop on purpose: during focusout document.activeElement is
+ * transiently <body>, so asking zoneHold() right now would answer "nobody is here" mid-Tab and
+ * destroy the element about to receive focus. */
+function flushHomeInboxSoon() { setTimeout(releaseHomeInbox, 0); }
+
+/* Draws the inbox from the cached rows against the jobs seen this tick, and answers WHICH of those
+ * jobs it folded onto a row. The strip needs that answer: a job shown on a row and in the strip
+ * states the same thing twice on one screen — the exact duplication the sections removed when they
+ * folded jobs onto cards. Returns a Set of job ids — always, whether or not this call repainted,
+ * because the strip's dedupe is about what is ON SCREEN, not about what this tick happened to draw. */
+function renderHomeInbox(requests) {
+  const rows = (state.home && state.home.rows) || [];
+  const live = (requests || []).filter(isLiveJob);
+  const used = new Set();
+  const active = [];
+  const doneRows = [];
+  for (const r of rows) {
+    if (r.status === 'done') { doneRows.push({ ws: r }); continue; }
+    // Bound exactly as a section card binds its job, through the same two helpers: a PR being
+    // posted, or one whose runner has stalled, must band by what is happening to it right now
+    // rather than by whatever it was before the job started.
+    const job = jobForFeature(r, live);
+    if (job) used.add(job.id);
+    // `ws` rather than `r`, because this is the entry shape bandedListSig and the section grid
+    // share — the two banded lists sign themselves with one function or they drift.
+    active.push({ ws: r, job, cat: categoryOf(r, job) });
+  }
+
+  // Kept so a held repaint can be replayed from the interaction that ends, not only from the tick.
+  homeInbox.reqs = requests || [];
+
+  const zone = $('#home-inbox-zone');
+  if (!zone) return used;
+  const sig = bandedListSig(active, doneRows);
+  // A tick that changes nothing must touch nothing — and with nothing outstanding there is nothing
+  // to hold, so the clock and the note both go.
+  if (sig === homeInbox.sig) {
+    homeInbox.pending = false;
+    homeInbox.heldAt = 0;
+    clearZoneHeldNote(zone);
+    return used;
+  }
+  // Something did change — but not at the cost of whatever the user has open. Hold it, and say so
+  // on the rows, because the strip and the toolbar above are deliberately NOT held (zoneHeldNote).
+  const hold = zoneHold(zone);
+  if (holdStands(hold, homeInbox)) {
+    homeInbox.pending = true;
+    zoneHeldNote(zone, HOME_HELD_NOTE[hold]);
+    return used;
+  }
+  // Past the ceiling with focus still parked inside: repaint, then put the user back on the same
+  // control. Unfreezing the list at the cost of their place would just be the other failure.
+  const mark = hold ? zoneFocusMark(zone) : null;
+
+  const bands = bandSections(active, (e, density) => inboxRow(e.ws, e.job, density, e.cat), 'inbox');
+  const lists = bands.length
+    ? bands
+    : [h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.')];
+  if (doneRows.length) {
+    lists.push(doneDisclosure('home',
+      doneRows.map((e) => ({ sortable: e.ws, el: inboxRow(e.ws) })), 'inbox done-disc-body'));
+  }
+  // replaceChildren takes the note with everything else, and there is nothing left on the zone to
+  // take down with it (zoneHeldNote), so the paint needs no clear of its own.
+  zone.replaceChildren(h('div', { class: 'section-lists' }, ...lists));
+  // Recorded only now, after the paint actually landed: a signature stamped on a tick that skipped
+  // would make the skip permanent, which is how a deferred change turns into a dropped one.
+  homeInbox.sig = sig;
+  homeInbox.pending = false;
+  homeInbox.heldAt = 0;
+  restoreZoneFocus(zone, mark);
+
+  const sub = $('#home-sub');
+  if (sub) {
+    sub.textContent = homeSubtitle(rows.length,
+      active.filter((e) => wsState(e.cat).band === WS_BANDS[0].key).length);
+  }
+  return used;
 }
 
 async function renderHome() {
@@ -2708,6 +3305,15 @@ async function renderHome() {
   if (seq !== routeSeq) return;
   if (!Array.isArray(rows)) rows = [];
 
+  // A fresh view is a fresh zone, and an EMPTY one, so the signature from the last visit must not
+  // be allowed to match and skip the first paint into it. The hold goes with it: a clock or a
+  // deferred reload left over from the zone that has just been thrown away would be measuring an
+  // interaction in a DOM that no longer exists.
+  homeInbox.sig = null;
+  homeInbox.pending = false;
+  homeInbox.reload = false;
+  homeInbox.heldAt = 0;
+
   if (rows.length === 0) {
     app.replaceChildren(
       h('div', { class: 'view-head' }, h('h1', {}, 'Home')),
@@ -2725,36 +3331,69 @@ async function renderHome() {
     return;
   }
 
-  const actionable = rows.filter((r) => r.status !== 'done' && needsYouBits(r.counts).length).length;
-  const activeRows = rows.filter((r) => r.status !== 'done');
-  const doneRows = rows.filter((r) => r.status === 'done');
-  const lists = [];
-  if (activeRows.length) lists.push(h('div', { class: 'inbox' }, activeRows.map(inboxRow)));
-  else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
-  if (doneRows.length) lists.push(doneDisclosure('home',
-    doneRows.map((r) => ({ sortable: r, el: inboxRow(r) })), 'inbox done-disc-body'));
+  // Cached so every poll tick can re-band them against the live jobs without refetching — the same
+  // arrangement the kind sections use, and the only way a row's band can follow its runner.
+  state.home.rows = rows;
   app.replaceChildren(
     h('div', { class: 'view-head' },
       h('h1', {}, 'Home'),
-      h('p', { class: 'view-sub' }, actionable
-        ? `${plural(actionable, 'workspace', 'workspaces')} need you · ${plural(rows.length, 'workspace', 'workspaces')} total`
-        : `All caught up · ${plural(rows.length, 'workspace', 'workspaces')} under watch`)),
+      h('p', { class: 'view-sub', id: 'home-sub' }, homeSubtitle(rows.length, 0))),
     h('div', { class: 'section-actions' }, refreshZone(null), runnerZone(0)),
     requestsStripEl([]),
-    h('div', { class: 'section-lists' }, ...lists),
+    h('div', {
+      id: 'home-inbox-zone',
+      // Where a held repaint gets released. A click is what ends a confirm (Cancel swaps the trash
+      // button back in before this bubbles), focusout is what ends a keyboard visit — so by the
+      // time flushHomeInboxSoon re-asks, the answer is the true one.
+      onclick: flushHomeInboxSoon,
+      onfocusout: flushHomeInboxSoon,
+    }),
   );
+  // Paint the bands now rather than holding the whole inbox back for the queue's round trip — but
+  // from the jobs LAST SEEN, not from nothing. `[]` here was a measured 4.2s hole: renderHome() is
+  // how a completed job gets its fresh data (homeInbox.reload → releaseHomeInbox), so this line runs
+  // precisely when other jobs are still running, and it dropped every one of them — the row fell
+  // back to "Needs you", the job line vanished, and homeInbox.reqs was overwritten with [] so the
+  // strip lost its dedupe too. One tick later the poller put it all back. The cache is the truth
+  // this view already has; startPolling below corrects it within the tick.
+  renderHomeInbox(homeInbox.reqs);
   startHomeRequestsPoll();
 }
 
-/* Home shows the active jobs (queued/running, plus errors awaiting attention);
- * done jobs drop off once their workspace appears in the inbox below. When a job
- * completes, refresh the inbox so the new workspace surfaces. */
+/* Home re-bands its rows against the live queue every tick, then shows what the rows did NOT
+ * account for: the strip is the cross-section queue view and still carries jobs with no row yet,
+ * but a job already folded onto a row must not be listed twice on one screen. Done jobs drop off
+ * once their workspace appears in the inbox below; when one completes, refetch so it surfaces. */
 function startHomeRequestsPoll() {
   let lastDone = new Set();
   startPolling('home', (reqs) => {
     if (current.view !== 'home') return;
+    const used = renderHomeInbox(reqs);
     const active = reqs.filter((r) => r.status !== 'done');
-    populateRequestsStrip($('#requests-strip'), active, null);
+    const unbound = active.filter((r) => !used.has(r.id));
+    // The strip's own header counts what it LISTS, so partial binding made the screen contradict
+    // itself: "2 jobs" beside "▶ Run 3 jobs", with nothing on the page joining the two numbers up.
+    // The remainder is the missing term, said once, so the arithmetic closes.
+    const onRows = active.length - unbound.length;
+    // A PR can carry two live jobs; jobForFeature folds only the most urgent, so the runner-up
+    // reaches the strip. Keeping it is right — hiding live work would be the worse lie — but
+    // unlabelled it reads as a job on some other PR, which is a third claim about the same one.
+    const alsoOnRow = (r) => (state.home.rows || [])
+      .some((row) => row.status !== 'done' && jobBindsTo(r, row));
+    // While the inbox is holding a repaint (homeInbox.pending) the rows below are BEHIND this strip
+    // by construction — that is what the hold is. "already shown on the rows below" is then a claim
+    // the screen itself contradicts: the held note says the queue above has moved on, and this
+    // sentence said it had not. The note explains the gap; the strip may not deny it in the same
+    // breath. Softened, never dropped — where the jobs went is still the thing worth saying, and an
+    // empty silent strip reads as a broken queue.
+    const behind = homeInbox.pending;
+    // With everything bound the strip has nothing left to add. Empty and silent reads as a broken
+    // queue, so say where those jobs went instead.
+    populateRequestsStrip($('#requests-strip'), unbound, active.length
+      ? `${plural(active.length, 'job', 'jobs')} in flight — `
+        + (behind ? 'the rows below are catching up.' : 'already shown on the rows below.')
+      : null,
+      { note: onRows ? `+ ${onRows} ${behind ? 'catching up below' : 'on the rows below'}` : null, onRow: alsoOnRow });
     // Home's Refresh button covers both PR sections, so any live poll job drives it.
     renderRefreshZone($('#refresh-zone'), null, pickPollJob(reqs, null));
     // Home's Run button offers to drain everything that's waiting, whatever section it belongs to.
@@ -2764,7 +3403,15 @@ function startHomeRequestsPoll() {
     doneIds.forEach((id) => { if (!lastDone.has(id)) newlyDone = true; });
     const first = lastDone.size === 0;
     lastDone = doneIds;
-    if (newlyDone && !first) renderHome();
+    // A completed job means new server data, so the whole view has to be refetched — but
+    // renderHome() replaces the entire view, which destroys an open confirm and drops focus exactly
+    // as a zone repaint does, only wider. Flag it and let releaseHomeInbox() run it through the
+    // same guard; with nothing held that happens on this very line, as it did before.
+    if (newlyDone && !first) homeInbox.reload = true;
+    // The tick-side release, after everything this tick decided. The event-side release is
+    // flushHomeInboxSoon on the zone; neither is enough alone — an interaction can end in a way
+    // that fires no event, and waiting for the next tick alone leaves a Cancel four seconds stale.
+    releaseHomeInbox();
   });
 }
 
@@ -2831,7 +3478,8 @@ async function renderSection(kind) {
 
   const isPr = kind === 'pr-review' || kind === 'pr-respond';
   state.section = { kind, features };
-  const gridZone = h('div', { id: 'features-grid-zone' }, sectionGrid(kind, features, []));
+  const gridZone = h('div', { id: 'features-grid-zone' },
+    sectionGrid(kind, sectionEntries(kind, features, [])));
 
   app.replaceChildren(...[
     sectionHead(kind, features.length || null),
@@ -2843,54 +3491,178 @@ async function renderSection(kind) {
     gridZone,
   ].filter(Boolean));
 
-  if (isPr) startSectionRequestsPoll(kind);
+  // Every kind, not only the PR ones. Without this #/spec was the one banded surface that never saw
+  // a runner: a spec workspace with a live `apply` read "In progress" on Home and "Needs you /
+  // Ready to post" here, which is two answers about one workspace from the two views that share a
+  // state table precisely so they cannot give two.
+  gridHold.heldAt = 0;   // a fresh zone has no interaction to be mid-way through
+  // And an EMPTY one, so a signature left over from the last section visited must not be allowed to
+  // match and skip the first paint into it — the same reason renderHome() clears homeInbox.sig.
+  gridPaint.sig = null;
+  startSectionRequestsPoll(kind);
 }
 
-/* The cards for a section, with each workspace's live job folded onto its card and a
- * placeholder card for any in-flight review whose workspace doesn't exist yet. No
- * separate jobs strip — the status lives on the card it belongs to. */
-function sectionGrid(kind, features, requests) {
+/* Which WS_STATES key a card belongs under. A live runner job OUTRANKS the workspace's own state:
+ * what a runner is doing to this PR right now is the truer answer to "what is happening to it"
+ * than a state computed from stamps the runner is in the middle of invalidating.
+ *
+ * `f` may be null — a pending placeholder has a job and no workspace yet. Deliberately free of any
+ * `kind` assumption, so the inbox can band the same way the sections do. */
+function categoryOf(f, job) {
+  if (job) {
+    // These three are the same "a human has to unstick this" pool jobRank() puts at the top, and
+    // they must not be buried under "In progress": nothing is progressing.
+    const needsInput = !!job.needsInput && job.status !== 'done' && job.status !== 'error';
+    if (needsInput || job.status === 'error' || isStaleJob(job)) return 'job-attention';
+    if (job.action === 'apply') return 'job-posting';
+    if (job.action === 'poll') return 'job-polling';
+    // A re-run against a workspace that already has findings/rounds is a re-review, not a first
+    // pass — the same distinction cardJobRow's verb makes, read from the same derivation.
+    return hasFindingsOf(f) ? 'job-rereviewing' : 'job-reviewing';
+  }
+  // No job: the server's canonical state, if this build of the cockpit knows the word.
+  return WS_STATE_INDEX.has(f && f.state) ? f.state : WS_FALLBACK_STATE;
+}
+
+/* Which queue actions act on a workspace of THIS kind. The section filter used to be
+ * `r.action === kind`, which is right only by coincidence: a PR review's action IS the kind of
+ * workspace it makes. `spec` has no action of its own name, so the same test admitted nothing and
+ * #/spec never folded a job onto a card — a spec workspace with a live `apply` banded "In progress"
+ * on Home and "Needs you / Ready to post" on its own section. One workspace, two surfaces, two
+ * answers: the exact thing the single `state` and the single band table exist to prevent.
+ *
+ * One table rather than a branch per kind, for the reason WS_STATES is one table: a second place
+ * that decides what belongs to a section is a second place to forget `propose` in. It mirrors
+ * ledger.js's REQUEST_ACTIONS, minus the two that are not owned by a kind —
+ *
+ *   `apply`  reaches a section only through jobBindsTo, which is what keeps an apply on a PR
+ *            workspace out of #/spec: the wsId arm is an exact id match and nothing else answers.
+ *   `poll`   is PR discovery. It drives the Refresh button, never a card, and has no workspace.
+ *
+ * — so no PR action appears under `spec` and no spec action under a PR kind, which is the whole of
+ * "a section sees exactly the jobs that act on its own workspaces". */
+const KIND_ACTIONS = {
+  spec: ['audit', 're-audit', 'propose'],
+  'pr-review': ['pr-review'],
+  'pr-respond': ['pr-respond'],
+};
+function actsOnKind(job, kind) { return (KIND_ACTIONS[kind] || []).includes(job.action); }
+
+/* The cards for a section, drawn as ordered bands: what needs you, what a runner is mid-way
+ * through, what is parked on somebody else — then the collapsed Done list, unchanged. Each
+ * workspace's live job is folded onto its card, and an in-flight review whose workspace doesn't
+ * exist yet gets a placeholder. No separate jobs strip — the status lives on the card it belongs to. */
+function sectionEntries(kind, features, requests) {
   const live = (requests || []).filter(isLiveJob);
-  const used = new Set();
-  const withJob = features.map((f) => {
-    const job = jobForFeature(f, live);
-    if (job) used.add(job.id);
-    return { f, job };
-  });
-  // Cards sort by how urgently they need the user: needs-input first, then
-  // errored, running, queued jobs, then idle workspaces (stable within a rank).
-  const urgency = (job) => (job ? jobRank(job) : 0);
-  // Active workspaces stay on top; finished ones drop into a collapsed "Done" section.
-  const activeCards = withJob
-    .filter(({ f }) => f.status !== 'done')
-    .map(({ f, job }) => ({ rank: urgency(job), el: featureCard(f, job) }));
+  const withJob = features.map((ws) => ({ ws, job: jobForFeature(ws, live) }));
+  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, banded
+  // by the same rule as everything else. They lead the list so that, at equal rank, the work that
+  // has no card of its own yet still appears where its real card will land.
+  //
+  // "No workspace yet" is jobBindsTo() asked of every card on the page, and it has to be that and
+  // nothing else. The job jobForFeature HAPPENED to bind is not the test — a PR carrying two live
+  // jobs binds both but folds one, so the runner-up leaks through and draws a placeholder BESIDE
+  // that PR's own card: two contradictory claims about one PR, and a band count naming more
+  // workspaces than the band holds. Neither is `wsId` the test — a job enqueued from "+ New PR
+  // review" carries no wsId and binds by prId, so reading only wsId here is the same duplicate
+  // wearing a different hat. A placeholder's whole justification is that there is no card to fold
+  // the job onto; the one predicate that answers that is the one the folding itself uses.
+  //
+  // What is deliberately NOT excluded: a wsId naming a workspace that is GONE. That job is as
+  // orphaned as one that never carried a wsId, and dropping it (`&& !r.wsId`) hides a running
+  // review from the cockpit entirely. Existence is the question, not the presence of the field.
+  //
+  // What a placeholder is required to have is a NAME, not a PR number. `r.prId` was standing in for
+  // that requirement, and on #/spec it cost the whole surface: a brand-new `audit` carries no prId
+  // (ledger.js takes wsId OR instructions) and no workspace either, so a first spec analysis drew no
+  // card, no placeholder, and — that page having no requests strip — nothing at all. Its only
+  // evidence it was running was Home's strip, one navigation away. pendingJobTitle() is the same
+  // requirement said directly, and it still refuses the anonymous job an unconditional filter would
+  // admit: a "starting…" box that names no work is worse than no box.
+  const pending = live
+    .filter((r) => actsOnKind(r, kind) && pendingJobTitle(r) && !features.some((f) => jobBindsTo(r, f)))
+    .map((r) => ({ ws: null, job: r, cat: categoryOf(null, r) }));
+  // Active workspaces get banded; finished ones drop into a collapsed "Done" section.
+  const active = withJob.filter(({ ws }) => ws.status !== 'done')
+    .map(({ ws, job }) => ({ ws, job, cat: categoryOf(ws, job) }));
+  const done = withJob.filter(({ ws }) => ws.status === 'done');
+  return { pending, active, done };
+}
+
+/* The cards for a section, from the entries decided above. Split from sectionEntries() so the poll
+ * can SIGN the entries and draw them from one decision: categoryOf() reads the clock through
+ * isStaleJob, so deciding twice per tick — once to compare, once to render — is the same drift that
+ * makes a card sit under one header wearing another's label. */
+function sectionGrid(kind, entries) {
+  // The category decided in sectionEntries travels with the card. Recomputing it inside featureCard
+  // re-reads Date.now() through isStaleJob: one decision per render.
+  const bands = bandSections([...entries.pending, ...entries.active], (e, density) => (e.ws
+    ? featureCard(e.ws, e.job, density, e.cat)
+    : pendingJobCard(e.job, density, kind)), 'features-grid');
   // Kept as { sortable, el } pairs so the Done disclosure can reorder them by date — the card
   // element alone carries no timestamp to sort on.
-  const doneCards = withJob.filter(({ f }) => f.status === 'done')
-    .map(({ f, job }) => ({ sortable: f, el: featureCard(f, job) }));
-  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards,
-  // ranked in the same urgency pool as the workspace cards.
-  const pending = live
-    .filter((r) => r.action === kind && r.prId && !used.has(r.id))
-    .map((r) => ({ rank: jobRank(r), el: pendingJobCard(r) }));
-  const top = [...pending, ...activeCards].sort((a, b) => b.rank - a.rank).map((c) => c.el);
-  if (!top.length && !doneCards.length) return sectionEmpty(kind);
-  const lists = [];
-  if (top.length) lists.push(h('div', { class: 'features-grid' }, top));
-  else lists.push(h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.'));
+  const doneCards = entries.done.map(({ ws, job }) => ({ sortable: ws, el: featureCard(ws, job) }));
+
+  if (!bands.length && !doneCards.length) return sectionEmpty(kind);
+  const lists = bands.length
+    ? bands
+    : [h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.')];
   if (doneCards.length) lists.push(doneDisclosure(kind, doneCards, 'features-grid done-disc-body'));
   return h('div', { class: 'section-lists' }, ...lists);
 }
 
-/* Poll requests for a PR section: rebind jobs to cards every tick, and when a job
+/* The signature of what a section grid is showing — bandedListSig, plus the one term the inbox does
+ * not need.
+ *
+ * `rev` is that term. state.home.rows is only ever refilled by renderHome(), which rebuilds the zone
+ * outright, so the inbox's signature can ignore everything a row draws beyond its band and its ages.
+ * state.section.features is refilled IN PLACE by this very poll when a job completes, and what comes
+ * back is exactly the scores, counts and stamps the cards draw — so the refetch has to be able to
+ * move the signature even when no band does. A counter bumped by the refetch says that in one term
+ * and cannot be forgotten by a card that learns a new field. */
+const gridPaint = { sig: null, rev: 0 };
+
+function sectionGridSig(entries) {
+  return `${bandedListSig([...entries.pending, ...entries.active], entries.done)}|rev:${gridPaint.rev}`;
+}
+
+/* The grid's half of the hold. Only a clock: the grid repaints every tick regardless, so unlike the
+ * inbox it has no repaint that could be lost and nothing to defer — just a question of whether THIS
+ * tick may land on an open confirm. Its own record rather than the inbox's, because the two lists
+ * are never on screen together and one shared clock would carry a hold across a navigation. */
+const gridHold = { heldAt: 0 };
+
+/* Said on the cards themselves, for the reason HOME_HELD_NOTE is said on the rows: everything else
+ * on the page keeps updating, so the part that isn't has to be the part that says so. */
+const GRID_HELD_NOTE = {
+  confirm: 'Paused while you answer — the job queue above has moved on and these cards have not. '
+    + 'They catch up the moment you decide.',
+  busy: 'Paused while you work here — the job queue above has moved on and these cards have not. '
+    + 'They catch up in a moment.',
+};
+
+/* Poll requests for a section: rebind jobs to cards every tick, and when a job
  * newly completes, refetch features so the runner's new/updated workspace card shows. */
 function startSectionRequestsPoll(kind) {
   let lastDone = new Set();
   startPolling(`section:${kind}`, async (reqs) => {
     if (current.view !== 'section' || current.kind !== kind) return;
-    // Jobs relevant to this section: same-kind reviews + apply jobs targeting its workspaces.
-    const wsIds = new Set(state.section.features.map((f) => f.id));
-    const rel = reqs.filter((r) => r.action === kind || (r.action === 'apply' && r.wsId && wsIds.has(r.wsId)));
+    // Jobs relevant to this section: same-kind reviews (including ones with no workspace yet, which
+    // is what draws a pending placeholder) + apply jobs targeting a workspace this page draws.
+    //
+    // That second arm USED to be `r.wsId && wsIds.has(r.wsId)` — a hand-rolled copy of the wsId arm
+    // of jobBindsTo, sitting one function outside the guarded zone. It is the exact shape that has
+    // shipped wrong twice: the rule grows an arm (prId, and now same-kind), the copy does not, and
+    // the two surfaces disagree about which jobs exist. Ask the predicate instead. It answers
+    // identically for an `apply` today — the prId arm rejects every non-PR action — so this is one
+    // rule where there were two, not a change of behaviour.
+    //
+    // The kind arm is KIND_ACTIONS now rather than `r.action === kind`: that test is true only
+    // because a PR review's action happens to be its workspace kind, and #/spec — whose jobs are
+    // `audit`/`re-audit`/`propose` — matched nothing at all under it.
+    const known = state.section.features;
+    const rel = reqs.filter((r) => actsOnKind(r, kind)
+      || (r.action === 'apply' && known.some((f) => jobBindsTo(r, f))));
     // The manual-refresh pass has no workspace of its own — it drives the Refresh button
     // instead of a card. An unscoped (`kind: null`) poll covers every PR section.
     renderRefreshZone($('#refresh-zone'), kind, pickPollJob(reqs, kind));
@@ -2906,11 +3678,53 @@ function startSectionRequestsPoll(kind) {
     if (newlyDone) {
       try {
         const fresh = await api(`/api/features?kind=${encodeURIComponent(kind)}`);
-        if (Array.isArray(fresh) && current.view === 'section' && current.kind === kind) state.section.features = fresh;
+        if (Array.isArray(fresh) && current.view === 'section' && current.kind === kind) {
+          state.section.features = fresh;
+          // The cache the grid draws from has been replaced with new server data — scores, counts,
+          // stamps. The signature below must be able to see that even when no band moved, and this
+          // is the only place that knows it happened.
+          gridPaint.rev++;
+        }
       } catch { /* keep cache */ }
     }
     const zone = $('#features-grid-zone');
-    if (zone) zone.replaceChildren(sectionGrid(kind, state.section.features, rel));
+    if (!zone) return;
+    // One decision, signed and then drawn. Computing the entries twice would re-read the clock
+    // through isStaleJob and let the comparison and the render disagree.
+    const entries = sectionEntries(kind, state.section.features, rel);
+    const sig = sectionGridSig(entries);
+    // A tick that changes nothing must touch nothing — the rule the inbox has had since 316edb0,
+    // and the grid had not. Repainting unconditionally was survivable only while the hold was
+    // unconditional too; with the busy ceiling above it, the every-4s rebuild became a GUARANTEED
+    // tear-down every 12 seconds on a section nobody is changing. Measured on an idle grid with
+    // focus parked on a card: 2 focusout / 3 focusin across 40s, and a text selection dying at ~16s.
+    // With nothing outstanding there is nothing to hold either, so the clock and the note both go.
+    if (sig === gridPaint.sig) {
+      gridHold.heldAt = 0;
+      clearZoneHeldNote(zone);
+      return;
+    }
+    // Same DOM swap, same hands. This grid draws the same delete-confirm the inbox does and used to
+    // rebuild straight over it every four seconds — the hole featureCard's own doDelete() comment
+    // names. It stops being merely pre-existing the moment #/spec is polled: that section had no
+    // poller at all, so folding its jobs on would have handed it blocker 2 brand new. The same
+    // helpers as the inbox, deliberately — two rules for "may I repaint now" is how two surfaces
+    // that draw the same confirm come to disagree about whether it survives.
+    //
+    // No `pending` bookkeeping here, unlike the inbox: a held repaint is not lost, because the
+    // signature is recorded only when the paint lands, so the next tick still sees the difference
+    // and redraws it. That is the same self-healing property the inbox's `sig` has, and it is what
+    // lets this grid skip a tick without a deferred-change flag of its own.
+    const hold = zoneHold(zone);
+    if (holdStands(hold, gridHold)) { zoneHeldNote(zone, GRID_HELD_NOTE[hold]); return; }
+    const mark = hold ? zoneFocusMark(zone) : null;
+    gridHold.heldAt = 0;
+    // replaceChildren takes the note with everything else — see renderHomeInbox.
+    zone.replaceChildren(sectionGrid(kind, entries));
+    // Recorded only after the paint landed, for the reason the inbox records its own there: a
+    // signature stamped on a tick that skipped would make the skip permanent.
+    gridPaint.sig = sig;
+    restoreZoneFocus(zone, mark);
   });
 }
 
@@ -2945,7 +3759,64 @@ function lastRoundDate(f) {
   return fmtDate(at);
 }
 
-function featureCard(f, job) {
+/* Does this workspace already have review work behind it? Used both to pick the runner's verb
+ * ("Reviewing" vs "Re-reviewing") and to band a live job, which is why it isn't inlined in
+ * either — two copies of this test would let a card's verb and its band disagree. */
+function hasFindingsOf(f) {
+  if (!f) return false;   // a pending placeholder has no workspace yet, so nothing can be behind it
+  const r = summaryReadiness(f);
+  return Boolean((r.openBySeverity && Object.values(r.openBySeverity).some(Boolean))
+    || f.lastRoundAt || (f.rounds && f.rounds.length));
+}
+
+/* The state pill a compact card wears in place of the dial and the severity counts: the band
+ * table's own label, so the card names the same thing the header above it sorted it by — said in
+ * the workspace's own vocabulary (wsStateLabel), because a spec audit is not a re-review. The band
+ * class stays keyed off the band, so the tint never moves with the wording. */
+function wsStatePill(cat, kind) {
+  const meta = wsState(cat);
+  return h('span', { class: `chip ws-pill ws-pill-${cssSafe(meta.band)}` }, wsStateLabel(cat, kind));
+}
+
+/* The ONE timestamp a compact card earns. Which stamp answers "why is this still here?" depends
+ * on the state: a posted review is waiting on the clock since WE posted; anything else parked is
+ * waiting since our last round. A card with a job gets none — cardJobRow already says what is
+ * happening and how long it has been happening for, and two clocks read as two events. */
+function compactStamp(f, job, cat) {
+  if (job) return null;
+  const s = reviewStampsOf(f);
+  if (cat === 'awaiting-author') return stampEl('Posted', s.lastPostedAt);
+  return stampEl('Last round', s.lastReviewedAt || f.lastRoundAt || null);
+}
+
+/* A compact card: title, why it is parked, the one stamp that explains it, and the live job row if
+ * there is one. No dial, no severity counts, no sources line — those are decision material, and
+ * nothing in these bands is waiting on a decision from you. Same element, same link, same delete
+ * flow as a full card, so it stays recognisably the same object. */
+/* `kind` is the caller's already-resolved one (`f.kind || 'spec'`), not re-read from `f`: a summary
+ * served without a kind must get the same words on a compact card as on a full one. */
+function compactCard(f, job, cat, cls, href, kind) {
+  // Same focus key as the full card: the density it happens to be drawn at is not part of WHICH
+  // control this is, and a band flip between the hold and the release must not lose the user.
+  return h('a', { class: `${cls} fc-compact`, href, dataset: { fk: `card:${f.id}` } },
+    h('div', { class: 'fc-top' },
+      h('div', { class: 'fc-titlewrap' },
+        h('div', { class: 'fc-title' }, f.title || f.id),
+        h('div', { class: 'fc-why' },
+          wsStatePill(cat, kind),
+          compactStamp(f, job, cat)))),
+    job ? cardJobRow(job, hasFindingsOf(f), kind) : null);
+}
+
+/* `density` comes from the band the card is drawn in (WS_BANDS), not from the card itself — the
+ * same workspace is worth a full card under "Needs you" and a one-liner under "Waiting on others".
+ *
+ * `cat` is the WS_STATES key the band loop already decided for this card, handed down rather than
+ * recomputed: categoryOf() reads the clock through isStaleJob, so a second call can answer
+ * differently from the one that chose the header this card is sitting under. A card drawn outside
+ * the bands (the Done disclosure) passes none and wears no state pill — `done` is deliberately not
+ * a WS_STATES key, so there is no honest label to print there. */
+function featureCard(f, job, density = 'full', cat = null) {
   const r = summaryReadiness(f);
   const kind = f.kind || 'spec';
   const metaBits = [];
@@ -2961,27 +3832,36 @@ function featureCard(f, job) {
   if (!(isPrKind && lr)) metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
 
   // A re-run on a workspace that already has findings reads as "re-reviewing".
-  const hasFindings = (r.openBySeverity && Object.values(r.openBySeverity).some(Boolean))
-    || (f.lastRoundAt || (f.rounds && f.rounds.length));
+  const hasFindings = hasFindingsOf(f);
   const busyState = job
     ? (job.needsInput && job.status !== 'error' ? 'needs' : (isStaleJob(job) ? 'stale' : job.status))
     : null;
   const busyClass = job ? ` fc-busy fc-busy-${cssSafe(busyState)}` : '';
+  const cls = `card feature-card ${f.status === 'done' ? 'fc-done' : ''}${busyClass}`.trim();
+  const href = `#/feature/${encodeURIComponent(f.id)}`;
 
-  const card = h('a', { class: `card feature-card ${f.status === 'done' ? 'fc-done' : ''}${busyClass}`.trim(), href: `#/feature/${encodeURIComponent(f.id)}` },
-    h('div', { class: 'fc-top' },
-      h('div', { class: 'fc-titlewrap' },
-        h('div', { class: 'fc-title' }, f.title || f.id),
-        h('div', {}, statusChip(f.status)),
+  const card = density === 'compact'
+    ? compactCard(f, job, cat, cls, href, kind)
+    : h('a', { class: cls, href, dataset: { fk: `card:${f.id}` } },
+      h('div', { class: 'fc-top' },
+        h('div', { class: 'fc-titlewrap' },
+          h('div', { class: 'fc-title' }, f.title || f.id),
+          // The state pill leads, and it is the whole reason a full card is readable: without it
+          // ready-to-post, needs-review, needs-rereview and author-responded drew identically —
+          // the band that demands action said less about itself than the parked compact rows
+          // below it. The lifecycle chip stays because it answers a different question (where is
+          // this workspace in its life) from the pill (what is it waiting on) — but only when it
+          // has an answer: `draft`, which every active card carried, discriminated nothing.
+          h('div', { class: 'fc-chips' }, cat ? wsStatePill(cat, kind) : null, statusChipIfMeaningful(f.status)),
+        ),
+        dialEl(r.score, r.gate, 64, 'dial-sm'),
       ),
-      dialEl(r.score, r.gate, 64, 'dial-sm'),
-    ),
-    job ? cardJobRow(job, hasFindings) : (f.awaitingAuthor ? cardReviewRow(f) : null),
-    // Reviewed-vs-updated stamps: on a PR card this is what tells you a re-review is due.
-    reviewStampsRow(f, kind, { compact: true, cls: 'review-stamps fc-stamps' }),
-    sevCountsRow(r.openBySeverity),
-    metaBits.length ? h('div', { class: 'fc-meta' }, metaBits) : null,
-  );
+      job ? cardJobRow(job, hasFindings, kind) : (f.awaitingAuthor ? cardReviewRow(f) : null),
+      // Reviewed-vs-updated stamps: on a PR card this is what tells you a re-review is due.
+      reviewStampsRow(f, kind, { compact: true, cls: 'review-stamps fc-stamps' }),
+      sevCountsRow(r.openBySeverity),
+      metaBits.length ? h('div', { class: 'fc-meta' }, metaBits) : null,
+    );
 
   const label = f.title || f.id;
   const wrap = h('div', { class: 'fc-wrap' });
@@ -2990,23 +3870,35 @@ function featureCard(f, job) {
     const trashBtn = h('button', {
       class: 'btn-icon fc-delete', type: 'button',
       'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
+      dataset: { fk: `card-del:${f.id}` },
       onclick: (e) => { e.preventDefault(); e.stopPropagation(); showConfirm(); },
     }, h('span', { class: 'icon', html: ICONS.trash }));
     wrap.replaceChildren(card, trashBtn);
   }
 
   function showConfirm() {
-    wrap.replaceChildren(h('div', { class: 'card feature-card delete-confirm' },
+    const confirmEl = h('div', { class: 'card feature-card delete-confirm' },
       h('p', { class: 'delete-confirm-msg' },
         `Delete "${label}"? This removes its findings and history. This can't be undone.`),
       h('div', { class: 'delete-confirm-actions' },
         h('button', { class: 'btn btn-danger', type: 'button', onclick: doDelete }, 'Delete'),
-        h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel'))));
+        h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel')));
+    wrap.replaceChildren(confirmEl);
+    // The same two exits as the inbox row's confirm, for the same reason: this one holds the section
+    // grid's repaint with no ceiling either, and one confirm drawn on two surfaces must not have a
+    // way out on only one of them.
+    wireConfirmDismiss(confirmEl, showDefault);
   }
 
   async function doDelete() {
     try {
       await api(`/api/features/${encodeURIComponent(f.id)}`, { method: 'DELETE' });
+      // The section grid has the same hole as the inbox: startSectionRequestsPoll redraws it from
+      // state.section.features every tick that changes anything, and that cache only refills when
+      // a job newly completes. Unpruned, the deleted card comes back on the next live job.
+      if (state.section) {
+        state.section.features = (state.section.features || []).filter((x) => x.id !== f.id);
+      }
       wrap.remove();
       toast(`Deleted "${label}"`, 'success');
     } catch (e) {
@@ -3031,7 +3923,7 @@ const REQ_STATUS = {
   done:    { glyph: '✓', label: 'Done' },
   error:   { glyph: '✗', label: 'Error' },
 };
-const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis', poll: 'Refresh' };
+const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis', propose: 'Draft changes', poll: 'Refresh' };
 
 /* ---- live job ↔ card binding ----------------------------------------------
  * Instead of a separate "jobs" strip duplicating the cards, the active request
@@ -3081,32 +3973,82 @@ function jobRank(r) {
   if (r.status === 'running') return 2;
   return 1; // queued
 }
-// The live job acting on this workspace: an apply/re-run targeting its id, or a
-// pr-review/pr-respond for the same PR number. Most-urgent wins.
-function jobForFeature(f, jobs) {
+/* Does this job act on this workspace? An apply/re-run naming its id, or a pr-review/pr-respond for
+ * the same PR number — a job may arrive with EITHER, which is why both arms are here and not split.
+ * The "+ New PR review" dialog enqueues { action, prId, title } with no wsId at all, so the prId arm
+ * is the ordinary path for anything started from the UI, not an edge case.
+ *
+ * ONE predicate, called from both sides of the card/placeholder decision, because those two are the
+ * same question asked twice: jobForFeature() asks "which job do I fold onto this card", sectionGrid
+ * asks "does this job already have a card to be folded onto". Spelled out separately they drift, and
+ * the drift is not cosmetic — a filter that inspected only wsId let a wsId-less job bind to a card by
+ * prId and STILL draw a placeholder beside it, so one PR appeared twice under a band header counting
+ * more workspaces than the band held. Whatever binding learns next (a repo, a branch, a second id
+ * shape) it learns here, once, and both callers learn it at the same moment. */
+function jobBindsTo(job, f) {
+  if (!job || !f) return false;
+  // The wsId arm is an exact id match, so it is deliberately kind-agnostic: an `apply` on a spec
+  // workspace names that workspace and nothing else can answer to it.
+  if (job.wsId && job.wsId === f.id) return true;
+  if (job.action !== 'pr-review' && job.action !== 'pr-respond') return false;
+  // The job being PR-shaped is only half the question — the WORKSPACE has to be the SAME shape,
+  // not merely a PR one. Two things break without the equality:
+  //
+  // prNumber() falls back to "any digit run in the id" for any workspace at all, so with no kind
+  // gate at all a pr-review of PR 7001 binds `spec-7001-checkout`: that spec row drew "Re-reviewing"
+  // and was banded into "In progress" by a runner that has never heard of it. And a gate that only
+  // asks "is this workspace a PR kind" still crosses the two PR kinds, which is the subtler loss:
+  // ONE pull request can carry both a `pr-review` workspace (you reviewing it) and a `pr-respond`
+  // one (you answering its reviewers), and they are different work on different findings. Binding
+  // across them puts the wrong verb on the wrong row — "Re-reviewing" on the workspace where you
+  // are replying to reviewer threads — and lets one job claim two cards, which is a band count
+  // naming more workspaces than the band holds.
+  //
+  // A job's action IS the kind of workspace it acts on, so equality is the whole rule.
+  if (job.action !== f.kind) return false;
   const pr = prNumber(f);
-  const mine = jobs.filter((r) =>
-    (r.wsId && r.wsId === f.id) ||
-    ((r.action === 'pr-review' || r.action === 'pr-respond') && r.prId && pr && String(r.prId) === String(pr)));
+  return !!(job.prId && pr && String(job.prId) === String(pr));
+}
+
+// The live job acting on this workspace. Most-urgent wins.
+function jobForFeature(f, jobs) {
+  const mine = jobs.filter((r) => jobBindsTo(r, f));
   return mine.sort((a, b) => jobRank(b) - jobRank(a))[0] || null;
 }
-// What the runner is doing, in card language. `existing` ⇒ a re-run on a workspace
-// that already has findings (re-review) rather than a first pass.
-function jobVerb(job, existing) {
-  if (job.action === 'apply') return 'Posting to PR';
+/* Where an `apply` is writing, per kind. One action, three destinations — the same split
+ * JOB_LABELS_BY_KIND makes for the pill above it, and the reason it cannot be one sentence: an
+ * apply on a spec writes the accepted proposals back to Confluence and ADO and has no pull request
+ * anywhere near it, so "Posting to PR" named something that does not exist. An unknown kind keeps
+ * the PR wording, which is what every caller that could not name a kind meant before. */
+const APPLY_VERB = {
+  spec: 'Applying to the spec',
+  'pr-review': 'Posting to PR',
+  'pr-respond': 'Posting replies',
+};
+
+/* What the runner is doing, in card language. `existing` ⇒ a re-run on a workspace that already has
+ * findings (re-review) rather than a first pass. `kind` is the workspace's, because the words differ
+ * by kind wherever the action is shared — and the audit verbs split on `existing` exactly as the PR
+ * ones do, so the job line and the state pill above it can never disagree about first-pass vs re-run
+ * (both read hasFindingsOf). */
+function jobVerb(job, existing, kind) {
+  if (job.action === 'apply') return APPLY_VERB[kind] || APPLY_VERB['pr-review'];
   if (job.action === 'poll') return 'Checking for updates';
   if (job.action === 'pr-review') return existing ? 'Re-reviewing' : 'Reviewing';
   if (job.action === 'pr-respond') return existing ? 'Re-checking threads' : 'Responding';
+  if (job.action === 'audit') return existing ? 'Re-auditing' : 'Auditing';
+  if (job.action === 're-audit') return 'Re-auditing';
+  if (job.action === 'propose') return 'Drafting changes';
   return REQ_ACTION_LABEL[job.action] || job.action;
 }
 
 // The status line shown on a busy card: spinner + verb + live phase, an amber
 // "needs your input" note, or a red error note (with a dismiss).
-function cardJobRow(job, existing) {
+function cardJobRow(job, existing, kind) {
   const meta = REQ_STATUS[job.status] || REQ_STATUS.queued;
   const needsInput = !!job.needsInput && job.status !== 'done' && job.status !== 'error';
   const stale = isStaleJob(job);
-  const verb = jobVerb(job, existing);
+  const verb = jobVerb(job, existing, kind);
   const phase = job.status === 'running' && job.phase ? ` · ${job.phase}` : '';
   const stateClass = needsInput ? 'needs' : (stale ? 'stale' : job.status);
   // A stale job must not keep spinning — a spinner on something nobody is running is the lie.
@@ -3200,18 +4142,47 @@ function cardReviewRow(f) {
     since ? `⏳ Waiting on author — posted ${since}` : '⏳ Waiting on author');
 }
 
-// A workspace doesn't exist yet (a first review still running): show a placeholder
-// card so the work is visible exactly where its real card will land.
-function pendingJobCard(job) {
-  const title = job.title || `PR ${job.prId}`;
-  return h('div', { class: 'card feature-card fc-pending' },
+/* A workspace doesn't exist yet (a first review still running): show a placeholder card so the work
+ * is visible exactly where its real card will land.
+ *
+ * `density` is the band's, like every other card's. A placeholder that ignored it sat at full
+ * height among one-line compact rows, which breaks the only promise a compact band makes — that
+ * everything under this header is a glance, not a read. What the compact form drops is what the
+ * dial and the instructions line were already only guessing at: there is no workspace to score. */
+function pendingJobCard(job, density = 'full', kind = null) {
+  const title = pendingJobTitle(job);
+  const compact = density === 'compact';
+  // The instructions ARE the title when nothing else named the job, and printing them twice on one
+  // card says the same sentence twice under itself.
+  const showInstr = !compact && job.instructions && job.instructions !== title;
+  return h('div', { class: `card feature-card fc-pending${compact ? ' fc-compact' : ''}` },
     h('div', { class: 'fc-top' },
       h('div', { class: 'fc-titlewrap' },
         h('div', { class: 'fc-title' }, title),
-        h('div', {}, h('span', { class: 'chip status-auditing' }, 'starting…'))),
-      h('div', { class: 'fc-pending-dial', 'aria-hidden': 'true' }, '—')),
-    cardJobRow(job, false),
-    job.instructions ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
+        h('div', { class: compact ? 'fc-why' : 'fc-chips' },
+          h('span', { class: 'chip status-auditing' }, 'starting…'))),
+      compact ? null : h('div', { class: 'fc-pending-dial', 'aria-hidden': 'true' }, '—')),
+    // The section's kind, not the workspace's — there is no workspace. It is the right answer
+    // anyway: a placeholder is only ever drawn in the section whose actions admitted the job
+    // (actsOnKind), so the job's vocabulary and the page's are the same by construction.
+    cardJobRow(job, false, kind),
+    showInstr ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
+}
+
+/* What a placeholder calls itself, and — because a nameless card is worse than none — whether it may
+ * exist at all (sectionEntries filters on this).
+ *
+ * A placeholder has no workspace to take a name from, so it needs one of its own. A PR job has the
+ * number; a spec `audit` enqueued from "+ New spec analysis" has a title only if the user typed one,
+ * and otherwise has the URLs/focus it was queued with, which is precisely what identifies the work
+ * to the person who queued it. Null ⇒ nothing to call it, and no card. */
+function pendingJobTitle(job) {
+  if (job.title) return job.title;
+  if (job.prId) return `PR ${job.prId}`;
+  // `instructions` is a textarea — source URLs one per line, plus any focus note. The first non-
+  // empty line is what identifies the run; the whole of it still prints on the card's meta line
+  // below, so nothing is lost by taking one line for the heading.
+  return String(job.instructions || '').split('\n').map((s) => s.trim()).find(Boolean) || null;
 }
 
 /* One shared requests poll. `scope` lets a re-render (e.g. the finish screen) reuse the running
@@ -3298,7 +4269,7 @@ function requestTarget(r) {
  * link (done). When the job is blocked waiting on the user (needsInput) it grows a
  * prominent amber "needs your input" banner carrying the instruction (note). All
  * text escaped. */
-function requestRow(r) {
+function requestRow(r, onRow = false) {
   const meta = REQ_STATUS[r.status] || REQ_STATUS.queued;
   const target = requestTarget(r);
   const linkable = r.status === 'done' && r.wsId;
@@ -3314,7 +4285,13 @@ function requestRow(r) {
     h('div', { class: 'req-top' },
       h('span', { class: 'req-action' }, REQ_ACTION_LABEL[r.action] || r.action),
       target ? h('span', { class: 'req-target num-line' }, target) : null,
-      r.title ? h('span', { class: 'req-title' }, r.title) : null),
+      r.title ? h('span', { class: 'req-title' }, r.title) : null,
+      // Not "this is a duplicate" — it is a SECOND job on a PR that is already listed, and saying
+      // so is what stops the two entries reading as two PRs.
+      onRow ? h('span', {
+        class: 'req-onrow',
+        title: 'This PR already has a row below — this is a second job on it',
+      }, 'also on a row below') : null),
     h('div', { class: 'req-sub meta-dim' },
       h('span', { class: `req-statetext req-state-${cssSafe(stale ? 'stalled' : r.status)}` },
         stale ? `Not running · ${meta.label.toLowerCase()} ${fmtAge(jobAgeMs(r))} ago` : meta.label + phaseText),
@@ -3394,20 +4371,27 @@ function requestsStripEl(requests, emptyText) {
   return strip;
 }
 
-function populateRequestsStrip(strip, requests, emptyText) {
+/* `opts.note` is the jobs this strip is NOT listing, and `opts.onRow(r)` says whether an entry's
+ * workspace is already on the page below. Both exist because a strip that only counts itself lets
+ * one screen state two different totals for one queue. Optional: the views that show the whole
+ * queue (nothing folded away) pass neither and read exactly as they did. */
+function populateRequestsStrip(strip, requests, emptyText, opts) {
   if (!strip) return;
+  const o = opts || {};
   if (!requests.length) {
     if (emptyText) strip.replaceChildren(h('p', { class: 'meta-dim requests-empty' }, emptyText));
     else strip.replaceChildren();
     return;
   }
+  const onRow = o.onRow || (() => false);
   // Jobs blocked on the user first, then errors/running/queued (stable within a rank).
   const ordered = [...requests].sort((a, b) => jobRank(b) - jobRank(a));
   strip.replaceChildren(
     h('div', { class: 'requests-head' },
       h('span', { class: 'f-suglabel' }, plural(requests.length, 'job', 'jobs')),
+      o.note ? h('span', { class: 'requests-head-note meta-dim' }, o.note) : null,
       requestsLegend()),
-    h('div', { class: 'requests-list' }, ordered.map(requestRow)));
+    h('div', { class: 'requests-list' }, ordered.map((r) => requestRow(r, onRow(r)))));
 }
 
 /* ---- runner control (the "▶ Run queued jobs" button) ------------------------
@@ -3492,10 +4476,13 @@ function renderRunnerZone(zone, queuedCount, label = '') {
   // offering a button whose only outcome is a 403: a queue that cannot be drained is a fact about
   // the mode, not a failure worth a retry affordance.
   if (readOnlyMode()) {
-    zone.replaceChildren(queuedCount
-      ? h('span', { class: 'runner-unavailable', title: READ_ONLY_TITLE },
-          `🔒 ${plural(queuedCount, 'job', 'jobs')} queued — read-only mode will not run them`)
-      : null);
+    // Spread an array rather than passing the empty case straight through: replaceChildren() is a
+    // DOM method, not h(), so it does NOT drop a null child — it stringifies it, and an empty queue
+    // in read-only mode printed the word "null" next to the Refresh button.
+    zone.replaceChildren(...(queuedCount
+      ? [h('span', { class: 'runner-unavailable', title: READ_ONLY_TITLE },
+          `🔒 ${plural(queuedCount, 'job', 'jobs')} queued — read-only mode will not run them`)]
+      : []));
     return;
   }
   if (!r) { zone.replaceChildren(); return; }

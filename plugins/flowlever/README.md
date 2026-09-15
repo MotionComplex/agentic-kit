@@ -34,6 +34,38 @@ populate a real one.
 | `/flowlever:pr-review <prId>` | Load an ADO PR into a `pr-review` workspace, review against spec/ticket, step through findings, post kept comments back. |
 | `/flowlever:pr-respond <prId>` | Load reviewer feedback on your PR into a `pr-respond` workspace, draft replies/fixes, post them back. |
 
+## Triage bands — how every list is ordered
+
+The Home inbox and the three kind sections (`#/spec`, `#/pr-review`, `#/pr-respond`) draw the same
+four bands, top to bottom. A band with nothing in it isn't drawn at all:
+
+| Band | What lands here | Card |
+|---|---|---|
+| **Needs you** | the next move is yours — everything decided and ready to post, findings still to decide (first pass or re-review), or the author has moved since your review | full: state pill, readiness dial, severity counts, both review clocks |
+| **In progress** | a runner is mid-flight on it, or a Post is being written | compact |
+| **Waiting on others** | comments are out with no reply yet, spec changes await a re-audit, or nothing is open at all (`settled`) | compact |
+| **Done** | closed workspaces, in a collapsed disclosure you can sort by last-reviewed / last-modified date | — |
+
+**One string decides the band.** The server reduces each workspace to a single `state` and serves it
+on `/api/home` and `/api/features` alike, so the Home row and the section card for the same
+workspace can never tell different stories. The full state list and which band each falls in is the
+table in [`app/docs/SCHEMA.md`](app/docs/SCHEMA.md#workspace-state--the-one-string-every-list-view-ranks-by).
+
+**A live job outranks that state.** While `/flowlever:watch` is reviewing, re-reviewing, polling or
+posting a workspace, the band follows the *job* — what a runner is doing to it right now is the
+truer answer than a state computed from the very stamps that runner is mid-way through invalidating.
+
+**A stalled or errored job rises into "Needs you"** instead of staying under "In progress". That
+looks like a bug and isn't: a job that errored, that is blocked waiting on input, or that has been
+claiming to run for over three minutes with no runner going is not progressing — nothing more will
+happen to it until *you* do something. Filing it under "In progress" is exactly how a failed Post
+goes unnoticed for a day.
+
+**The two middle bands drop the decision material** — no dial, no severity counts, no sources line;
+just what identifies the workspace, one timestamp saying why it's parked, and the job line if
+there's a job. Nothing in them is waiting on a judgement from you. The flat wall this replaces is
+the one where the two PRs that need you looked exactly like the nine that don't.
+
 ## Scheduled autopilot (`/flowlever:poll`)
 
 `/flowlever:poll` turns the cockpit into an unattended PR-review autopilot: one pass discovers the

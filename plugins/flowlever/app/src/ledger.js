@@ -586,6 +586,138 @@ function reviewStamps(feature, lastRoundAt = null) {
   };
 }
 
+// ---------- one canonical state per workspace ----------
+
+// What the reviewer has already decided about a finding, read from PERSISTED state only —
+// null means genuinely undecided. This mirrors the rules web/app.js applies when it hydrates
+// the review flow off disk, and it has to: the cockpit's list views rank a workspace by whether
+// anything is still undecided, so a second, subtly different notion of "decided" would park a
+// workspace under "needs you" while the page it opens shows nothing left to do.
+//
+// The hunk path is the one that is easy to miss. Accepting a proposal hunk-by-hunk in the diff
+// never writes the finding-level `decision`, so keying off `decision` alone would read the
+// commonest PR-review flow as undecided forever.
+function decisionOf(finding) {
+  if (!finding || typeof finding !== 'object') return null;
+  if (finding.status === 'waived') return 'waive';
+  if (FINDING_DECISIONS.includes(finding.decision)) return finding.decision;
+  const rv = finding.draft && finding.draft.review;
+  if (!rv) return null;
+  // "Don't apply this" IS a decision, not the absence of one. Treating a considered
+  // redirect/reject as undecided would leave the workspace demanding attention it already had.
+  if (rv.verdict === 'redirect') return 'redirect';
+  if (rv.verdict === 'reject') return 'reject';
+  // `draft.review.hunks` is the ledger's own record of the hunks — a map from hunk index to the
+  // decision taken on it — so the recorded keys ARE the hunk ids here. The browser instead walks
+  // the hunk list it recomputes from the before/after diff, which means a draft whose hunks are
+  // only PARTLY decided reads as undecided there and decided here. Closing that skew would mean
+  // a second copy of the diff engine in the ledger, which costs more than the skew does — and what
+  // it costs is bounded. The skew only ever runs one way (decided here, undecided there), so the
+  // workspace reads `ready-to-post` where the browser would say `needs-review`/`needs-rereview`;
+  // all three sit in the SAME `needs-you` band, so it can change the label and the rank within that
+  // band and never the band itself. Nothing is hidden by it. The dominant path cannot skew at all:
+  // Approve in web/app.js (`acceptAll`) writes an entry for every hunk id, so it takes a
+  // strict-subset accept with the remainder left untouched to reach the disagreement.
+  const statuses = Object.values(rv.hunks || {}).map((h) => h && h.status);
+  if (!statuses.length) return null;
+  if (!statuses.every((s) => s === 'accepted' || s === 'edited')) return null;
+  return statuses.includes('edited') ? 'edit' : 'approve';
+}
+
+// The nine workspace states in the order the cockpit ranks them, grouped into the four bands the
+// list views draw. ONE table, deliberately: a consumer that wants "which band" and a consumer
+// that wants "which sorts first" must not each carry their own copy of the order, because the
+// two lists drift and the UI then shows a card in one band sorted as if it were in another.
+// Rank is the index — no separate number to keep in step.
+// (The browser layers its own live-runner states on top of these bands; those are its business,
+// not the ledger's — nothing here may assume this is the complete set of things a card can say.)
+const WORKSPACE_STATES = [
+  { state: 'ready-to-post', band: 'needs-you', label: 'Ready to post' },
+  { state: 'needs-review', band: 'needs-you', label: 'Needs review' },
+  { state: 'needs-rereview', band: 'needs-you', label: 'Needs re-review' },
+  { state: 'author-responded', band: 'needs-you', label: 'Author responded' },
+  { state: 'posting', band: 'in-progress', label: 'Posting' },
+  { state: 'awaiting-author', band: 'waiting', label: 'Awaiting author' },
+  { state: 'awaiting-reaudit', band: 'waiting', label: 'Awaiting re-audit' },
+  { state: 'settled', band: 'waiting', label: 'Settled' },
+  { state: 'done', band: 'done', label: 'Done' },
+];
+
+// Is this finding still LIVE work on the reviewer's side? Open/reworking and not already out of
+// their hands — nothing posted to the PR, nothing written back to the spec, no runner mid-write.
+// This is the same set `computeReadiness` scores as "open", i.e. the one the `counts.open` on a
+// list row is drawn from.
+function isLiveFinding(finding) {
+  return isOpen(finding) && !isPosted(finding) && !isApplied(finding) && !isPending(finding);
+}
+
+// Is this finding still something the REVIEWER has to decide on? Live (above) AND carrying
+// something decidable — a code-diff `draft` or a non-empty `suggestion` (the proposed PR comment).
+// PR-review findings usually carry only a suggestion, so dropping the suggestion arm would make
+// every PR workspace look like it had nothing to review.
+//
+// Deliberately NARROWER than isLiveFinding, and it must stay that way: this predicate mirrors
+// web/app.js's `reviewableFindings()`, which is what the review stepper walks. Widening it to take
+// in live findings with nothing attached would hand the stepper cards it cannot render a decision
+// for. Where the state machine needs "is there live work at all", it asks isLiveFinding instead.
+function isReviewable(finding) {
+  if (!isLiveFinding(finding)) return false;
+  const hasSuggestion = typeof finding.suggestion === 'string' && finding.suggestion.trim() !== '';
+  return Boolean(finding.draft) || hasSuggestion;
+}
+
+// Has anything on this workspace ever gone out? It is the only durable first-pass/second-pass
+// split: a re-review round reopens findings that look exactly like first-round ones. The
+// per-finding stamp is checked as well as the workspace one because a workspace posted before
+// feature.review existed carries the evidence only on its findings.
+function everPosted(feature, list) {
+  return Boolean(feature && feature.review && feature.review.lastPostedAt)
+    || list.some((f) => Boolean(f && f.postedAt));
+}
+
+// The single answer to "what is going on with this workspace?", computed here rather than in the
+// browser so every surface — inbox rows, section cards, anything later — reads the SAME string.
+// The order of the tests is the contract: each one claims the workspace outright, so the earlier
+// a rule sits the more it outranks the rest. In particular an in-flight post wins over everything
+// but `done`, because while the runner is mid-write the ledger's other stamps are still the
+// pre-post ones and any later rule would describe a state that has already moved on.
+function workspaceState(feature, findings, lastRoundAt = null) {
+  const list = Array.isArray(findings) ? findings : [];
+  if (feature && feature.status === 'done') return 'done';
+  if (list.some(isPending)) return 'posting';
+
+  const reviewable = list.filter(isReviewable);
+  if (reviewable.some((f) => decisionOf(f) === null)) {
+    // Whether this is a first pass or a second one changes what the user is being asked to do.
+    return everPosted(feature, list) ? 'needs-rereview' : 'needs-review';
+  }
+  // Everything decidable has been decided and none of it has gone out yet — the user's next
+  // move is the Post button, not another read-through.
+  if (reviewable.length) return 'ready-to-post';
+
+  if (list.some(isPosted)) {
+    // Either the runner explicitly flagged a response, or the recorded PR activity is newer than
+    // our last round. Both mean the same thing: there is a delta on the PR to reconcile.
+    const responded = Boolean(feature && feature.review && feature.review.authorRespondedAt)
+      || reviewStamps(feature, lastRoundAt).newSinceReview;
+    return responded ? 'author-responded' : 'awaiting-author';
+  }
+  if (list.some(isApplied)) return 'awaiting-reaudit';
+
+  // Backstop, and the reason this whole function exists. A live finding carrying neither a draft
+  // nor a suggestion is invisible to isReviewable, so without this it walks past every rule above
+  // and lands on `settled` — drawn in the "waiting on others" band at minimum density, on a row
+  // whose own `counts.open` says there is open work. The user would be told to wait on somebody
+  // else for work that is nobody's but theirs, by the one list built to stop work going missing.
+  // `ingestFindings` defaults `suggestion` to '', so this arrives through the documented path.
+  // Reviewable or not, the state has to name it — the user decides what to do with an empty one.
+  if (list.some(isLiveFinding)) return everPosted(feature, list) ? 'needs-rereview' : 'needs-review';
+
+  // Nothing open, nothing out, not marked done: the work is finished but the workspace has not
+  // been closed. It is a real resting place, not an error — hence a name of its own.
+  return 'settled';
+}
+
 // Register a source on a workspace. Idempotent by the type's key field: re-adding the same
 // Confluence page / work item / Figma file UPDATES that entry instead of appending a second copy
 // (a duplicate would double-count in the coverage matrix and the dashboard's source counts).
@@ -1987,6 +2119,9 @@ module.exports = {
   setFeatureStatus,
   setFeatureReview,
   reviewStamps,
+  WORKSPACE_STATES,
+  decisionOf,
+  workspaceState,
   loadLedger,
   loadRounds,
   fingerprint,

@@ -1171,3 +1171,205 @@ test('deleteRequest removes the request and returns { id, deleted: true }', () =
 test('deleteRequest throws EUSER for an unknown id', () => {
   assert.throws(() => ledger.deleteRequest('req-nope-xyz'), (e) => e.code === 'EUSER');
 });
+
+// ---------- decisionOf / workspaceState (the canonical per-workspace state) ----------
+
+let fpSeq = 0;
+// A finding as it sits ON DISK — these two functions read persisted shape only, so the fixtures
+// are plain objects rather than round-tripped ledger writes. That is the point: the rules must
+// hold for any finding the cockpit can load, including ones written by an older build.
+function f(over = {}) {
+  fpSeq += 1;
+  return { fp: `fp-${fpSeq}`, status: 'open', suggestion: 'Say something about this.', ...over };
+}
+function withHunks(hunks, over = {}) {
+  return f({ draft: { before: 'a', after: 'b', review: { hunks, note: '', verdict: 'proposed' } }, ...over });
+}
+
+test('decisionOf: a waived finding reads as waived whatever else is on it', () => {
+  assert.equal(ledger.decisionOf(f({ status: 'waived' })), 'waive');
+  // the waive outranks a stored decision AND a draft verdict
+  assert.equal(ledger.decisionOf(withHunks({}, { status: 'waived', decision: 'approve' })), 'waive');
+});
+
+test('decisionOf: a stored finding-level decision passes straight through', () => {
+  assert.equal(ledger.decisionOf(f({ decision: 'approve' })), 'approve');
+  assert.equal(ledger.decisionOf(f({ decision: 'edit' })), 'edit');
+  assert.equal(ledger.decisionOf(f({ decision: 'fix-only' })), 'fix-only');
+});
+
+test('decisionOf: nothing decided reads as null', () => {
+  assert.equal(ledger.decisionOf(f()), null, 'a bare open finding is undecided');
+  assert.equal(ledger.decisionOf(f({ draft: { before: 'a', after: 'b' } })), null, 'a draft nobody reviewed');
+  assert.equal(ledger.decisionOf(withHunks({})), null, 'a review with no hunk decisions at all');
+  assert.equal(ledger.decisionOf(null), null);
+});
+
+test('decisionOf: redirect and reject verdicts are decisions in their own right', () => {
+  const redirect = f({ draft: { before: 'a', after: 'b', review: { hunks: {}, verdict: 'redirect', note: 'elsewhere' } } });
+  assert.equal(ledger.decisionOf(redirect), 'redirect');
+  const reject = f({ draft: { before: 'a', after: 'b', review: { hunks: {}, verdict: 'reject', note: 'no' } } });
+  assert.equal(ledger.decisionOf(reject), 'reject');
+});
+
+test('decisionOf: every hunk accepted → approve; any edited → edit; any rejected → undecided', () => {
+  assert.equal(ledger.decisionOf(withHunks({ 0: { status: 'accepted' }, 1: { status: 'accepted' } })), 'approve');
+  assert.equal(ledger.decisionOf(withHunks({ 0: { status: 'accepted' }, 1: { status: 'edited', editedText: 'x' } })), 'edit');
+  assert.equal(ledger.decisionOf(withHunks({ 0: { status: 'edited', editedText: 'x' } })), 'edit');
+  // A rejected hunk is not a finding-level decision — the reviewer still owes an answer on the rest.
+  assert.equal(ledger.decisionOf(withHunks({ 0: { status: 'accepted' }, 1: { status: 'rejected' } })), null);
+});
+
+test('WORKSPACE_STATES is one ordered table covering all nine states in band order', () => {
+  assert.equal(ledger.WORKSPACE_STATES.length, 9);
+  assert.deepEqual(ledger.WORKSPACE_STATES.map((s) => s.state), [
+    'ready-to-post', 'needs-review', 'needs-rereview', 'author-responded',
+    'posting',
+    'awaiting-author', 'awaiting-reaudit', 'settled',
+    'done',
+  ]);
+  assert.deepEqual(ledger.WORKSPACE_STATES.map((s) => s.band), [
+    'needs-you', 'needs-you', 'needs-you', 'needs-you',
+    'in-progress',
+    'waiting', 'waiting', 'waiting',
+    'done',
+  ]);
+  // Every state carries a label, and the bands appear in contiguous runs — a consumer that ranks
+  // by index must get the band grouping for free, or it needs a second list and they will drift.
+  for (const row of ledger.WORKSPACE_STATES) {
+    assert.ok(row.label && typeof row.label === 'string', `${row.state} needs a label`);
+  }
+  const bandsInOrder = [...new Set(ledger.WORKSPACE_STATES.map((s) => s.band))];
+  assert.deepEqual(bandsInOrder, ['needs-you', 'in-progress', 'waiting', 'done']);
+  assert.equal(new Set(ledger.WORKSPACE_STATES.map((s) => s.state)).size, 9, 'no duplicate states');
+});
+
+test('workspaceState: open finding + suggestion, never posted → needs-review', () => {
+  const feature = { status: 'draft', review: {} };
+  assert.equal(ledger.workspaceState(feature, [f(), f(), f()], '2026-09-14T09:15:32.153Z'), 'needs-review');
+});
+
+test('workspaceState: a pending post outranks everything but done', () => {
+  const feature = { status: 'draft', review: { lastPostedAt: '2026-09-01T00:00:00.000Z' } };
+  const findings = [
+    f({ status: 'reworking', decision: 'approve', pending: 'post' }),
+    f({ status: 'reworking', decision: 'approve', pending: 'post' }),
+  ];
+  assert.equal(ledger.workspaceState(feature, findings, '2026-09-14T06:47:22.104Z'), 'posting');
+});
+
+test('workspaceState: posted + newer PR activity than our last round → author-responded', () => {
+  const feature = { status: 'draft', review: { lastPostedAt: '2026-09-14T08:55:30.961Z', lastActivityAt: '2026-09-11T06:06:36.250Z' } };
+  const findings = [f({ status: 'reworking', postedAt: '2026-09-14T08:55:30.961Z' })];
+  assert.equal(ledger.workspaceState(feature, findings, '2026-09-11T05:29:24.744Z'), 'author-responded');
+});
+
+test('workspaceState: posted with no newer activity → awaiting-author', () => {
+  const feature = { status: 'draft', review: { lastPostedAt: '2026-09-14T08:48:58.633Z', lastActivityAt: '2026-09-10T11:19:29.815Z' } };
+  const findings = [f({ status: 'reworking', postedAt: '2026-09-14T08:48:58.633Z' })];
+  assert.equal(ledger.workspaceState(feature, findings, '2026-09-11T05:26:08.980Z'), 'awaiting-author');
+  // the explicit runner flag reaches the same conclusion as the clocks do
+  const flagged = { ...feature, review: { ...feature.review, authorRespondedAt: '2026-09-12T00:00:00.000Z' } };
+  assert.equal(ledger.workspaceState(flagged, findings, '2026-09-11T05:26:08.980Z'), 'author-responded');
+});
+
+test('workspaceState: resolved+posted history alongside open undecided drafts → needs-rereview', () => {
+  const feature = { status: 'draft', review: { lastPostedAt: '2026-08-17T11:47:58.373Z', authorRespondedAt: '2026-09-02T13:43:09.797Z' } };
+  const findings = [
+    f({ status: 'resolved', postedAt: '2026-08-17T11:47:58.373Z', draft: { before: 'a', after: 'b' } }),
+    f({ status: 'resolved', postedAt: '2026-08-17T11:47:58.373Z' }),
+    f({ status: 'open', draft: { before: 'a', after: 'b' } }),
+    f({ status: 'open' }),
+  ];
+  assert.equal(ledger.workspaceState(feature, findings, '2026-08-18T09:13:13.685Z'), 'needs-rereview');
+});
+
+test('workspaceState: a first round with no posting history anywhere → needs-review, not needs-rereview', () => {
+  // Same undecided shape as above; the ONLY difference is that nothing has ever gone out.
+  const findings = [f({ status: 'open', draft: { before: 'a', after: 'b' } })];
+  assert.equal(ledger.workspaceState({ status: 'draft', review: {} }, findings, null), 'needs-review');
+  // a per-finding postedAt is enough evidence on its own — a workspace can predate feature.review
+  const withStamp = [...findings, f({ status: 'resolved', postedAt: '2026-08-01T00:00:00.000Z' })];
+  assert.equal(ledger.workspaceState({ status: 'draft', review: {} }, withStamp, null), 'needs-rereview');
+});
+
+test('workspaceState: everything decided and nothing out yet → ready-to-post', () => {
+  const feature = { status: 'draft', review: {} };
+  const findings = [
+    f({ decision: 'approve' }),
+    withHunks({ 0: { status: 'accepted' } }),
+    f({ status: 'waived' }),
+    f({ status: 'resolved' }),                       // not reviewable, must not hold the state back
+  ];
+  assert.equal(ledger.workspaceState(feature, findings, null), 'ready-to-post');
+});
+
+test('workspaceState: applied spec changes with nothing left to triage → awaiting-reaudit', () => {
+  const feature = { status: 'reworking', review: {} };
+  const findings = [
+    f({ status: 'reworking', appliedAt: '2026-09-10T00:00:00.000Z' }),
+    f({ status: 'resolved' }),
+  ];
+  assert.equal(ledger.workspaceState(feature, findings, null), 'awaiting-reaudit');
+});
+
+test('workspaceState: nothing open, nothing out, not closed → settled', () => {
+  const feature = { status: 'ready', review: {} };
+  assert.equal(ledger.workspaceState(feature, [f({ status: 'resolved' }), f({ status: 'waived' })], null), 'settled');
+  assert.equal(ledger.workspaceState(feature, [], null), 'settled', 'a workspace with no findings at all');
+});
+
+test('workspaceState: feature.status done wins over every other signal', () => {
+  const feature = { status: 'done', review: { lastPostedAt: '2026-09-01T00:00:00.000Z', authorRespondedAt: '2026-09-02T00:00:00.000Z', lastActivityAt: '2026-09-30T00:00:00.000Z' } };
+  const findings = [
+    f({ status: 'open' }),                                          // would be needs-rereview
+    f({ status: 'reworking', pending: 'post', decision: 'approve' }), // would be posting
+    f({ status: 'reworking', postedAt: '2026-09-01T00:00:00.000Z' }), // would be author-responded
+  ];
+  assert.equal(ledger.workspaceState(feature, findings, '2026-09-01T00:00:00.000Z'), 'done');
+});
+
+test('workspaceState: a finding with neither draft nor suggestion is still not REVIEWABLE', () => {
+  // isReviewable mirrors web/app.js's reviewableFindings(), which drives the stepper, so the
+  // settled backstop must NOT have widened it. If it had, this bare finding would join the
+  // reviewable set as undecided and drag the workspace back to needs-review.
+  const bare = { fp: 'fp-bare', status: 'open', suggestion: '   ' };
+  const feature = { status: 'draft', review: {} };
+  assert.equal(ledger.workspaceState(feature, [f({ decision: 'approve' }), bare], null), 'ready-to-post');
+});
+
+test('workspaceState: a live finding with nothing attached never reads settled', () => {
+  // The failure this whole state machine exists to prevent. `ingestFindings` defaults `suggestion`
+  // to '', so an open finding with no draft and an empty suggestion is reachable through the
+  // documented path — and it is invisible to isReviewable. Falling through to `settled` would draw
+  // it in the "waiting on others" band while `counts.open` on the same row says there is open work.
+  const feature = { status: 'draft', review: {} };
+  const bare = { fp: 'fp-bare-1', status: 'open', suggestion: '' };
+  assert.equal(ledger.workspaceState(feature, [bare], null), 'needs-review');
+  // whitespace-only is the same nothing, and `reworking` is just as live as `open`
+  assert.equal(ledger.workspaceState(feature, [{ fp: 'fp-bare-2', status: 'reworking', suggestion: '   ' }], null), 'needs-review');
+});
+
+test('workspaceState: the live-finding backstop takes the same everPosted split', () => {
+  // Which pass the user is on still has to be said — a bare finding on a re-review round is a
+  // second look, not a first one.
+  const bare = { fp: 'fp-bare-3', status: 'open', suggestion: '' };
+  const posted = { status: 'draft', review: { lastPostedAt: '2026-08-17T11:47:58.373Z' } };
+  assert.equal(ledger.workspaceState(posted, [bare], null), 'needs-rereview');
+  // per-finding evidence alone is enough, exactly as on the reviewable path
+  const viaFinding = [bare, f({ status: 'resolved', postedAt: '2026-08-01T00:00:00.000Z' })];
+  assert.equal(ledger.workspaceState({ status: 'draft', review: {} }, viaFinding, null), 'needs-rereview');
+});
+
+test('workspaceState: the backstop only catches LIVE findings, and outranks nothing above it', () => {
+  // Posted / applied / pending / resolved findings are out of the reviewer's hands, so they must
+  // keep reaching the states that already claim them — the guard sits last for exactly that reason.
+  const feature = { status: 'ready', review: {} };
+  assert.equal(ledger.workspaceState(feature, [f({ status: 'resolved' }), f({ status: 'waived' })], null), 'settled');
+  assert.equal(ledger.workspaceState(feature, [], null), 'settled');
+  const bare = (fp, over = {}) => ({ fp, status: 'reworking', suggestion: '', ...over });
+  assert.equal(ledger.workspaceState(feature, [bare('b1', { appliedAt: '2026-09-10T00:00:00.000Z' })], null), 'awaiting-reaudit');
+  assert.equal(ledger.workspaceState(feature, [bare('b2', { postedAt: '2026-09-10T00:00:00.000Z' })], null), 'awaiting-author');
+  assert.equal(ledger.workspaceState(feature, [bare('b3', { pending: 'post' })], null), 'posting');
+  assert.equal(ledger.workspaceState({ status: 'done', review: {} }, [bare('b4')], null), 'done');
+});

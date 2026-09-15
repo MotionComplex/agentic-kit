@@ -263,15 +263,119 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 /* tint the card border by job state so a glance reads "busy / blocked / failed" */
 .fc-busy { border-color: var(--accent-line); }
 .fc-busy-error { border-color: var(--notready-line); }
-/* Needs-your-input cards are sorted to the top and tinted whole-card so they can't be missed. */
-.feature-card.fc-busy-needs { border-color: var(--major-line); background: var(--major-soft); }
-.feature-card.fc-busy-needs:hover { border-color: var(--major); }
+/* Needs-your-input cards are sorted to the top and tinted whole-card so they can't be missed. The
+   inbox row wears the same fc-busy-* classes rather than a parallel ir-busy-* set: one job state,
+   one tint, and a row that has folded a job on is the same object a card is. */
+.feature-card.fc-busy-needs,
+.inbox-row.fc-busy-needs { border-color: var(--major-line); background: var(--major-soft); }
+.feature-card.fc-busy-needs:hover,
+.inbox-row.fc-busy-needs:hover { border-color: var(--major); }
 .fc-busy-needs .fc-job { border-color: var(--major-line); background: var(--major-soft); }
 .fc-busy-error .fc-job { border-color: var(--notready-line); background: var(--notready-soft); }
 /* Stalled: amber like needs-input (it needs you), but the card border stays calm — the point is
    "nothing is happening here", not "emergency". */
 .fc-busy-stale { border-color: var(--major-line); }
 .fc-busy-stale .fc-job { border-color: var(--major-line); background: var(--major-soft); }
+/* ============================== triage bands ============================== */
+
+/* The band header is structure, not a control: no border, no fill, no hover — a quiet label with a
+ * hairline running out to the edge, so the eye reads it as a divider and never tries to click it.
+ * (The Done disclosure right below IS clickable, which is exactly why these must not look alike.) */
+.band-head { display: flex; align-items: center; gap: 8px; padding: 2px 2px 10px; }
+.band-head::after { content: ''; flex: 1; height: 1px; background: var(--line-soft); }
+/* The count lives INSIDE the <h2> so heading navigation announces the band's size along with its
+   name (web/app.js, bandSections). That is a tree change, not a design one, so the h2 becomes the
+   flex row .band-head used to be — same 8px gap, same centring — and the count below re-declares
+   the two things it would otherwise inherit from its new parent. */
+.band-label {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0; font-size: 11px; font-weight: 640; line-height: 1.2;
+  text-transform: uppercase; letter-spacing: .07em; color: var(--fg-mute);
+}
+/* `line-height` and `letter-spacing` restate what the count inherited when it was a SIBLING of the
+   h2 — body's 1.55 and body's -0.005em. Taking the heading's instead would shorten the whole header
+   by ~4px (1.2 against 1.55 on the tallest item in the row) and pad "· N" by its .07em uppercase
+   tracking. Both are visible, and moving the count into the heading is meant to be invisible. */
+.band-count {
+  font-size: 11px; font-weight: 500; line-height: 1.55; letter-spacing: -0.005em;
+  color: var(--fg-mute); font-variant-numeric: tabular-nums;
+}
+/* The only band you must act on carries the brand accent — one tint, so it reads as first. */
+.band-needs-you .band-label { color: var(--accent-text); }
+/* Compact bands pack tighter: less air between rows that hold one line each. Keyed off the density
+   the band emits, never off which bands happen to be compact today — a list of band names here is
+   a second copy of WS_BANDS' `density` column, and flipping that column would leave the spacing
+   behind on a band that no longer holds one-liners. Both containers the one band loop can draw
+   into, because the sections and the inbox are banded by the same code and must breathe alike.
+
+   8px, and chosen rather than inherited: it arrived as an unremarked 10px → 8px in the commit that
+   added the .inbox selector, so it is restated here with its reason. .inbox already sits at 10px in
+   its full-density form, so a compact override of 10px would be no override at all — the rule would
+   claim to pack the parked bands tighter while leaving the inbox exactly as loose as the band that
+   demands action. 8px is the smallest step that still reads as a gap between one-line rows, and it
+   is the only value that makes this rule true of BOTH containers it names. */
+.band-density-compact .features-grid,
+.band-density-compact .inbox { gap: 8px; }
+
+/* The note a polled list shows while it is holding its repaint (web/app.js, zoneHeldNote). The
+   requests strip and the "▶ Run N jobs" toolbar are outside that hold and keep updating, so without
+   this the screen states two different things about one queue; this is the held half admitting it.
+
+   Sticky at the BOTTOM of the viewport rather than in the flow above the list, and appended rather
+   than prepended, because of when it appears: a delete-confirm is open and the pointer is already
+   over the red Delete button. Anything that pushes the list down by its own height turns a status
+   line into a misclick on something irreversible. Sticky also keeps it on screen on a long list,
+   where the end of the zone is nowhere near the rows being held.
+
+   z-index 3 clears the band headers; it does not need to clear the modal layer, and must not — a
+   dialog over this list is the one thing that should cover it. */
+.zone-held {
+  position: sticky; bottom: 10px; z-index: 3;
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 12px 0 0; padding: 9px 13px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: var(--glass-shadow);
+  color: var(--fg-dim); font-size: 12.5px; line-height: 1.45;
+}
+/* There is deliberately NO height reservation under a held list. A `.zone-holding` padding-bottom of
+   the note's measured height used to sit here, on the theory that a pinned note floats over the last
+   row and that row has to stay reachable — but `position: sticky` keeps the element's own flow box,
+   and that box is already at the END of the zone. Sticky only shifts it UP, and only while the end
+   of the zone is below the fold; at the scroll extreme where it would otherwise land on the last
+   row, it is back in its own space with the row above it. Measured both ways on a 26-row inbox, at
+   1280px and at 420px, at both scroll extremes: the same rows are covered mid-scroll (which the
+   reservation never addressed, since it only ever added room at the end) and no row is covered at
+   maximum scroll either way. What it did add was ~56px of empty space under every held list. */
+.zone-held-glyph { color: var(--fg-mute); line-height: 1.45; }
+/* min-width: 0 so the sentence wraps inside the flex row instead of forcing the note — and with it
+   the page — wider than the viewport at 420px. */
+.zone-held-text { min-width: 0; }
+
+/* A compact card — same object, denser: title, why it's parked, one stamp, the job row. The dial,
+ * the severity counts and the sources line are decision material, and nothing in these bands is
+ * waiting on a decision from you. */
+.fc-compact { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.fc-compact .fc-top { display: block; margin-bottom: 0; }
+.fc-compact .fc-title { font-size: 13.5px; font-weight: 600; }
+.fc-why { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; margin-top: 5px; font-size: 11.5px; }
+.fc-compact .fc-job { padding: 6px 9px; font-size: 12px; }
+
+/* The full card's chip row: the state pill and the lifecycle chip sit side by side and must be
+   allowed to wrap, because the longest pill ("Checking for updates") next to "draft" outruns a
+   narrow card and an overflowing header is worse than a two-line one. */
+.fc-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+
+/* State pill: the WS_STATES label, tinted by band so the pill and the header agree at a glance.
+ * Qualified with .chip on purpose — these sit above the chip block, and a bare .ws-pill-* would
+ * lose the tint to .chip's own colours on source order alone. */
+.chip.ws-pill { font-size: 10.5px; font-weight: 560; padding: 1px 8px; }
+.chip.ws-pill-needs-you   { color: var(--major); border-color: var(--major-line); background: var(--major-soft); }
+.chip.ws-pill-in-progress { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
+.chip.ws-pill-waiting     { color: var(--fg-mute); }
+
 /* placeholder card for a review whose workspace doesn't exist yet */
 .fc-pending { border-style: dashed; cursor: default; }
 .fc-pending:hover { border-color: var(--accent-line); box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight); }
@@ -388,6 +492,19 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .ir-clear { color: var(--ready); font-weight: 540; }
 .ir-arrow { flex: none; color: var(--fg-mute); font-size: 16px; transition: transform var(--dur-fast) var(--ease-interactive), color var(--dur-fast) var(--ease-interactive); }
 .inbox-row:hover .ir-arrow { color: var(--accent-text); transform: translateX(3px); }
+
+/* A compact row — same object, denser: what identifies it, the pill that says why it is parked,
+   and one stamp. The dial and the counts are decision material, and nothing in these bands is
+   waiting on a decision from you, so the row only has to be scannable. */
+.inbox-row.ir-compact { padding: 10px 16px; gap: 12px; }
+.ir-compact .ir-top { margin-bottom: 2px; }
+.ir-compact .ir-title { font-size: 13.5px; font-weight: 600; }
+.ir-compact .ir-needs { font-size: 11.5px; }
+
+/* The live job folded onto a row. `.fc-job` is written for a card's grid, where it spans the full
+   width by itself; inside the row's text column it needs its own separation from the line above. */
+.ir-main .fc-job { margin-top: 8px; }
+.ir-compact .fc-job { padding: 6px 9px; font-size: 12px; }
 .empty-icon { display: inline-flex; color: var(--fg-mute); opacity: .6; margin-bottom: 12px; }
 .empty-icon svg { width: 30px; height: 30px; }
 
@@ -1608,6 +1725,10 @@ a.backlink:focus-visible {
 .requests-strip:empty { display: none; }
 .requests-empty { font-size: 12.5px; margin: 0 0 14px; }
 .requests-head { margin-bottom: 8px; }
+/* "2 JOBS · + 1 on the rows below" is one sentence about one queue. Broken across two lines it
+   reads as two separate claims, which is the arithmetic this note exists to close. */
+.requests-head .f-suglabel { display: inline; margin-bottom: 0; }
+.requests-head-note { font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; margin-left: 7px; }
 .requests-list { display: flex; flex-direction: column; gap: 8px; }
 .req-row {
   display: flex; align-items: flex-start; gap: 11px;
@@ -1633,6 +1754,11 @@ a.backlink:focus-visible {
 .req-target { font-family: var(--mono); font-size: 11.5px; color: var(--fg-dim);
   background: var(--panel-3); border-radius: 6px; padding: 1px 7px; }
 .req-title { font-size: 12.5px; color: var(--fg-dim); }
+/* Marks a strip entry whose PR already has a row below — a second job on one PR, not a second PR. */
+.req-onrow {
+  font-size: 11px; color: var(--fg-mute); border: 1px solid var(--line-soft);
+  border-radius: 6px; padding: 1px 6px; white-space: nowrap;
+}
 .req-sub { font-size: 12px; margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
 .req-statetext { font-weight: 560; }
 .req-state-running { color: var(--accent-text); }
