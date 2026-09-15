@@ -4476,10 +4476,13 @@ function renderRunnerZone(zone, queuedCount, label = '') {
   // offering a button whose only outcome is a 403: a queue that cannot be drained is a fact about
   // the mode, not a failure worth a retry affordance.
   if (readOnlyMode()) {
-    zone.replaceChildren(queuedCount
-      ? h('span', { class: 'runner-unavailable', title: READ_ONLY_TITLE },
-          `🔒 ${plural(queuedCount, 'job', 'jobs')} queued — read-only mode will not run them`)
-      : null);
+    // Spread an array rather than passing the empty case straight through: replaceChildren() is a
+    // DOM method, not h(), so it does NOT drop a null child — it stringifies it, and an empty queue
+    // in read-only mode printed the word "null" next to the Refresh button.
+    zone.replaceChildren(...(queuedCount
+      ? [h('span', { class: 'runner-unavailable', title: READ_ONLY_TITLE },
+          `🔒 ${plural(queuedCount, 'job', 'jobs')} queued — read-only mode will not run them`)]
+      : []));
     return;
   }
   if (!r) { zone.replaceChildren(); return; }

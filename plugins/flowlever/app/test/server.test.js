@@ -3025,3 +3025,73 @@ test('U7: an idle section grid repaints nothing', () => {
   assert.ok(bumpAt > -1 && bumpAt < entriesAt,
     'before the signature is taken, or the tick that refetched is the tick that skips');
 });
+
+/* replaceChildren() is a DOM method, not h(). h() drops a null child; replaceChildren STRINGIFIES
+ * it, so a `cond ? node : null` argument renders the literal word "null" whenever cond is false.
+ * That shipped: in read-only mode with an empty queue the runner zone printed "null" beside the
+ * Refresh button. The first test runs the real function and checks what reaches replaceChildren;
+ * the second catches the whole class, because this idiom is correct everywhere h() is the caller
+ * and wrong every time the DOM is. */
+test('U8: an empty read-only runner zone clears itself instead of printing "null"', () => {
+  const ui = readUi();
+  const { renderRunnerZone } = liftUi(ui,
+    ['function plural(', 'function renderRunnerZone('],
+    {
+      // Read-only with no runner status is the exact configuration that printed it.
+      readOnlyMode: () => true,
+      runnerStatus: () => null,
+      READ_ONLY_TITLE: 'read-only',
+      // The zone never builds a node in the empty case; in the queued case we only care THAT a node
+      // is handed over, not what it looks like.
+      h: (tag, attrs, ...kids) => ({ tag, attrs, kids }),
+    });
+
+  const calls = [];
+  const zone = { dataset: {}, replaceChildren: (...args) => calls.push(args) };
+
+  renderRunnerZone(zone, 0);
+  assert.equal(calls.length, 1, 'the empty case must still clear the zone');
+  assert.deepEqual(calls[0], [],
+    'with NO arguments — passing null renders the text "null", which is what the bug was');
+
+  renderRunnerZone(zone, 2);
+  assert.equal(calls[1].length, 1, 'a queued read-only zone still says why it will not run');
+  assert.ok(calls[1][0] && typeof calls[1][0] === 'object',
+    'and what it hands over is a node, never a bare value the DOM would stringify');
+});
+
+
+test('U8: no replaceChildren call is handed a bare null', () => {
+  const ui = readUi();
+  const NEEDLE = 'replaceChildren(';
+  const offenders = [];
+
+  for (let at = ui.indexOf(NEEDLE); at > -1; at = ui.indexOf(NEEDLE, at + 1)) {
+    // Read the call's real argument list, balanced, so a wrapped call is read whole.
+    let depth = 0;
+    let end = at + NEEDLE.length - 1;
+    for (let i = end; i < ui.length; i++) {
+      if (ui[i] === '(') depth++;
+      else if (ui[i] === ')' && --depth === 0) { end = i; break; }
+    }
+    const args = ui.slice(at + NEEDLE.length, end);
+
+    // Only a TOP-LEVEL `: null` can reach the DOM. One nested inside an h(...) argument is fine —
+    // h() drops null children, which is exactly why the idiom is safe everywhere else and unsafe
+    // here — and one inside a list that ends in .filter(Boolean) has already been removed.
+    let d = 0;
+    for (let i = 0; i < args.length; i++) {
+      const c = args[i];
+      if (c === '(' || c === '[' || c === '{') d++;
+      else if (c === ')' || c === ']' || c === '}') d--;
+      else if (c === ':' && d === 0 && /^:\s*null(\s|,|$)/.test(args.slice(i))) {
+        offenders.push(`${ui.slice(0, at).split('\n').length}: ${args.trim().slice(0, 60)}`);
+        break;
+      }
+    }
+  }
+
+  assert.deepEqual(offenders, [],
+    'a top-level `cond ? node : null` argument to replaceChildren renders the literal word "null" '
+    + 'when cond is false — spread an array, .filter(Boolean), or guard the call');
+});
