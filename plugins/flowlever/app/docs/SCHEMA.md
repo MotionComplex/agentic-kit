@@ -222,8 +222,8 @@ cockpit showing work in progress that nobody is doing.
   reached `done` while findings are still pending is reported as **not confirmed**, never as posted.
 
 ### The two review clocks — "when can I re-review?"
-The cockpit answers that question by showing two timestamps side by side on every PR workspace (card,
-inbox row and detail header), via `ledger.reviewStamps(feature, lastRoundAt)`:
+The cockpit answers that question by showing two timestamps side by side on every PR workspace (its
+row, on Home and in its section, and its detail header), via `ledger.reviewStamps(feature, lastRoundAt)`:
 - **Reviewed** = `lastRoundAt`, the `at` of the workspace's last ingest round. A round IS a review pass,
   so there is deliberately **no separate stored stamp** for this — it can never drift out of sync.
 - **PR updated** = `review.lastActivityAt` (+ `lastActivityBy`), the real ADO timestamp of the newest
@@ -231,7 +231,7 @@ inbox row and detail header), via `ledger.reviewStamps(feature, lastRoundAt)`:
 
 `reviewStamps` derives **`newSinceReview`** = `lastActivityAt` parses later than `lastReviewedAt`. That is
 the "you can re-review now, and it will actually see something" signal: the UI badges the stamp
-("● new since your review"), the card's review line says "Author responded <when>", and `reviewWait()`
+("● new since your review"), the row's review line says "Author responded <when>", and `reviewWait()`
 treats it exactly like the runner's explicit `authorRespondedAt` flag → the prominent **↻ Re-review** CTA.
 Timestamps are compared with `Date.parse`, not string order, since ADO's offsets/precision differ from ours.
 
@@ -244,11 +244,11 @@ posted finding manually at any time (Mark resolved / Reopen — reopening drops 
 ### Workspace state — the one string every list view ranks by
 `ledger.workspaceState(feature, findings, lastRoundAt)` reduces a whole workspace to **one** state, and
 both list endpoints (`/api/home`, `/api/features`) serve it as `state`. It is computed here, not in the
-browser, so the inbox row and the section card for the same workspace can never tell different stories.
+browser, so the Home row and the section row for the same workspace can never tell different stories.
 
 `ledger.WORKSPACE_STATES` is the single ordered table behind it — `[{ state, band, label }, …]`, ranked by
 index, bands in contiguous runs. One table on purpose: a separate "which band" list and "which sorts
-first" list drift, and the symptom is a card drawn in one band but sorted as if it were in another.
+first" list drift, and the symptom is a row drawn in one band but sorted as if it were in another.
 
 | band | states, in rank order | means |
 |---|---|---|
@@ -670,7 +670,7 @@ GET  /api/home                      → [{ id, title, kind, readiness:{score,gat
 GET  /api/features[?kind=spec|pr-review|pr-respond] → [featureSummary]  (incl. kind + readiness + stamps + counts + state; optional kind filter)
      stamps = { lastReviewedAt, lastActivityAt, lastActivityBy, lastPostedAt, authorRespondedAt, newSinceReview }
               — the two review clocks (see "The two review clocks" above); newSinceReview ⇒ re-review is worthwhile
-     counts = the same tally on both endpoints (one helper serves them), so an inbox row and a section card never disagree
+     counts = the same tally on both endpoints (one helper serves them), so a Home row and a section row never disagree
      state  = the canonical workspace state (see "Workspace state" below) — ONE string, computed server-side
 GET  /api/features/:id              → { feature, ledger, rounds, readiness }
 DELETE /api/features/:id            → 200 { id, deleted: true, cancelledRequests: [<reqId>,...] }; 404 if missing. Removes features/<id>.json, ledger/<id>.json, rounds/<id>.json, and fails (status:'error') any queued/running request that targeted this workspace (`wsId`) instead of leaving it to stall forever or silently re-create the id.

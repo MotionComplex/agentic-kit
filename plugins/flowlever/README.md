@@ -47,7 +47,7 @@ four bands, top to bottom. A band with nothing in it isn't drawn at all:
 | **Done** | closed workspaces, in a collapsed disclosure you can sort by last-reviewed / last-modified date | — |
 
 **One string decides the band.** The server reduces each workspace to a single `state` and serves it
-on `/api/home` and `/api/features` alike, so the Home row and the section card for the same
+on `/api/home` and `/api/features` alike, so the Home row and the section row for the same
 workspace can never tell different stories. The full state list and which band each falls in is the
 table in [`app/docs/SCHEMA.md`](app/docs/SCHEMA.md#workspace-state--the-one-string-every-list-view-ranks-by).
 
@@ -80,7 +80,7 @@ your triage · otherwise **new review**. Re-reviews reuse the PR's workspace, so
 auto-resolves what the author fixed and only the delta surfaces.
 
 **Two review clocks, so you can see when a re-review is due.** Every PR workspace shows the pair
-side by side — on its card, its inbox row and its detail header:
+side by side — on its row (Home and its section alike) and its detail header:
 
 | Stamp | Where it comes from |
 |---|---|

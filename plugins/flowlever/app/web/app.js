@@ -23,19 +23,19 @@ const STATUS_COLS = [
   { key: 'resolved',  label: 'Resolved' },
   { key: 'waived',    label: 'Waived' },
 ];
-/* The bands a list view draws, top to bottom, and how much of each card it spends on them.
- * "Needs you" earns the full card because that is where you actually decide something; the rest
+/* The bands a list view draws, top to bottom, and how much of each row it spends on them.
+ * "Needs you" earns the full row because that is where you actually decide something; the rest
  * only has to identify the row and say why it is parked, so it gets a compact one. Four bands with
- * every card at full detail is the thing this replaces — a flat wall in which the two PRs waiting
+ * every row at full detail is the thing this replaces — a flat wall in which the two PRs waiting
  * on YOU look exactly like the nine that are waiting on someone else. */
 const WS_BANDS = [
   { key: 'needs-you',   label: 'Needs you',         density: 'full'    },
   { key: 'in-progress', label: 'In progress',       density: 'compact' },
   { key: 'waiting',     label: 'Waiting on others', density: 'compact' },
 ];
-/* Every state a card can be in, ordered: position in this array IS the rank, across the whole
+/* Every state a row can be in, ordered: position in this array IS the rank, across the whole
  * list. One table, deliberately — the same reason ledger.js's WORKSPACE_STATES is one table. A
- * separate "which band" map and "which sorts first" list drift apart, and the symptom is a card
+ * separate "which band" map and "which sorts first" list drift apart, and the symptom is a row
  * drawn under one header but ordered as if it belonged under another. A `rank:` number here would
  * be that second copy in miniature, so there isn't one.
  *
@@ -91,7 +91,7 @@ const JOB_LABELS_BY_KIND = {
     'job-reviewing':   'Responding',
   },
 };
-/* The label for a state as THIS kind says it. `kind` may be absent — a card drawn before its
+/* The label for a state as THIS kind says it. `kind` may be absent — a row drawn before its
  * workspace exists has none — and then the table's default wording stands, exactly as it did. */
 function wsStateLabel(key, kind) {
   const per = JOB_LABELS_BY_KIND[kind];
@@ -173,7 +173,7 @@ const state = {
   // (accept/edit/redirect/waive/skip) — the actual edits persist via the draft
   // review API, this just records which path the reviewer chose.
   flow: { active: false, finish: false, featureId: null, items: null, idx: 0, decisions: {}, waiving: null, editingComment: null, persistFailed: {} },
-  section: { kind: null, features: [] },   // cached cards for the open PR section, re-bound to live jobs each poll
+  section: { kind: null, features: [] },   // cached summaries for the open section, re-bound to live jobs each poll
   home: { rows: [] },      // cached inbox rows, re-banded against the live jobs on every poll tick
   runner: null,            // last GET /api/runner — is a session draining the queue right now?
 };
@@ -304,7 +304,7 @@ function stampEl(label, iso, extraClass = '', who = '') {
 /* The stamps line for a PR workspace: when we reviewed, when the PR was last updated by the
  * other side (and by whom), and — when their update is newer than our review — a "new since
  * your review" marker, which is exactly the "you can re-review now" signal. `compact` drops
- * the posted stamp (used on cards, where space is tight). */
+ * the posted stamp (used on rows, where space is tight). */
 function reviewStampsRow(source, kind, { compact = false, cls = 'review-stamps' } = {}) {
   if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
   const s = reviewStampsOf(source);
@@ -467,7 +467,7 @@ function dialEl(score, gate, size, extraClass = '') {
 
 /* "Mark review complete" / "Reopen" — sets the workspace's lifecycle status to `done`
  * (or back to `reworking`). A done workspace reads as completed everywhere: a green check
- * in the header, a done chip on its card, and it drops out of the "needs you" inbox. */
+ * in the header, a done chip on its row, and it drops out of the "needs you" inbox. */
 function completeControl(feature) {
   const done = feature.status === 'done';
   return h('button', {
@@ -499,15 +499,15 @@ function statusChip(status) {
   return h('span', { class: `chip status-${cssSafe(s)}` }, s);
 }
 /* The same chip, drawn only when it discriminates. Inside the bands every active workspace reads
- * `draft` — the ingest default — so the chip was a word repeated on every card beside the state
- * pill that actually says what the workspace is waiting on, and pure width: `.fc-chips` wraps, so
- * "Checking for updates" plus "draft" cost a second line on a narrow card for no information.
+ * `draft` — the ingest default — so the chip was a word repeated on every row beside the state
+ * pill that actually says what the workspace is waiting on, and pure width: the row's top line
+ * wraps, so "Checking for updates" plus "draft" cost a second line on a narrow row for no
+ * information.
  *
  * Deliberately a suppression and not a deletion. `auditing`, `reworking`, `ready` and
  * `implementing` are all reachable through POST /api/features/:id/status even though the real
- * corpus has none today, and each of them IS news next to the state pill. `done` is news too, and
- * still draws for the same reason: the Done disclosure's cards are drawn by featureCard like any
- * other, and `done` is not the default, so the only value this hides is the one that said nothing. */
+ * corpus has none today, and each of them IS news next to the state pill. `done` never reaches here:
+ * a done row draws its own chip (workspaceRow), because that one value is always worth saying. */
 function statusChipIfMeaningful(status) {
   return String(status ?? DEFAULT_STATUS) === DEFAULT_STATUS ? null : statusChip(status);
 }
@@ -655,7 +655,7 @@ function renderGuide() {
           'items whose comment is already there, or releases the ones that never made it.'),
         h('h3', {}, 'The two review clocks — when can I re-review?'),
         h('p', {},
-          'Every PR workspace carries two timestamps, shown together on its card, its Home row and its header: ',
+          'Every PR workspace carries two timestamps, shown together on its row — on Home and in its section — and its header: ',
           h('strong', {}, 'Reviewed'), ' (when we last reviewed it — its last ingest round) and ',
           h('strong', {}, 'PR updated'), ' (when the ', h('em', {}, 'other'),
           ' side last touched the PR: the author on a PR review, the reviewer on a PR respond). ',
@@ -2689,23 +2689,87 @@ function wireConfirmDismiss(confirmEl, cancel) {
   document.addEventListener('pointerdown', onDown, true);
 }
 
-/* `density` is the band's, exactly as a card's is (WS_BANDS): a needs-you row earns the dial and
- * the counts, a parked one earns only what identifies it and the one stamp that says why it is
- * parked. `cat` is the WS_STATES key the band loop already decided, handed down rather than
- * recomputed — the same rule featureCard follows, and for the same reason: categoryOf() reads the
+/* WHICH surface a row is drawn on. Two tables, passed in by the list that draws the row — never
+ * sniffed from `current.view`, because the route is not the question. What a row needs to know is
+ * "am I one of many kinds here, or one of one?", and a renderer that reads the route to answer that
+ * is free to answer it differently from the list that placed it, which is the whole class of bug the
+ * single band/state tables exist to prevent.
+ *
+ *  · `kindBadge` — Home is cross-kind, and the badge is how you tell a spec row from a PR row at a
+ *    glance. Inside a section every row is the same kind, so the badge is the page's own title
+ *    repeated once per row and nothing else.
+ *  · `sectionMeta` — the material the section cards carried and the inbox never did: the open
+ *    severity counts, and for a spec what it is assembled from plus when we last ran a round (and
+ *    the "waiting on author / author responded" line). It is the section's reason to exist, and it
+ *    is decision material, so it rides the full band only — see rowParts.
+ *  · `cache` — which of the two repaint caches this list draws from, so a delete prunes the one that
+ *    would otherwise paint the workspace straight back onto the screen (pruneRowCache). */
+const ROW_HOME = { kindBadge: true, sectionMeta: false, cache: 'home' };
+const ROW_SECTION = { kindBadge: false, sectionMeta: true, cache: 'section' };
+
+/* WHAT a row draws, from the only things that decide it: the band's density (WS_BANDS), the surface
+ * table above, and whether the workspace is finished. Pure, and deliberately separate from the
+ * rendering, so a test can RUN this mapping instead of reading the renderer's text — this is exactly
+ * the shape that has drifted in this file before (the band→density rule was once written twice, in
+ * JS and again in CSS), and the only guard that cannot rot alongside it is one you can execute.
+ *
+ * The rule underneath every `deciding` field is one sentence: decision material goes where a
+ * decision is actually waiting. A parked row is waiting on somebody else and a done row is answered
+ * already — that is why the needs-you bits have dropped out of both since the bands shipped, and the
+ * counts and the sources line are the same kind of thing, so they follow the same rule. */
+function rowParts(opts, density, done) {
+  const compact = density === 'compact';
+  const deciding = !compact && !done;
+  return {
+    kindBadge: !!opts.kindBadge,
+    // The dial is a score you weigh before opening something. Nothing in the compact bands is
+    // waiting on that decision — but a done row keeps it, because its score is its outcome.
+    dial: !compact,
+    bits: deciding,
+    // The ONE stamp a compact row earns, in place of everything else it dropped.
+    stamp: compact,
+    // ONE flag for the four things the full section card carried and the inbox row never did — the
+    // severity counts, the sources/last-round line, the lifecycle chip, and the waiting-on-author
+    // line. One name because they are one decision: they are what a section exists to show, and
+    // they are all decision material, so they all obey the same "only where a decision is waiting"
+    // rule. Splitting it into four identical booleans would only invite three of them to drift.
+    sectionFull: deciding && !!opts.sectionMeta,
+  };
+}
+
+/* ONE row renderer, for every list of workspaces the cockpit draws: the Home inbox and all three
+ * kind sections. There were two — a row and a card for the same object — and that is the drift this
+ * file has been bitten by repeatedly: the binding rule shipped wrong twice because it was written
+ * twice, and the band/density mapping was written twice as well. A workspace looks like one thing
+ * because there is one function that says what a workspace looks like.
+ *
+ * The `ir-` class prefix stays (it began as "inbox row") and is deliberately NOT renamed: it names
+ * the SHAPE, which both surfaces now share, and renaming it would rewrite the stylesheet and Home's
+ * rendered DOM for no behavioural gain.
+ *
+ * `density` is the band's (WS_BANDS): a needs-you row earns the dial and the counts, a parked one
+ * earns only what identifies it and the one stamp that says why it is parked. `cat` is the WS_STATES
+ * key the band loop already decided, handed down rather than recomputed — categoryOf() reads the
  * clock, so a second call can label a row as something other than the header it sits under. A row
- * drawn outside the bands (the Done disclosure) passes neither and looks exactly as it did. */
-function inboxRow(r, job = null, density = 'full', cat = null) {
+ * drawn outside the bands (the Done disclosure) passes neither. */
+function workspaceRow(r, job = null, density = 'full', cat = null, opts = ROW_HOME) {
   const done = r.status === 'done';
   const compact = density === 'compact';
+  const part = rowParts(opts, density, done);
   // A completed workspace never nags; a parked one has nothing to act on either, and its pill and
   // stamp already say why it is here — counts underneath would only invite a read it doesn't need.
-  const bits = done || compact ? [] : needsYouBits(r.counts);
-  const rd = r.readiness || { score: 0, gate: 'in-progress' };
+  const bits = part.bits ? needsYouBits(r.counts) : [];
+  // Through summaryReadiness, not `r.readiness` directly: /api/features can serve a workspace whose
+  // ledger has not been read yet (readiness: null) and older shapes flatten score/gate onto the
+  // summary. Identical on /api/home rows, which always carry the object.
+  const rd = summaryReadiness(r);
+  // The caller's already-resolved kind, resolved once here: a summary served without one must get
+  // the same words everywhere on the row rather than "spec" in one place and nothing in the next.
+  const kind = r.kind || 'spec';
   const wrap = h('div', { class: `ir-wrap ${done ? 'ir-done' : ''}`.trim() });
 
-  // Same job tints as a card, from the same classes — a row with a failed or stalled runner must
-  // read as failed or stalled here too, or Home is where a stuck Post goes unnoticed.
+  // One set of job tints, on the one row — a row with a failed or stalled runner must read as failed
+  // or stalled on every surface, or Home is where a stuck Post goes unnoticed.
   const busyState = job
     ? (job.needsInput && job.status !== 'error' ? 'needs' : (isStaleJob(job) ? 'stale' : job.status))
     : null;
@@ -2721,16 +2785,25 @@ function inboxRow(r, job = null, density = 'full', cat = null) {
   },
     // The dial is decision material — a score you weigh before opening something. Nothing in the
     // compact bands is waiting on that decision, so it goes with the rest of the full row.
-    compact ? null : dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial'),
+    part.dial ? dialEl(rd.score, rd.gate, 44, 'dial-sm ir-dial') : null,
     h('div', { class: 'ir-main' },
-      h('div', { class: 'ir-top' }, kindBadge(r.kind), h('span', { class: 'ir-title' }, r.title || r.id),
-        done ? h('span', { class: 'chip status-done ir-done-chip' }, 'done') : null),
+      // The kind badge is Home's: there it tells a spec row from a PR row, and inside a section
+      // every row already has the page's own kind, so it would be one word repeated down the list.
+      h('div', { class: 'ir-top' }, part.kindBadge ? kindBadge(kind) : null,
+        h('span', { class: 'ir-title' }, r.title || r.id),
+        // The lifecycle chip — where is this workspace in its life — next to the done chip that is
+        // its one always-drawn value. Gated by statusChipIfMeaningful, which suppresses the `draft`
+        // every active workspace carries: a word repeated down the whole list beside the state pill
+        // that actually says what it is waiting on.
+        done
+          ? h('span', { class: 'chip status-done ir-done-chip' }, 'done')
+          : (part.sectionFull ? statusChipIfMeaningful(r.status) : null)),
       h('div', { class: 'ir-needs' },
         // The state leads, and the counts follow it as the detail they are. Without the pill,
         // ready-to-post / needs-review / needs-rereview / author-responded drew identically on the
         // first screen you land on — the inbox was the last surface still hiding the distinction
         // the section cards gained.
-        cat ? wsStatePill(cat, r.kind) : null,
+        cat ? wsStatePill(cat, kind) : null,
         done
           ? h('span', { class: 'ir-clear' }, '✓ Review complete')
           : bits.length
@@ -2738,19 +2811,31 @@ function inboxRow(r, job = null, density = 'full', cat = null) {
             // The pre-band fallback, and only reachable without a pill: a row that says neither
             // what it is waiting on nor what is outstanding says nothing at all.
             : (cat ? null : h('span', { class: 'ir-clear' }, rd.gate === 'ready' ? '✓ Ready to build' : '✓ Nothing needs you')),
-        // The ONE stamp a compact row earns, chosen by the same rule a compact card uses: a posted
+        // The ONE stamp a compact row earns, chosen by the same rule a compact card used: a posted
         // review is waiting on the clock since WE posted, anything else since our last round.
-        compact ? compactStamp(r, job, cat) : null),
+        part.stamp ? compactStamp(r, job, cat) : null,
+        // The open-severity breakdown the full section cards carried — on the SAME line as the
+        // counts it refines, so the row stays a row. It is the section's decision material ("is
+        // there a blocker in here before I open it"), which is why Home, whose owner chose it
+        // without, does not grow one, and why no compact or done row gets it either.
+        part.sectionFull ? sevCountsRow(rd.openBySeverity) : null),
       // PR rows carry the reviewed-vs-updated stamps, so the inbox shows at a glance which
       // PRs have moved since we last looked at them. A completed row has no use for that
       // comparison — but it does need its dates visible, because the Done list can now be sorted
       // by them, and a list ordered by something you cannot see is not a list you can trust.
       done
         ? doneDatesRow(r)
-        : (compact ? null : reviewStampsRow(r, r.kind, { compact: true, cls: 'review-stamps ir-stamps' })),
-      // The live job in the same words the cards use. A row banded by a state a runner is in the
-      // middle of invalidating, with no line saying so, is the inbox lying about what is happening.
-      job ? cardJobRow(job, hasFindingsOf(r), r.kind) : null),
+        : (compact ? null : reviewStampsRow(r, kind, { compact: true, cls: 'review-stamps ir-stamps' })),
+      // What a spec is assembled from, and when we last ran a round — the other half of what the
+      // section cards said. Kept off Home for the same reason the counts are.
+      part.sectionFull ? rowMetaLine(r, kind) : null,
+      // The live job in the same words the cards used. A row banded by a state a runner is in the
+      // middle of invalidating, with no line saying so, is the list lying about what is happening.
+      // With no job, a full section row says instead that the ball is in the author's court — the
+      // line the full cards drew, and the one thing a posted-and-waiting workspace has to say.
+      job
+        ? cardJobRow(job, hasFindingsOf(r), kind)
+        : (part.sectionFull && r.awaitingAuthor ? cardReviewRow(r) : null)),
     h('span', { class: 'ir-arrow', 'aria-hidden': 'true' }, '→'));
 
   const label = r.title || r.id;
@@ -2774,19 +2859,17 @@ function inboxRow(r, job = null, density = 'full', cat = null) {
         h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel')));
     wrap.replaceChildren(confirmEl);
     // Escape / outside-click, both taking the Cancel path. Without a way out, the uncapped hold this
-    // confirm puts on the inbox never ends.
+    // confirm puts on the list it is in never ends — and there is one confirm now, so neither list
+    // can be the one that ships without an exit.
     wireConfirmDismiss(confirmEl, showDefault);
   }
 
   async function doDelete() {
     try {
       await api(`/api/features/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
-      // Taking the row out of the DOM is not enough: the inbox is repainted from state.home.rows
-      // on every tick that sees a change, and that cache is only refilled by renderHome(). Leave
-      // the deleted id in it and the NEXT real change — a job starting anywhere on the page —
-      // paints the workspace you just deleted straight back onto the screen, linking to a 404.
-      // Prune where the delete actually succeeded, so the cache and the server agree from here on.
-      if (state.home) state.home.rows = (state.home.rows || []).filter((row) => row.id !== r.id);
+      // Pruned only where the delete actually succeeded, so the cache and the server agree from
+      // here on — and from THIS surface's cache, which is what `opts` carries (pruneRowCache).
+      pruneRowCache(opts, r.id);
       wrap.remove();
       toast(`Deleted "${label}"`, 'success');
     } catch (e) {
@@ -2797,6 +2880,41 @@ function inboxRow(r, job = null, density = 'full', cat = null) {
 
   showDefault();
   return wrap;
+}
+
+/* Take a deleted workspace out of the cache the list it was in repaints FROM. Removing the element
+ * is not enough: both lists are rebuilt from a cache on every tick that sees a change, and each
+ * cache is only refilled by a full re-render (renderHome for one, a completed job's refetch for the
+ * other). Leave the deleted id in it and the NEXT real change — a job starting anywhere on the page
+ * — paints the workspace you just deleted straight back onto the screen, linking to a 404.
+ *
+ * WHICH cache is the surface's own answer, carried on ROW_HOME/ROW_SECTION, not a guess: one row
+ * renderer now serves both lists, and pruning the wrong one is invisible until the next repaint
+ * resurrects the workspace. The other cache is deliberately left alone — the two lists are never on
+ * screen together, and blanking both would be a second bug hiding behind a fix for the first. */
+function pruneRowCache(opts, id) {
+  if (opts.cache === 'section') {
+    if (state.section) state.section.features = (state.section.features || []).filter((x) => x.id !== id);
+    return;
+  }
+  if (state.home) state.home.rows = (state.home.rows || []).filter((row) => row.id !== id);
+}
+
+/* The line the full section cards carried under everything else: what a spec workspace is assembled
+ * FROM, and when we last ran a round against it. Kept as one line so the row reads as a row. */
+function rowMetaLine(f, kind) {
+  const metaBits = [];
+  // PR workspaces don't carry Confluence/ADO/Figma sources — skip the sources line.
+  if (kind === 'spec') {
+    const src = sourcesLineText(f);
+    if (src) metaBits.push(h('span', {}, src));
+  }
+  const lr = lastRoundDate(f);
+  const isPrKind = kind === 'pr-review' || kind === 'pr-respond';
+  // On PR rows the "Reviewed <ago>" stamp above already carries the last-round time — don't
+  // print it twice; the "no rounds yet" case still needs saying.
+  if (!(isPrKind && lr)) metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
+  return metaBits.length ? h('div', { class: 'ir-meta' }, metaBits) : null;
 }
 
 /* Active-first lists: finished workspaces are tucked into a collapsed <details> so
@@ -2842,7 +2960,7 @@ function setDoneSortKey(key) {
 }
 
 /* Sorts [{ sortable, el }] pairs. Reordering prebuilt elements instead of re-rendering them is what
- * lets both call sites share this — the inbox builds rows, the sections build cards — without
+ * lets both call sites share this — they build the same row, at different surface options — without
  * either having to hand over its render function. */
 function sortDonePairs(pairs, key) {
   const spec = DONE_SORTS[key] || DONE_SORTS[DONE_SORT_DEFAULT];
@@ -2904,8 +3022,9 @@ let bandHeadSeq = 0;
  * `entries` are `{ cat, ... }`: the category is decided ONCE by the caller and travels with the
  * entry, because categoryOf() reads the clock through isStaleJob and a second call can answer
  * differently from the one that chose the header. `render(entry, density)` draws one item at the
- * band's density, and `itemsClass` is the container the view stacks them in — a card grid for a
- * section, the inbox list for Home. */
+ * band's density, and `itemsClass` is the container the view stacks them in. Both callers stack
+ * the same rows in the same `.inbox` list; it stays a parameter because the container is the
+ * caller's business, not the loop's. */
 function bandSections(entries, render, itemsClass) {
   // Rank is the WS_STATES index, and .sort() is stable, so ties keep insertion order.
   const ranked = entries.slice().sort((a, b) => wsState(a.cat).rank - wsState(b.cat).rank);
@@ -2915,7 +3034,7 @@ function bandSections(entries, render, itemsClass) {
     // A header with nothing under it reads as "you have none of these", which is a claim the list
     // doesn't need to make three times per view. Omit the band entirely.
     if (!rows.length) continue;
-    // The density rides out as a class so the stylesheet can space a band by how much card it
+    // The density rides out as a class so the stylesheet can space a band by how much row it
     // holds without keeping its own list of which bands are compact — that second list is the
     // WS_BANDS/band-map drift again, just spelled in CSS, and it survives a `density` flip here.
     // The count moves INSIDE the <h2> and the <section> is named by that heading. Two things were
@@ -2999,7 +3118,7 @@ const homeInbox = { sig: null, reqs: [], pending: false, reload: false, heldAt: 
  *
  * Deliberately EVERY stamp the workspace owns, not only the ones this row's density happens to
  * draw. Re-deriving "which stamp shows at which density" here would be a second copy of
- * inboxRow/compactStamp/reviewStampsRow's rule, and a copy like that drifts silently — with a
+ * rowParts/compactStamp/reviewStampsRow's rule, and a copy like that drifts silently — with a
  * frozen string as the symptom, which is the bug. Over-including costs at most one extra repaint a
  * minute on a workspace whose stamps are under an hour old; under-including costs the regression. */
 function rowAgeText(f, job) {
@@ -3211,7 +3330,7 @@ function flushHomeInboxSoon() { setTimeout(releaseHomeInbox, 0); }
 /* Draws the inbox from the cached rows against the jobs seen this tick, and answers WHICH of those
  * jobs it folded onto a row. The strip needs that answer: a job shown on a row and in the strip
  * states the same thing twice on one screen — the exact duplication the sections removed when they
- * folded jobs onto cards. Returns a Set of job ids — always, whether or not this call repainted,
+ * folded jobs onto rows. Returns a Set of job ids — always, whether or not this call repainted,
  * because the strip's dedupe is about what is ON SCREEN, not about what this tick happened to draw. */
 function renderHomeInbox(requests) {
   const rows = (state.home && state.home.rows) || [];
@@ -3221,7 +3340,7 @@ function renderHomeInbox(requests) {
   const doneRows = [];
   for (const r of rows) {
     if (r.status === 'done') { doneRows.push({ ws: r }); continue; }
-    // Bound exactly as a section card binds its job, through the same two helpers: a PR being
+    // Bound exactly as a section row binds its job, through the same two helpers: a PR being
     // posted, or one whose runner has stalled, must band by what is happening to it right now
     // rather than by whatever it was before the job started.
     const job = jobForFeature(r, live);
@@ -3257,13 +3376,15 @@ function renderHomeInbox(requests) {
   // control. Unfreezing the list at the cost of their place would just be the other failure.
   const mark = hold ? zoneFocusMark(zone) : null;
 
-  const bands = bandSections(active, (e, density) => inboxRow(e.ws, e.job, density, e.cat), 'inbox');
+  const bands = bandSections(active,
+    (e, density) => workspaceRow(e.ws, e.job, density, e.cat, ROW_HOME), 'inbox');
   const lists = bands.length
     ? bands
     : [h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.')];
   if (doneRows.length) {
     lists.push(doneDisclosure('home',
-      doneRows.map((e) => ({ sortable: e.ws, el: inboxRow(e.ws) })), 'inbox done-disc-body'));
+      doneRows.map((e) => ({ sortable: e.ws, el: workspaceRow(e.ws, null, 'full', null, ROW_HOME) })),
+      'inbox done-disc-body'));
   }
   // replaceChildren takes the note with everything else, and there is nothing left on the zone to
   // take down with it (zoneHeldNote), so the paint needs no clear of its own.
@@ -3462,7 +3583,9 @@ async function renderSection(kind) {
   const app = $('#app');
   app.replaceChildren(
     sectionHead(kind),
-    h('div', { class: 'features-grid' }, Array.from({ length: 3 }, () => skel('skel-card'))),
+    // The same skeleton Home draws, because the same rows are what lands here: a card-shaped
+    // placeholder followed by a list of rows is a layout shift the first paint does not need.
+    h('div', { class: 'inbox' }, Array.from({ length: 3 }, () => skel('skel-row'))),
   );
   let features;
   try {
@@ -3478,7 +3601,7 @@ async function renderSection(kind) {
 
   const isPr = kind === 'pr-review' || kind === 'pr-respond';
   state.section = { kind, features };
-  const gridZone = h('div', { id: 'features-grid-zone' },
+  const gridZone = h('div', { id: 'section-list-zone' },
     sectionGrid(kind, sectionEntries(kind, features, [])));
 
   app.replaceChildren(...[
@@ -3502,7 +3625,7 @@ async function renderSection(kind) {
   startSectionRequestsPoll(kind);
 }
 
-/* Which WS_STATES key a card belongs under. A live runner job OUTRANKS the workspace's own state:
+/* Which WS_STATES key a row belongs under. A live runner job OUTRANKS the workspace's own state:
  * what a runner is doing to this PR right now is the truer answer to "what is happening to it"
  * than a state computed from stamps the runner is in the middle of invalidating.
  *
@@ -3537,7 +3660,7 @@ function categoryOf(f, job) {
  *
  *   `apply`  reaches a section only through jobBindsTo, which is what keeps an apply on a PR
  *            workspace out of #/spec: the wsId arm is an exact id match and nothing else answers.
- *   `poll`   is PR discovery. It drives the Refresh button, never a card, and has no workspace.
+ *   `poll`   is PR discovery. It drives the Refresh button, never a row, and has no workspace.
  *
  * — so no PR action appears under `spec` and no spec action under a PR kind, which is the whole of
  * "a section sees exactly the jobs that act on its own workspaces". */
@@ -3548,24 +3671,24 @@ const KIND_ACTIONS = {
 };
 function actsOnKind(job, kind) { return (KIND_ACTIONS[kind] || []).includes(job.action); }
 
-/* The cards for a section, drawn as ordered bands: what needs you, what a runner is mid-way
+/* The rows for a section, drawn as ordered bands: what needs you, what a runner is mid-way
  * through, what is parked on somebody else — then the collapsed Done list, unchanged. Each
- * workspace's live job is folded onto its card, and an in-flight review whose workspace doesn't
- * exist yet gets a placeholder. No separate jobs strip — the status lives on the card it belongs to. */
+ * workspace's live job is folded onto its row, and an in-flight review whose workspace doesn't
+ * exist yet gets a placeholder. No separate jobs strip — the status lives on the row it belongs to. */
 function sectionEntries(kind, features, requests) {
   const live = (requests || []).filter(isLiveJob);
   const withJob = features.map((ws) => ({ ws, job: jobForFeature(ws, live) }));
-  // In-flight reviews for THIS section with no workspace yet → pending placeholder cards, banded
+  // In-flight reviews for THIS section with no workspace yet → pending placeholder rows, banded
   // by the same rule as everything else. They lead the list so that, at equal rank, the work that
-  // has no card of its own yet still appears where its real card will land.
+  // has no row of its own yet still appears where its real row will land.
   //
-  // "No workspace yet" is jobBindsTo() asked of every card on the page, and it has to be that and
+  // "No workspace yet" is jobBindsTo() asked of every row on the page, and it has to be that and
   // nothing else. The job jobForFeature HAPPENED to bind is not the test — a PR carrying two live
   // jobs binds both but folds one, so the runner-up leaks through and draws a placeholder BESIDE
-  // that PR's own card: two contradictory claims about one PR, and a band count naming more
+  // that PR's own row: two contradictory claims about one PR, and a band count naming more
   // workspaces than the band holds. Neither is `wsId` the test — a job enqueued from "+ New PR
   // review" carries no wsId and binds by prId, so reading only wsId here is the same duplicate
-  // wearing a different hat. A placeholder's whole justification is that there is no card to fold
+  // wearing a different hat. A placeholder's whole justification is that there is no row to fold
   // the job onto; the one predicate that answers that is the one the folding itself uses.
   //
   // What is deliberately NOT excluded: a wsId naming a workspace that is GONE. That job is as
@@ -3589,25 +3712,35 @@ function sectionEntries(kind, features, requests) {
   return { pending, active, done };
 }
 
-/* The cards for a section, from the entries decided above. Split from sectionEntries() so the poll
+/* The rows for a section, from the entries decided above. Split from sectionEntries() so the poll
  * can SIGN the entries and draw them from one decision: categoryOf() reads the clock through
  * isStaleJob, so deciding twice per tick — once to compare, once to render — is the same drift that
- * makes a card sit under one header wearing another's label. */
+ * makes a row sit under one header wearing another's label.
+ *
+ * The rows are the inbox's rows, at ROW_SECTION: one renderer for both surfaces, differing only in
+ * the two things that genuinely differ between them (the kind badge, and the material a section
+ * exists to show). A second renderer for the same object is what this replaces. */
 function sectionGrid(kind, entries) {
-  // The category decided in sectionEntries travels with the card. Recomputing it inside featureCard
+  // The category decided in sectionEntries travels with the row. Recomputing it inside the renderer
   // re-reads Date.now() through isStaleJob: one decision per render.
   const bands = bandSections([...entries.pending, ...entries.active], (e, density) => (e.ws
-    ? featureCard(e.ws, e.job, density, e.cat)
-    : pendingJobCard(e.job, density, kind)), 'features-grid');
-  // Kept as { sortable, el } pairs so the Done disclosure can reorder them by date — the card
+    ? workspaceRow(e.ws, e.job, density, e.cat, ROW_SECTION)
+    : pendingJobRow(e.job, density, kind)), 'inbox');
+  // Kept as { sortable, el } pairs so the Done disclosure can reorder them by date — the row
   // element alone carries no timestamp to sort on.
-  const doneCards = entries.done.map(({ ws, job }) => ({ sortable: ws, el: featureCard(ws, job) }));
+  // The job still travels with a done row, exactly as it did with the done card: an `apply` can be
+  // running against a workspace somebody has already marked complete, and bandedListSig signs the
+  // done entries' jobs too — a row that dropped the job would be re-signed on every phase change and
+  // redraw the same thing.
+  const doneRows = entries.done.map(({ ws, job }) => ({
+    sortable: ws, el: workspaceRow(ws, job, 'full', null, ROW_SECTION),
+  }));
 
-  if (!bands.length && !doneCards.length) return sectionEmpty(kind);
+  if (!bands.length && !doneRows.length) return sectionEmpty(kind);
   const lists = bands.length
     ? bands
     : [h('p', { class: 'all-done-note' }, 'No active workspaces — everything below is complete.')];
-  if (doneCards.length) lists.push(doneDisclosure(kind, doneCards, 'features-grid done-disc-body'));
+  if (doneRows.length) lists.push(doneDisclosure(kind, doneRows, 'inbox done-disc-body'));
   return h('div', { class: 'section-lists' }, ...lists);
 }
 
@@ -3617,9 +3750,9 @@ function sectionGrid(kind, entries) {
  * `rev` is that term. state.home.rows is only ever refilled by renderHome(), which rebuilds the zone
  * outright, so the inbox's signature can ignore everything a row draws beyond its band and its ages.
  * state.section.features is refilled IN PLACE by this very poll when a job completes, and what comes
- * back is exactly the scores, counts and stamps the cards draw — so the refetch has to be able to
+ * back is exactly the scores, counts and stamps the rows draw — so the refetch has to be able to
  * move the signature even when no band does. A counter bumped by the refetch says that in one term
- * and cannot be forgotten by a card that learns a new field. */
+ * and cannot be forgotten by a row that learns a new field. */
 const gridPaint = { sig: null, rev: 0 };
 
 function sectionGridSig(entries) {
@@ -3632,12 +3765,12 @@ function sectionGridSig(entries) {
  * are never on screen together and one shared clock would carry a hold across a navigation. */
 const gridHold = { heldAt: 0 };
 
-/* Said on the cards themselves, for the reason HOME_HELD_NOTE is said on the rows: everything else
+/* Said on the rows themselves, for the reason HOME_HELD_NOTE is said on Home's: everything else
  * on the page keeps updating, so the part that isn't has to be the part that says so. */
 const GRID_HELD_NOTE = {
-  confirm: 'Paused while you answer — the job queue above has moved on and these cards have not. '
+  confirm: 'Paused while you answer — the job queue above has moved on and these rows have not. '
     + 'They catch up the moment you decide.',
-  busy: 'Paused while you work here — the job queue above has moved on and these cards have not. '
+  busy: 'Paused while you work here — the job queue above has moved on and these rows have not. '
     + 'They catch up in a moment.',
 };
 
@@ -3687,7 +3820,7 @@ function startSectionRequestsPoll(kind) {
         }
       } catch { /* keep cache */ }
     }
-    const zone = $('#features-grid-zone');
+    const zone = $('#section-list-zone');
     if (!zone) return;
     // One decision, signed and then drawn. Computing the entries twice would re-read the clock
     // through isStaleJob and let the comparison and the render disagree.
@@ -3705,8 +3838,8 @@ function startSectionRequestsPoll(kind) {
       return;
     }
     // Same DOM swap, same hands. This grid draws the same delete-confirm the inbox does and used to
-    // rebuild straight over it every four seconds — the hole featureCard's own doDelete() comment
-    // names. It stops being merely pre-existing the moment #/spec is polled: that section had no
+    // rebuild straight over it every four seconds — the hole pruneRowCache's comment names. It
+    // stops being merely pre-existing the moment #/spec is polled: that section had no
     // poller at all, so folding its jobs on would have handed it blocker 2 brand new. The same
     // helpers as the inbox, deliberately — two rules for "may I repaint now" is how two surfaces
     // that draw the same confirm come to disagree about whether it survives.
@@ -3769,146 +3902,24 @@ function hasFindingsOf(f) {
     || f.lastRoundAt || (f.rounds && f.rounds.length));
 }
 
-/* The state pill a compact card wears in place of the dial and the severity counts: the band
- * table's own label, so the card names the same thing the header above it sorted it by — said in
- * the workspace's own vocabulary (wsStateLabel), because a spec audit is not a re-review. The band
- * class stays keyed off the band, so the tint never moves with the wording. */
+/* The state pill a row wears: the band table's own label, so the row names the same thing the header
+ * above it sorted it by — said in the workspace's own vocabulary (wsStateLabel), because a spec audit
+ * is not a re-review. The band class stays keyed off the band, so the tint never moves with the
+ * wording. */
 function wsStatePill(cat, kind) {
   const meta = wsState(cat);
   return h('span', { class: `chip ws-pill ws-pill-${cssSafe(meta.band)}` }, wsStateLabel(cat, kind));
 }
 
-/* The ONE timestamp a compact card earns. Which stamp answers "why is this still here?" depends
+/* The ONE timestamp a compact row earns. Which stamp answers "why is this still here?" depends
  * on the state: a posted review is waiting on the clock since WE posted; anything else parked is
- * waiting since our last round. A card with a job gets none — cardJobRow already says what is
+ * waiting since our last round. A row with a job gets none — cardJobRow already says what is
  * happening and how long it has been happening for, and two clocks read as two events. */
 function compactStamp(f, job, cat) {
   if (job) return null;
   const s = reviewStampsOf(f);
   if (cat === 'awaiting-author') return stampEl('Posted', s.lastPostedAt);
   return stampEl('Last round', s.lastReviewedAt || f.lastRoundAt || null);
-}
-
-/* A compact card: title, why it is parked, the one stamp that explains it, and the live job row if
- * there is one. No dial, no severity counts, no sources line — those are decision material, and
- * nothing in these bands is waiting on a decision from you. Same element, same link, same delete
- * flow as a full card, so it stays recognisably the same object. */
-/* `kind` is the caller's already-resolved one (`f.kind || 'spec'`), not re-read from `f`: a summary
- * served without a kind must get the same words on a compact card as on a full one. */
-function compactCard(f, job, cat, cls, href, kind) {
-  // Same focus key as the full card: the density it happens to be drawn at is not part of WHICH
-  // control this is, and a band flip between the hold and the release must not lose the user.
-  return h('a', { class: `${cls} fc-compact`, href, dataset: { fk: `card:${f.id}` } },
-    h('div', { class: 'fc-top' },
-      h('div', { class: 'fc-titlewrap' },
-        h('div', { class: 'fc-title' }, f.title || f.id),
-        h('div', { class: 'fc-why' },
-          wsStatePill(cat, kind),
-          compactStamp(f, job, cat)))),
-    job ? cardJobRow(job, hasFindingsOf(f), kind) : null);
-}
-
-/* `density` comes from the band the card is drawn in (WS_BANDS), not from the card itself — the
- * same workspace is worth a full card under "Needs you" and a one-liner under "Waiting on others".
- *
- * `cat` is the WS_STATES key the band loop already decided for this card, handed down rather than
- * recomputed: categoryOf() reads the clock through isStaleJob, so a second call can answer
- * differently from the one that chose the header this card is sitting under. A card drawn outside
- * the bands (the Done disclosure) passes none and wears no state pill — `done` is deliberately not
- * a WS_STATES key, so there is no honest label to print there. */
-function featureCard(f, job, density = 'full', cat = null) {
-  const r = summaryReadiness(f);
-  const kind = f.kind || 'spec';
-  const metaBits = [];
-  // PR workspaces don't carry Confluence/ADO/Figma sources — skip the sources line.
-  if (kind === 'spec') {
-    const src = sourcesLineText(f);
-    if (src) metaBits.push(h('span', {}, src));
-  }
-  const lr = lastRoundDate(f);
-  const isPrKind = kind === 'pr-review' || kind === 'pr-respond';
-  // On PR cards the "Reviewed <ago>" stamp below already carries the last-round time — don't
-  // print it twice; the "no rounds yet" case still needs saying.
-  if (!(isPrKind && lr)) metaBits.push(h('span', { class: 'meta-dim' }, lr ? `last round ${lr}` : 'no rounds yet'));
-
-  // A re-run on a workspace that already has findings reads as "re-reviewing".
-  const hasFindings = hasFindingsOf(f);
-  const busyState = job
-    ? (job.needsInput && job.status !== 'error' ? 'needs' : (isStaleJob(job) ? 'stale' : job.status))
-    : null;
-  const busyClass = job ? ` fc-busy fc-busy-${cssSafe(busyState)}` : '';
-  const cls = `card feature-card ${f.status === 'done' ? 'fc-done' : ''}${busyClass}`.trim();
-  const href = `#/feature/${encodeURIComponent(f.id)}`;
-
-  const card = density === 'compact'
-    ? compactCard(f, job, cat, cls, href, kind)
-    : h('a', { class: cls, href, dataset: { fk: `card:${f.id}` } },
-      h('div', { class: 'fc-top' },
-        h('div', { class: 'fc-titlewrap' },
-          h('div', { class: 'fc-title' }, f.title || f.id),
-          // The state pill leads, and it is the whole reason a full card is readable: without it
-          // ready-to-post, needs-review, needs-rereview and author-responded drew identically —
-          // the band that demands action said less about itself than the parked compact rows
-          // below it. The lifecycle chip stays because it answers a different question (where is
-          // this workspace in its life) from the pill (what is it waiting on) — but only when it
-          // has an answer: `draft`, which every active card carried, discriminated nothing.
-          h('div', { class: 'fc-chips' }, cat ? wsStatePill(cat, kind) : null, statusChipIfMeaningful(f.status)),
-        ),
-        dialEl(r.score, r.gate, 64, 'dial-sm'),
-      ),
-      job ? cardJobRow(job, hasFindings, kind) : (f.awaitingAuthor ? cardReviewRow(f) : null),
-      // Reviewed-vs-updated stamps: on a PR card this is what tells you a re-review is due.
-      reviewStampsRow(f, kind, { compact: true, cls: 'review-stamps fc-stamps' }),
-      sevCountsRow(r.openBySeverity),
-      metaBits.length ? h('div', { class: 'fc-meta' }, metaBits) : null,
-    );
-
-  const label = f.title || f.id;
-  const wrap = h('div', { class: 'fc-wrap' });
-
-  function showDefault() {
-    const trashBtn = h('button', {
-      class: 'btn-icon fc-delete', type: 'button',
-      'aria-label': `Delete workspace ${label}`, title: 'Delete workspace',
-      dataset: { fk: `card-del:${f.id}` },
-      onclick: (e) => { e.preventDefault(); e.stopPropagation(); showConfirm(); },
-    }, h('span', { class: 'icon', html: ICONS.trash }));
-    wrap.replaceChildren(card, trashBtn);
-  }
-
-  function showConfirm() {
-    const confirmEl = h('div', { class: 'card feature-card delete-confirm' },
-      h('p', { class: 'delete-confirm-msg' },
-        `Delete "${label}"? This removes its findings and history. This can't be undone.`),
-      h('div', { class: 'delete-confirm-actions' },
-        h('button', { class: 'btn btn-danger', type: 'button', onclick: doDelete }, 'Delete'),
-        h('button', { class: 'btn', type: 'button', onclick: showDefault }, 'Cancel')));
-    wrap.replaceChildren(confirmEl);
-    // The same two exits as the inbox row's confirm, for the same reason: this one holds the section
-    // grid's repaint with no ceiling either, and one confirm drawn on two surfaces must not have a
-    // way out on only one of them.
-    wireConfirmDismiss(confirmEl, showDefault);
-  }
-
-  async function doDelete() {
-    try {
-      await api(`/api/features/${encodeURIComponent(f.id)}`, { method: 'DELETE' });
-      // The section grid has the same hole as the inbox: startSectionRequestsPoll redraws it from
-      // state.section.features every tick that changes anything, and that cache only refills when
-      // a job newly completes. Unpruned, the deleted card comes back on the next live job.
-      if (state.section) {
-        state.section.features = (state.section.features || []).filter((x) => x.id !== f.id);
-      }
-      wrap.remove();
-      toast(`Deleted "${label}"`, 'success');
-    } catch (e) {
-      toast(`Delete failed: ${e.message}`);
-      showDefault();
-    }
-  }
-
-  showDefault();
-  return wrap;
 }
 
 /* ============================== UI-triggered job requests ============================== */
@@ -3928,10 +3939,10 @@ const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond',
 /* ---- live job ↔ card binding ----------------------------------------------
  * Instead of a separate "jobs" strip duplicating the cards, the active request
  * for a workspace is folded onto its card (and a brand-new review with no
- * workspace yet gets its own "pending" card). These helpers correlate them. */
+ * workspace yet gets its own "pending" row). These helpers correlate them. */
 
-// A job worth surfacing on a card: still in flight, blocked on the user, or failed.
-// `done` jobs are not shown — the finished workspace card speaks for itself.
+// A job worth surfacing on a row: still in flight, blocked on the user, or failed.
+// `done` jobs are not shown — the finished workspace row speaks for itself.
 function isLiveJob(r) {
   return r.status === 'queued' || r.status === 'running' || r.status === 'error' || !!r.needsInput;
 }
@@ -4042,7 +4053,7 @@ function jobVerb(job, existing, kind) {
   return REQ_ACTION_LABEL[job.action] || job.action;
 }
 
-// The status line shown on a busy card: spinner + verb + live phase, an amber
+// The status line shown on a busy row: spinner + verb + live phase, an amber
 // "needs your input" note, or a red error note (with a dismiss).
 function cardJobRow(job, existing, kind) {
   const meta = REQ_STATUS[job.status] || REQ_STATUS.queued;
@@ -4142,31 +4153,38 @@ function cardReviewRow(f) {
     since ? `⏳ Waiting on author — posted ${since}` : '⏳ Waiting on author');
 }
 
-/* A workspace doesn't exist yet (a first review still running): show a placeholder card so the work
- * is visible exactly where its real card will land.
+/* A workspace doesn't exist yet (a first review still running): show a placeholder row so the work
+ * is visible exactly where its real row will land.
  *
- * `density` is the band's, like every other card's. A placeholder that ignored it sat at full
+ * Same row shape as a real workspace, and deliberately NOT workspaceRow itself: there is no
+ * workspace here, so every argument that renderer takes — id, title, status, readiness, counts,
+ * kind — would have to be invented, and inventing a workspace to draw one is exactly the fake data
+ * this cockpit refuses. What it shares instead is the SHAPE (the `inbox-row` classes) and the job
+ * line, so the two read as the same list; the dashed border is what says "not a workspace yet", and
+ * it is the only thing here that is not a real row.
+ *
+ * `density` is the band's, like every other row's. A placeholder that ignored it sat at full
  * height among one-line compact rows, which breaks the only promise a compact band makes — that
  * everything under this header is a glance, not a read. What the compact form drops is what the
  * dial and the instructions line were already only guessing at: there is no workspace to score. */
-function pendingJobCard(job, density = 'full', kind = null) {
+function pendingJobRow(job, density = 'full', kind = null) {
   const title = pendingJobTitle(job);
   const compact = density === 'compact';
   // The instructions ARE the title when nothing else named the job, and printing them twice on one
-  // card says the same sentence twice under itself.
+  // row says the same sentence twice under itself.
   const showInstr = !compact && job.instructions && job.instructions !== title;
-  return h('div', { class: `card feature-card fc-pending${compact ? ' fc-compact' : ''}` },
-    h('div', { class: 'fc-top' },
-      h('div', { class: 'fc-titlewrap' },
-        h('div', { class: 'fc-title' }, title),
-        h('div', { class: compact ? 'fc-why' : 'fc-chips' },
-          h('span', { class: 'chip status-auditing' }, 'starting…'))),
-      compact ? null : h('div', { class: 'fc-pending-dial', 'aria-hidden': 'true' }, '—')),
-    // The section's kind, not the workspace's — there is no workspace. It is the right answer
-    // anyway: a placeholder is only ever drawn in the section whose actions admitted the job
-    // (actsOnKind), so the job's vocabulary and the page's are the same by construction.
-    cardJobRow(job, false, kind),
-    showInstr ? h('div', { class: 'fc-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null);
+  return h('div', { class: `inbox-row ir-pending${compact ? ' ir-compact' : ''}` },
+    // Where the real rows beside it carry their dial, so a pending row lines up with them instead
+    // of shifting the whole list left by 44px when the workspace appears.
+    compact ? null : h('div', { class: 'ir-pending-dial', 'aria-hidden': 'true' }, '—'),
+    h('div', { class: 'ir-main' },
+      h('div', { class: 'ir-top' }, h('span', { class: 'ir-title' }, title)),
+      h('div', { class: 'ir-needs' }, h('span', { class: 'chip status-auditing' }, 'starting…')),
+      // The section's kind, not the workspace's — there is no workspace. It is the right answer
+      // anyway: a placeholder is only ever drawn in the section whose actions admitted the job
+      // (actsOnKind), so the job's vocabulary and the page's are the same by construction.
+      cardJobRow(job, false, kind),
+      showInstr ? h('div', { class: 'ir-meta' }, h('span', { class: 'meta-dim' }, '↳ ', job.instructions)) : null));
 }
 
 /* What a placeholder calls itself, and — because a nameless card is worse than none — whether it may

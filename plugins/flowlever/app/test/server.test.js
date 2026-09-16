@@ -297,6 +297,12 @@ function codeOnly(body) {
   return body.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
+/* The stylesheet with its comments removed, for the assertions that ask what is still SELECTED.
+ * style.css explains its own history at length — including the names of rules that were deleted —
+ * and a plain substring search cannot tell "this rule styles .features-grid" from "there is no
+ * .features-grid any more". */
+function cssRules(css) { return css.replace(/\/\*[\s\S]*?\*\//g, ' '); }
+
 test('U1: the heartbeat timer belongs to the app, not to the per-view poller', () => {
   // Regression guard for the bug that made the first cut of this heartbeat useless: it rode the
   // interval owned by startPolling(), which route() tears down before every render and each view
@@ -1406,9 +1412,14 @@ test('U2: WS_BANDS/WS_STATES are the only place band order and rank are expresse
     }
   }
   // Density is the band's property, read from the table and handed to the renderer.
-  assert.match(loop, /band\.density/, 'the card density must come from the band table');
-  assert.match(fnBody(ui, 'function featureCard('), /density === 'compact'/,
-    'featureCard must branch on the density the band gave it');
+  assert.match(loop, /band\.density/, 'the row density must come from the band table');
+  assert.match(fnBody(ui, 'function rowParts('), /density === 'compact'/,
+    'the row must branch on the density the band gave it');
+  // And in ONE place: rowParts is the whole of "what does this density draw", so the renderer must
+  // not re-read `density` to make a second, private decision beside it.
+  const rowBody = fnBody(ui, 'function workspaceRow(');
+  assert.match(rowBody, /rowParts\(opts, density, done\)/,
+    'workspaceRow must get what it draws from rowParts, not decide it inline');
 
   // One index built from the table, and exactly one.
   const indexSites = (ui.match(/WS_STATES\.map\(/g) || []).length;
@@ -1469,19 +1480,20 @@ test('U2: an empty band is not rendered', () => {
     'a band with no cards must be skipped entirely — never a header with zero under it');
   // The pre-band behaviour at the two edges must survive: nothing at all → the empty state,
   // nothing active but something done → the note above the disclosure.
-  assert.match(grid, /if \(!bands\.length && !doneCards\.length\) return sectionEmpty\(kind\);/,
+  assert.match(grid, /if \(!bands\.length && !doneRows\.length\) return sectionEmpty\(kind\);/,
     'an utterly empty section must still return sectionEmpty(kind)');
   assert.match(grid, /No active workspaces — everything below is complete\./,
     'bands empty but Done non-empty must keep the all-done note');
-  assert.match(grid, /doneDisclosure\(kind, doneCards, 'features-grid done-disc-body'\)/,
-    'the Done disclosure and its date sort must be left exactly as they were');
+  assert.match(grid, /doneDisclosure\(kind, doneRows, 'inbox done-disc-body'\)/,
+    'the Done disclosure and its date sort must be left exactly as they were — now filled with the '
+    + 'same rows the bands hold, in the same list container');
 });
 
 /* U2 review fixes. Same shape as the tests above — source assertions over browser code the Node
  * suite cannot import, pinning the property that would actually break, with the rendering itself
  * verified in a real browser. */
 
-test('U2: a job that already has a workspace card never gets a placeholder beside it', () => {
+test('U2: a job that already has a workspace row never gets a placeholder beside it', () => {
   const ui = readUi();
   // The entries a section draws are decided in sectionEntries and DRAWN by sectionGrid — split so
   // the poll can sign one decision and render it (see the idle-repaint test in U7).
@@ -1499,8 +1511,8 @@ test('U2: a job that already has a workspace card never gets a placeholder besid
   // The other half of the rule — a dangling wsId must KEEP its placeholder — has its own test
   // below, so this one is free to be about suppression alone.
 
-  // And the placeholder is a card like any other, so it takes the band's density (finding 5).
-  assert.match(grid, /pendingJobCard\(e\.job, density, kind\)/,
+  // And the placeholder is a row like any other, so it takes the band's density (finding 5).
+  assert.match(grid, /pendingJobRow\(e\.job, density, kind\)/,
     'a placeholder must be drawn at the band density, not always full — a full-height placeholder '
     + 'among one-line compact rows breaks the only promise a compact band makes');
 });
@@ -1556,24 +1568,25 @@ test('U2: a wsId naming a workspace that is gone still gets its placeholder', ()
     + 'is the rejected fix, and it makes a running review on a deleted workspace disappear');
 });
 
-test('U2: a full card names its state, so the band that demands action says the most', () => {
+test('U2: a full row names its state, so the band that demands action says the most', () => {
   const ui = readUi();
-  const card = fnBody(ui, 'function featureCard(');
+  const card = fnBody(ui, 'function workspaceRow(');
 
   // Without this, ready-to-post / needs-review / needs-rereview / author-responded render
-  // pixel-identically: same lifecycle chip, same dial, same stamps. The compact cards parked
+  // pixel-identically: same lifecycle chip, same dial, same stamps. The compact rows parked
   // BELOW them were the only ones labelled.
   assert.match(card, /cat \? wsStatePill\(cat, kind\) : null/,
-    'a full card must render the state pill when it was given a category — in its own kind\'s '
+    'a banded row must render the state pill when it was given a category — in its own kind\'s '
     + 'vocabulary, so a running spec audit is not labelled "Re-reviewing"');
   // The lifecycle chip is kept, not deleted — "where is this workspace in its life" is a different
   // question from "what is it waiting on" — but it is drawn through the gate that suppresses the
   // one value it always held inside a band (`draft`). See the U5 test for what the gate lets past.
-  assert.match(card, /statusChipIfMeaningful\(f\.status\)/,
+  // It came off the full card onto the full section row; Home never carried it and still does not.
+  assert.match(card, /part\.sectionFull \? statusChipIfMeaningful\(r\.status\) : null/,
     'and keep the lifecycle chip, gated so it draws only when it discriminates');
 
-  // .chip.ws-pill-needs-you was unreachable dead CSS while only compact cards wore a pill and no
-  // needs-you card was ever compact. Every band must have a reachable tint.
+  // .chip.ws-pill-needs-you was unreachable dead CSS while only compact rows wore a pill and no
+  // needs-you row was ever compact. Every band must have a reachable tint.
   const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
   for (const b of wsTables(ui).bands) {
     assert.ok(css.includes(`.chip.ws-pill-${b.key}`), `style.css must tint the "${b.key}" pill`);
@@ -1582,19 +1595,19 @@ test('U2: a full card names its state, so the band that demands action says the 
     'the pill tint must come from the band the WS_STATES row names, not from the card');
 });
 
-test('U2: the category is decided once per render and handed to the card', () => {
+test('U2: the category is decided once per render and handed to the row', () => {
   const ui = readUi();
   const grid = fnBody(ui, 'function sectionGrid(');
-  const card = fnBody(ui, 'function featureCard(');
+  const card = fnBody(ui, 'function workspaceRow(');
 
-  assert.match(grid, /featureCard\(e\.ws, e\.job, density, e\.cat\)/,
-    'the band loop already decided the category — it must travel with the card');
-  // categoryOf reads the clock through isStaleJob, so a second call inside the card can disagree
-  // with the one that chose the header the card is sitting under: banded as one state, pilled as
+  assert.match(grid, /workspaceRow\(e\.ws, e\.job, density, e\.cat, ROW_SECTION\)/,
+    'the band loop already decided the category — it must travel with the row');
+  // categoryOf reads the clock through isStaleJob, so a second call inside the row can disagree
+  // with the one that chose the header the row is sitting under: banded as one state, pilled as
   // another, on a single job crossing the 3-minute stale threshold mid-render.
   assert.ok(!/categoryOf\(/.test(card),
-    'featureCard must not recompute categoryOf — one decision per render');
-  assert.match(ui, /function featureCard\(f, job, density = 'full', cat = null\)/,
+    'workspaceRow must not recompute categoryOf — one decision per render');
+  assert.match(ui, /function workspaceRow\(r, job = null, density = 'full', cat = null, opts = ROW_HOME\)/,
     'and the Done disclosure, which draws outside the bands, must be able to pass no category: '
     + '`done` is deliberately not a WS_STATES key, so there is no honest pill for it');
 });
@@ -1610,11 +1623,17 @@ test('U2: band density is emitted from WS_BANDS, not restated in CSS', () => {
   // Hardcoding which bands are compact is the WS_BANDS/band-map drift spelled in CSS: flip a
   // `density` in the table and the spacing stays behind on a band that no longer holds one-liners.
   for (const b of bands) {
-    assert.ok(!new RegExp(`\\.band-${b.key}\\s+\\.features-grid`).test(css),
+    assert.ok(!new RegExp(`\\.band-${b.key}\\s+\\.inbox`).test(css),
       `style.css must not space the "${b.key}" band by name — key it off the density class`);
   }
-  assert.ok(css.includes('.band-density-compact .features-grid'),
+  assert.ok(css.includes('.band-density-compact .inbox'),
     'the compact spacing must hang off the density class');
+  // And off ONE container, because there is one: a rule still naming .features-grid would be
+  // styling an element no view builds any more, which is how dead CSS starts reading as live.
+  // Comments stripped first — the section header explains where the grid went, and saying so is
+  // not the same as selecting it.
+  assert.ok(!cssRules(css).includes('features-grid'),
+    'no RULE may still select .features-grid — Home and the sections share the .inbox list');
 });
 
 /* U3 — the Home inbox, banded by the same tables as the kind sections. Source assertions again:
@@ -1628,9 +1647,9 @@ test('U3: the inbox bands come from the shared loop, not a second one of its own
 
   // The whole point of extracting bandSections: an inbox with its own copy of the loop is free to
   // order, label or count a band differently from the sections showing the same workspaces.
-  assert.match(inbox, /bandSections\(active, \(e, density\) => inboxRow\(e\.ws, e\.job, density, e\.cat\), 'inbox'\)/,
-    'renderHomeInbox must draw its bands through bandSections, handing each row the band density '
-    + 'and the category the loop already decided');
+  assert.match(inbox, /bandSections\(active,\s*\n?\s*\(e, density\) => workspaceRow\(e\.ws, e\.job, density, e\.cat, ROW_HOME\), 'inbox'\)/,
+    'renderHomeInbox must draw its bands through bandSections, handing each row the band density, '
+    + 'the category the loop already decided, and the surface it is being drawn on');
   assert.ok(!/for \(const band of WS_BANDS\)/.test(inbox),
     'the inbox must not walk WS_BANDS itself — that is a second copy of the band order');
   for (const b of bands) {
@@ -1650,7 +1669,7 @@ test('U3: the inbox bands come from the shared loop, not a second one of its own
 test('U3: Home folds each live job onto its row', () => {
   const ui = readUi();
   const inbox = fnBody(ui, 'function renderHomeInbox(');
-  const row = fnBody(ui, 'function inboxRow(');
+  const row = fnBody(ui, 'function workspaceRow(');
 
   // Without binding, the inbox cannot band truthfully: a PR being posted, or one whose runner has
   // stalled and needs a human, sits under whatever state it held before the job started.
@@ -1662,9 +1681,8 @@ test('U3: Home folds each live job onto its row', () => {
     'the job must reach categoryOf, which is what lets it outrank the served state');
   // And the row has to SAY so, in the words the cards use — a stalled job must be as actionable
   // from the inbox as it is from a section.
-  assert.match(row, /cardJobRow\(job, hasFindingsOf\(r\), r\.kind\)/,
-    'a row with a live job must render the same job line the cards do, in the workspace\'s own '
-    + 'kind vocabulary');
+  assert.match(row, /cardJobRow\(job, hasFindingsOf\(r\), kind\)/,
+    'a row with a live job must render the job line, in the workspace\'s own kind vocabulary');
 });
 
 test('U3: the requests strip drops the jobs already shown on a row', () => {
@@ -1688,25 +1706,37 @@ test('U3: the requests strip drops the jobs already shown on a row', () => {
 
 test('U3: a needs-you row names its state, and a parked row drops the decision material', () => {
   const ui = readUi();
-  const row = fnBody(ui, 'function inboxRow(');
+  const row = fnBody(ui, 'function workspaceRow(');
 
   // The inbox was the last surface where ready-to-post / needs-review / needs-rereview /
   // author-responded drew identically — the section cards gained the pill in 3d008a8.
-  assert.match(row, /cat \? wsStatePill\(cat, r\.kind\) : null/,
+  assert.match(row, /cat \? wsStatePill\(cat, kind\) : null/,
     'a banded row must wear the state pill, whatever its density');
-  assert.match(ui, /function inboxRow\(r, job = null, density = 'full', cat = null\)/,
+  assert.match(ui, /function workspaceRow\(r, job = null, density = 'full', cat = null, opts = ROW_HOME\)/,
     'and a row drawn outside the bands (the Done disclosure) must still be able to pass neither');
-  // Compact rows: title, kind, pill, ONE stamp. The dial is a score you weigh before opening
-  // something, and nothing parked on someone else is waiting on that decision.
-  assert.match(row, /compact \? null : dialEl\(/, 'a compact row must not draw the readiness dial');
-  assert.match(row, /const bits = done \|\| compact \? \[\] : needsYouBits\(r\.counts\)/,
+  // Compact rows: title, pill, ONE stamp. The dial is a score you weigh before opening something,
+  // and nothing parked on someone else is waiting on that decision. (Which density drops what is
+  // rowParts' single decision, and it is RUN in "one renderer, two surfaces" below.)
+  assert.match(row, /part\.dial \? dialEl\(/, 'a compact row must not draw the readiness dial');
+  assert.match(row, /const bits = part\.bits \? needsYouBits\(r\.counts\) : \[\]/,
     'nor the needs-you counts');
-  assert.match(row, /compact \? compactStamp\(r, job, cat\) : null/,
-    'it earns the one stamp that says why it is parked, chosen by the same rule a compact card uses');
+  assert.match(row, /part\.stamp \? compactStamp\(r, job, cat\) : null/,
+    'it earns the one stamp that says why it is parked, chosen by the rule compactStamp states');
   // Every density keeps the two things that make a row usable at all.
   assert.match(row, /href: `#\/feature\/\$\{encodeURIComponent\(r\.id\)\}`/,
     'every row keeps its link to the workspace');
-  assert.match(row, /class: 'btn-icon ir-delete'/, 'and its delete-confirm flow');
+  // The delete flow, pinned as CONTROL FLOW. What stood here was `/class: 'btn-icon ir-delete'/`,
+  // which was green for the entire period the confirm was being destroyed every four seconds: it
+  // proved the button was constructed, never that the flow worked. Cancel must put the row AND its
+  // button back — a showDefault that restored only one of them leaves a row you cannot open, or a
+  // row you cannot delete, and both look fine to a "was it built" assertion.
+  assert.match(codeOnly(fnBody(row, 'function showDefault()')),
+    /wrap\.replaceChildren\(link, trashBtn\)/,
+    'the default state of a row is the row plus its trash button, restored together');
+  assert.match(codeOnly(fnBody(row, 'function showConfirm()')), /onclick: showDefault \}, 'Cancel'/,
+    'and Cancel must run exactly that function — not a partial undo of its own');
+  // (Escape / outside-click take the same path — U7's wireConfirmDismiss test runs it. The prune
+  // that follows a real delete is RUN in U5.)
 });
 
 test('U3: the inbox skips an empty band and keeps both edge cases', () => {
@@ -1721,8 +1751,9 @@ test('U3: the inbox skips an empty band and keeps both edge cases', () => {
     'the inbox draws whatever bands came back — it must not fill in the missing ones');
   assert.match(inbox, /No active workspaces — everything below is complete\./,
     'nothing active but something done must keep the all-done note');
-  assert.match(inbox, /doneDisclosure\('home',\s*\n?\s*doneRows\.map\(\(e\) => \(\{ sortable: e\.ws, el: inboxRow\(e\.ws\) \}\)\), 'inbox done-disc-body'\)/,
-    'and the Done disclosure and its date sort must be left exactly as they were');
+  assert.match(inbox, /doneDisclosure\('home',\s*\n?\s*doneRows\.map\(\(e\) => \(\{ sortable: e\.ws, el: workspaceRow\(e\.ws, null, 'full', null, ROW_HOME\) \}\)\),\s*\n?\s*'inbox done-disc-body'\)/,
+    'and the Done disclosure and its date sort must be left exactly as they were — a done row is '
+    + 'drawn outside the bands, so it passes no job and no category, and it is still a Home row');
   // The zero-workspace case never reaches here: renderHome answers it with the seeding empty state.
   assert.match(fnBody(ui, 'async function renderHome('), /if \(rows\.length === 0\)/,
     'an empty cockpit must still get the "Nothing in the cockpit yet" view');
@@ -1978,39 +2009,64 @@ test('U5: a deleted workspace is pruned from the cache the poller repaints from'
   // over nothing but its caller's locals, so it can be LIFTED OUT AND RUN (fnSource/liftUi) against
   // a real three-row cache — and then a dead prune, a cleared cache, a prune moved ahead of the
   // await, and a prune moved into the catch all FAIL, because each one changes what the cache holds.
+  // One renderer serves both lists now, so WHICH cache a delete prunes is an argument (ROW_HOME /
+  // ROW_SECTION → pruneRowCache) rather than a second copy of the function. That makes the wrong
+  // answer perfectly plausible — a section row that pruned state.home.rows would pass every source
+  // assertion in this file and still resurrect the workspace on the section's next repaint — so
+  // both surfaces are RUN here, and each must leave the OTHER cache untouched.
+  // doDelete is nested in workspaceRow, and pruneRowCache is beside it at module scope — both are
+  // lifted from the real source. The surface tables are read from source too (never re-typed here:
+  // a test that declared its own { cache: 'section' } would pass while ROW_SECTION said otherwise).
+  const rowSrc = fnSource(ui, 'function pruneRowCache(') + '\n' + fnBody(ui, 'function workspaceRow(');
+  const optsOf = (name) => {
+    const m = ui.match(new RegExp(`^const ${name} = (\\{[^}]*\\});$`, 'm'));
+    assert.ok(m, `${name} must be one object literal at module scope`);
+    // eslint-disable-next-line no-new-func
+    return new Function(`return ${m[1]};`)();
+  };
   for (const spec of [
     {
       owner: 'the Home inbox',
-      host: 'function inboxRow(',
-      ws: 'r',
-      fresh: () => ({ home: { rows: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] } }),
+      opts: 'ROW_HOME',
+      fresh: () => ({
+        home: { rows: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] },
+        section: { features: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] },
+      }),
       read: (st) => st.home.rows,
+      other: (st) => st.section.features,
     },
     {
-      owner: 'a section card',
-      host: 'function featureCard(',
-      ws: 'f',
-      fresh: () => ({ section: { features: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] } }),
+      owner: 'a section row',
+      opts: 'ROW_SECTION',
+      fresh: () => ({
+        home: { rows: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] },
+        section: { features: [{ id: 'pr-1' }, { id: 'pr-2' }, { id: 'pr-3' }] },
+      }),
       read: (st) => st.section.features,
+      other: (st) => st.home.rows,
     },
   ]) {
     const run = async (fail) => {
       const state = spec.fresh();
       const sent = [];
       const seen = { removed: 0, restored: 0, toasts: [] };
-      const { doDelete } = liftUi(fnBody(ui, spec.host), ['async function doDelete('], {
-        state,
-        api: async (url, opts) => {
-          sent.push({ url, method: opts && opts.method });
-          if (fail) throw new Error('server said no');
-          return {};
-        },
-        wrap: { remove() { seen.removed++; } },
-        showDefault: () => { seen.restored++; },
-        toast: (msg) => seen.toasts.push(msg),
-        label: 'Checkout rewrite',
-        [spec.ws]: { id: 'pr-2' },
-      });
+      // pruneRowCache is lifted too, not stubbed: the thing under test is which cache the surface
+      // option resolves to, and a stub would be the test answering its own question.
+      const { doDelete } = liftUi(rowSrc,
+        ['function pruneRowCache(', 'async function doDelete('], {
+          state,
+          api: async (url, o) => {
+            sent.push({ url, method: o && o.method });
+            if (fail) throw new Error('server said no');
+            return {};
+          },
+          wrap: { remove() { seen.removed++; } },
+          showDefault: () => { seen.restored++; },
+          toast: (msg) => seen.toasts.push(msg),
+          label: 'Checkout rewrite',
+          r: { id: 'pr-2' },
+          opts: optsOf(spec.opts),
+        });
       await doDelete();
       return { state, sent, seen };
     };
@@ -2025,6 +2081,10 @@ test('U5: a deleted workspace is pruned from the cache the poller repaints from'
       `${spec.owner} must drop exactly the deleted id from the cache the poller repaints from — `
       + 'leave it in and the next live job paints the deleted workspace straight back onto the '
       + 'screen, linking to a 404');
+    assert.deepEqual(spec.other(ok.state).map((x) => x.id), ['pr-1', 'pr-2', 'pr-3'],
+      `${spec.owner} must prune its OWN cache and only its own — pruning the other one is the same `
+      + 'bug pointing the other way, and it is invisible until the next repaint brings the '
+      + 'workspace back');
     assert.equal(ok.seen.removed, 1, `${spec.owner} must also take the element out of the DOM`);
     assert.equal(ok.seen.restored, 0, 'and must not put the trash button back after a success');
 
@@ -2035,7 +2095,7 @@ test('U5: a deleted workspace is pruned from the cache the poller repaints from'
     assert.deepEqual(spec.read(bad.state).map((x) => x.id), ['pr-1', 'pr-2', 'pr-3'],
       `${spec.owner} must not prune when the server refused — the workspace is still there`);
     assert.equal(bad.seen.removed, 0, 'nor remove the element');
-    assert.equal(bad.seen.restored, 1, 'and it must restore the default row/card');
+    assert.equal(bad.seen.restored, 1, 'and it must restore the default row');
     assert.match(bad.seen.toasts.join(' '), /Delete failed/, 'and say so');
   }
 
@@ -2093,7 +2153,7 @@ test('U5: the section poll asks the binding predicate instead of restating it', 
 
 test('U5: the lifecycle chip is drawn only when it says something', () => {
   const ui = readUi();
-  const card = codeOnly(fnBody(ui, 'function featureCard('));
+  const card = codeOnly(fnBody(ui, 'function workspaceRow('));
 
   // One spelling of the default, shared by the chip's own fallback and by the gate. Two copies and
   // the gate starts hiding a value the chip would have rendered, or the reverse.
@@ -2107,7 +2167,8 @@ test('U5: the lifecycle chip is drawn only when it says something', () => {
   // The gate is pure, so run it. `draft` — what ingest writes and every active workspace carries —
   // is suppressed; every other value still reaches the real chip. This is a suppression, not a
   // deletion: auditing / reworking / ready / implementing arrive through
-  // POST /api/features/:id/status, and `done` is what the Done disclosure shows.
+  // POST /api/features/:id/status. (`done` never reaches the gate from a row — a done row draws its
+  // own chip — but the gate must still pass it, because the gate decides whether, never what.)
   const drawn = [];
   const { statusChipIfMeaningful } = liftUi(ui,
     [defaultDecl[0], 'function statusChipIfMeaningful('],
@@ -2124,11 +2185,11 @@ test('U5: the lifecycle chip is drawn only when it says something', () => {
   assert.deepEqual(drawn, ['done', 'auditing', 'reworking', 'ready', 'implementing'],
     'and must be rendered by the real chip, unchanged — the gate decides whether, never what');
 
-  // The card goes through the gate, and must not keep an unguarded call beside it.
-  assert.match(card, /statusChipIfMeaningful\(f\.status\)/,
-    'featureCard must draw the lifecycle chip through the gate');
-  assert.ok(!/statusChip\(f\.status\)/.test(card),
-    'and never past it — one unguarded call puts `draft` back on every active card');
+  // The row goes through the gate, and must not keep an unguarded call beside it.
+  assert.match(card, /statusChipIfMeaningful\(r\.status\)/,
+    'the row must draw the lifecycle chip through the gate');
+  assert.ok(!/statusChip\(r\.status\)/.test(card),
+    'and never past it — one unguarded call puts `draft` back on every active row');
   // The pill it sits next to is the thing that actually discriminates, and it stays.
   assert.match(card, /cat \? wsStatePill\(cat, kind\) : null/,
     'the state pill must be untouched — it is what the chip was crowding');
@@ -2375,17 +2436,25 @@ test('U6: a forced repaint puts the user back where it found them', () => {
   // Every control a repaint can pull out from under the keyboard has to carry a key, or the mark is
   // null for it and the ceiling drops the user after all. These are all of them in both lists.
   for (const [what, decl, key] of [
-    ['the inbox row link', 'function inboxRow(', 'fk: `row:${r.id}`'],
-    ['its delete button', 'function inboxRow(', 'fk: `row-del:${r.id}`'],
-    ['the full card', 'function featureCard(', 'fk: `card:${f.id}`'],
-    ['its delete button', 'function featureCard(', 'fk: `card-del:${f.id}`'],
-    ['the compact card', 'function compactCard(', 'fk: `card:${f.id}`'],
+    ['the row link', 'function workspaceRow(', 'fk: `row:${r.id}`'],
+    ['its delete button', 'function workspaceRow(', 'fk: `row-del:${r.id}`'],
     ['the Done disclosure', 'function doneDisclosure(', 'fk: `done-sum:${key}`'],
     ['its sort menu', 'function doneDisclosure(', 'fk: `done-sort:${key}`'],
   ]) {
     assert.ok(codeOnly(fnBody(ui, decl)).includes(key),
       `${what} must carry a focus key (${key}) — without it a forced repaint loses the keyboard`);
   }
+  // Both lists emit `row:`/`row-del:` now, which is fine — they are never on screen together — but
+  // the OLD keys must be gone rather than lingering on some path that still builds a card: a zone
+  // holding a `card:` key and a list emitting `row:` keys is a mark that redeems nothing, which is
+  // exactly the silent focus loss the ceiling exists to prevent.
+  assert.ok(!/fk: `card(-del)?:/.test(ui),
+    'no control may still carry a `card:` focus key — one renderer, one key namespace');
+  // The two lists' keys are the same STRINGS for the same workspace, deliberately: a workspace
+  // focused on Home and then on its section is the same control by the only name the mark has.
+  const rowSrc = codeOnly(fnBody(ui, 'function workspaceRow('));
+  assert.equal((rowSrc.match(/fk: `row:/g) || []).length, 1,
+    'and one renderer emits it once, so the two surfaces cannot disagree about what it is called');
 });
 
 test('U6: a held list says so, and nothing already on screen moves when it does', () => {
@@ -2761,13 +2830,17 @@ test('U7: an abandoned delete-confirm has a way out, and the way out is Cancel',
   // And the structural half: the dismissal is handed the CANCEL path, never the delete. This is
   // what makes "a dismissal is never read as consent" a property of the wiring rather than a hope —
   // wireConfirmDismiss is only ever given one function, and it is showDefault on both surfaces.
-  for (const host of ['function inboxRow(', 'function featureCard(']) {
-    const confirm = codeOnly(fnBody(fnBody(ui, host), 'function showConfirm()'));
-    assert.match(confirm, /wireConfirmDismiss\(confirmEl, showDefault\)/,
-      `${host} must give the dismissal the same function Cancel runs, never doDelete`);
-    assert.ok(!/wireConfirmDismiss\([^)]*doDelete/.test(confirm),
-      'a dismissal that deleted would be worse than the freeze it fixes');
-  }
+  const confirm = codeOnly(fnBody(fnBody(ui, 'function workspaceRow('), 'function showConfirm()'));
+  assert.match(confirm, /wireConfirmDismiss\(confirmEl, showDefault\)/,
+    'the row must give the dismissal the same function Cancel runs, never doDelete');
+  assert.ok(!/wireConfirmDismiss\([^)]*doDelete/.test(confirm),
+    'a dismissal that deleted would be worse than the freeze it fixes');
+  // And there is exactly ONE of these confirms now. The rule used to have to hold on two surfaces at
+  // once — "one confirm drawn on two surfaces must not have a way out on only one of them" — and the
+  // surest way to keep that true is for there to be one confirm: the declaration, and a single call.
+  assert.equal((ui.match(/wireConfirmDismiss\(/g) || []).length, 2,
+    'one wireConfirmDismiss declaration and one call site — a second list-side confirm is a second '
+    + 'chance to ship one without an exit');
 });
 
 test('U7: a reload paints the jobs it already knows, not an empty queue', () => {
@@ -2860,7 +2933,7 @@ test('U7: a spec job is described in spec words', () => {
   }
 });
 
-test('U7: a workspace-less spec audit still has a card to appear on', () => {
+test('U7: a workspace-less spec audit still has a row to appear on', () => {
   const ui = readUi();
   const { pendingJobTitle } = liftUi(ui, ['function pendingJobTitle(']);
 
@@ -2890,11 +2963,11 @@ test('U7: a workspace-less spec audit still has a card to appear on', () => {
   // The filter asks exactly that question, and the card takes its name from the same function, so
   // "may it exist" and "what is it called" can never be two different answers.
   const entries = codeOnly(fnBody(ui, 'function sectionEntries('));
-  const cardSrc = codeOnly(fnBody(ui, 'function pendingJobCard('));
+  const cardSrc = codeOnly(fnBody(ui, 'function pendingJobRow('));
   assert.match(entries, /pendingJobTitle\(r\)/, 'the placeholder filter must gate on the name');
   assert.ok(!/r\.prId/.test(entries),
     'and no longer on prId, which is the gate that made a first spec audit invisible');
-  assert.match(cardSrc, /pendingJobTitle\(job\)/, 'and the card must take its title from it too');
+  assert.match(cardSrc, /pendingJobTitle\(job\)/, 'and the row must take its title from it too');
   // The instructions can BE the title; printing them twice says the same sentence under itself.
   assert.match(cardSrc, /job\.instructions !== title/,
     'a placeholder named from its instructions must not repeat them on its meta line');
@@ -3094,4 +3167,148 @@ test('U8: no replaceChildren call is handed a bare null', () => {
   assert.deepEqual(offenders, [],
     'a top-level `cond ? node : null` argument to replaceChildren renders the literal word "null" '
     + 'when cond is false — spread an array, .filter(Boolean), or guard the call');
+});
+
+/* U9 — one row renderer for every list of workspaces. Home and the three kind sections drew the
+ * same object two ways (inboxRow and featureCard/compactCard), which is the drift this file already
+ * has three scars from: the job-binding rule shipped wrong twice because it was written twice, and
+ * the band/density mapping was written twice as well. These pin that there is now ONE renderer, and
+ * that the two things that genuinely differ between the surfaces are driven by an explicit argument
+ * rather than by asking what the current route is.
+ *
+ * rowParts is pure, so it is RUN (liftUi) rather than read: "what does a compact section row draw"
+ * is a mapping, and a mapping asserted by pattern-matching its own text is a mapping that agrees
+ * with itself and nothing else. */
+
+test('U9: one renderer draws every workspace row, on both surfaces', () => {
+  const ui = readUi();
+
+  // The second renderer is gone, not merely unused: a featureCard left in the file is a function the
+  // next change can call, and then there are two answers to "what does a workspace look like" again.
+  for (const gone of ['function featureCard(', 'function compactCard(']) {
+    assert.ok(!ui.includes(gone), `${gone} must be deleted, not left for something to call again`);
+  }
+  // Both lists go through the one renderer, each naming the surface it is drawing.
+  assert.match(codeOnly(fnBody(ui, 'function renderHomeInbox(')),
+    /workspaceRow\(e\.ws, e\.job, density, e\.cat, ROW_HOME\)/,
+    'Home must draw its bands with the shared renderer');
+  assert.match(codeOnly(fnBody(ui, 'function sectionGrid(')),
+    /workspaceRow\(e\.ws, e\.job, density, e\.cat, ROW_SECTION\)/,
+    'and a section must draw its bands with the same one');
+  // The surface is an ARGUMENT. Reading current.view inside the renderer would put the answer back
+  // in the one place that cannot be told which list it is in — the Done disclosure and the bands
+  // both call it, and a route is not a list.
+  const row = codeOnly(fnBody(ui, 'function workspaceRow('));
+  assert.ok(!/current\.(view|kind)/.test(row),
+    'the renderer must not sniff the route — which surface it is on comes in on `opts`');
+  assert.ok(!/current\.(view|kind)/.test(codeOnly(fnBody(ui, 'function rowParts('))),
+    'nor may the part table, which is where that temptation would land next');
+
+  // The placeholder is a row too, at both densities, and keeps the dashed treatment that says it is
+  // not a workspace yet. It deliberately does NOT go through workspaceRow — there is no workspace,
+  // and inventing one to render one is the fake data this cockpit refuses — so what has to hold is
+  // that it wears the row's own classes.
+  const pending = codeOnly(fnBody(ui, 'function pendingJobRow('));
+  assert.match(pending, /class: `inbox-row ir-pending\$\{compact \? ' ir-compact' : ''\}`/,
+    'a placeholder must be an inbox-row at whichever density the band gave it');
+  assert.ok(!/feature-card|fc-compact|fc-title\b/.test(pending),
+    'and must not keep any of the card classes it used to wear');
+  const css = cssRules(fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8'));
+  assert.match(css, /\.inbox-row\.ir-pending \{[^}]*border-style: dashed/,
+    'the dashed border is what says "not a workspace yet" — without it the placeholder claims to be '
+    + 'a real row, and the only other thing it says is "starting…"');
+});
+
+test('U9: the kind badge is Home\'s, and the section material is the section\'s', () => {
+  const ui = readUi();
+  // Both surface tables, read from the source and RUN through the real mapping. Re-typing them here
+  // would let the test agree with itself while the app disagreed with both.
+  const optsOf = (name) => {
+    const m = ui.match(new RegExp(`^const ${name} = (\\{[^}]*\\});$`, 'm'));
+    assert.ok(m, `${name} must be one object literal at module scope`);
+    // eslint-disable-next-line no-new-func
+    return new Function(`return ${m[1]};`)();
+  };
+  const { rowParts } = liftUi(ui, ['function rowParts(']);
+  const home = (d, done = false) => rowParts(optsOf('ROW_HOME'), d, done);
+  const section = (d, done = false) => rowParts(optsOf('ROW_SECTION'), d, done);
+
+  // The badge: Home is cross-kind and needs it to tell a spec row from a PR row; inside a section
+  // every row is the same kind, so it would be the page's own title repeated once per row.
+  assert.equal(home('full').kindBadge, true, 'Home must keep the kind badge');
+  assert.equal(home('compact').kindBadge, true, 'at every density — a parked row is still a kind');
+  assert.equal(section('full').kindBadge, false, 'a section row must not repeat its section\'s kind');
+  assert.equal(section('compact').kindBadge, false);
+
+  // The section material — severity counts, sources/last-round line, lifecycle chip, waiting-on-
+  // author line — rides the FULL band of a SECTION and nothing else. Home never had it and the
+  // owner picked Home as the reference; a compact band is parked, and a done row is answered.
+  assert.equal(section('full').sectionFull, true,
+    'the full section row must carry what the full card carried — those counts are why the section '
+    + 'exists as something other than a filtered Home');
+  assert.equal(section('compact').sectionFull, false,
+    'a compact row must not — nothing in those bands is waiting on a decision from you');
+  assert.equal(section('full', true).sectionFull, false,
+    'nor a done row, for the same reason its needs-you counts already drop out');
+  assert.equal(home('full').sectionFull, false, 'and Home must be left exactly as it was');
+  assert.equal(home('compact').sectionFull, false);
+
+  // The density rules the row already had, now stated where both surfaces read them.
+  for (const at of [home, section]) {
+    assert.equal(at('full').dial, true, 'a full row weighs a score, so it draws the dial');
+    assert.equal(at('compact').dial, false, 'a compact one does not');
+    assert.equal(at('compact').stamp, true, 'and earns the one stamp that says why it is parked');
+    assert.equal(at('full').stamp, false, 'which the full row does not need — it has the rest');
+    assert.equal(at('full').bits, true);
+    assert.equal(at('compact').bits, false);
+    assert.equal(at('full', true).bits, false, 'a completed workspace never nags');
+  }
+
+  // And the renderer actually gates on those fields rather than re-deciding beside them.
+  const row = codeOnly(fnBody(ui, 'function workspaceRow('));
+  assert.match(row, /part\.kindBadge \? kindBadge\(kind\) : null/, 'the badge is drawn through the table');
+  assert.match(row, /part\.sectionFull \? sevCountsRow\(rd\.openBySeverity\) : null/,
+    'the severity counts too — and from the readiness the row already resolved');
+  assert.match(row, /part\.sectionFull \? rowMetaLine\(r, kind\) : null/, 'and the sources line');
+  assert.match(row, /part\.sectionFull && r\.awaitingAuthor \? cardReviewRow\(r\) : null/,
+    'and the waiting-on-author line, which is the third thing the full card said');
+});
+
+test('U9: nothing the row draws is left unstyled, and nothing styled is left undrawn', () => {
+  const ui = readUi();
+  const css = cssRules(fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8'));
+
+  // The card's own classes went with it. Each of these selected an element that no view builds any
+  // more; left behind they are rules the next reader has to prove are dead before touching anything.
+  for (const dead of ['.features-grid', '.feature-card', '.fc-titlewrap', '.fc-top', '.fc-title',
+    '.fc-meta', '.fc-chips', '.fc-why', '.fc-compact', '.fc-wrap', '.fc-delete', '.fc-done',
+    '.fc-stamps', '.fc-pending', '.skel-card']) {
+    assert.ok(!new RegExp(`\\${dead}\\b`).test(css), `style.css must not still style ${dead}`);
+  }
+  // And the reverse, which is the failure that actually shows on screen: every class the row and the
+  // placeholder emit must be selected by something. `.ir-meta` and `.ir-pending-dial` are new here,
+  // and an unstyled .ir-meta is a sources line in the wrong font with no separators.
+  for (const live of ['.inbox', '.inbox-row', '.ir-wrap', '.ir-main', '.ir-top', '.ir-title',
+    '.ir-needs', '.ir-compact', '.ir-meta', '.ir-pending', '.ir-pending-dial', '.ir-delete',
+    '.ir-stamps', '.ir-arrow', '.sev-counts', '.fc-job', '.fc-review', '.delete-confirm']) {
+    // The class must be selected as a WHOLE class, not merely appear inside a longer name:
+    // `.ir-meta-x` contains ".ir-meta" and styles nothing the row emits.
+    assert.match(css, new RegExp(`\\${live}(?![\\w-])`),
+      `style.css must still style ${live} — the row draws it`);
+  }
+  // The job tints are shared between the two surfaces by name, and only one surface is left, so the
+  // card half of each pair had to go without taking the row half with it.
+  assert.ok(!/\.feature-card\.fc-busy/.test(css), 'the card half of the job tints is gone');
+  assert.match(css, /\.inbox-row\.fc-busy-needs \{/, 'and the row half is not');
+
+  // The one container the bands stack into is the row list, on both surfaces.
+  assert.match(codeOnly(fnBody(ui, 'function sectionGrid(')), /\), 'inbox'\);/,
+    'a section must band its rows into the same .inbox list Home does');
+  assert.match(codeOnly(fnBody(ui, 'async function renderSection(')), /skel\('skel-row'\)/,
+    'and its loading skeleton must be row-shaped, or the first paint shifts the whole list');
+  // The zone the poll writes into is named for what it holds; both references move together.
+  assert.equal((ui.match(/section-list-zone/g) || []).length, 2,
+    'the section list zone is created once and found once — a rename that missed one would leave '
+    + 'the poll writing into nothing, silently');
+  assert.ok(!ui.includes('features-grid'), 'and no reference to the old grid may survive anywhere');
 });

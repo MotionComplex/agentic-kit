@@ -217,38 +217,15 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .view-head h1 { font-size: 22px; font-weight: 680; margin: 0; letter-spacing: -0.02em; }
 .view-sub { color: var(--fg-mute); font-size: 13px; }
 
-/* ============================== feature grid ============================== */
+/* ============================== workspace lists ============================== */
 
-.features-grid {
-  display: grid; gap: 18px;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-}
-
-.feature-card {
-  display: grid; grid-template-columns: 1fr auto; gap: 14px 18px;
-  padding: 20px 20px 18px;
-  background: var(--glass-bg);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-card);
-  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
-  /* dashboard cards stay still on hover — depth, not lift */
-  transition: border-color var(--dur-normal) var(--ease-interactive), box-shadow var(--dur-normal) var(--ease-interactive);
-  cursor: pointer;
-}
-.feature-card:hover { border-color: var(--accent-line); box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight), 0 0 0 1px var(--accent-line); }
-.fc-titlewrap { min-width: 0; }
-.fc-top { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-.fc-title { font-weight: 640; font-size: 15px; line-height: 1.3; letter-spacing: -0.01em; }
-.fc-meta { color: var(--fg-mute); font-size: 12.5px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; }
-.fc-meta > span + span::before { content: "·"; margin-right: 9px; color: var(--line); }
+/* There is no .feature-card and no .features-grid any more: Home and all three kind sections draw
+   the same `.inbox` list of `.inbox-row`s (web/app.js, workspaceRow), so what the card owned either
+   moved onto the row (see .ir-meta, .sev-counts) or went with it. */
 .feature-id { font-family: var(--mono); font-size: 11.5px; color: var(--fg-mute); }
-.feature-card .dial { grid-row: span 2; align-self: center; }
-.feature-card .sev-counts { grid-column: 1 / -1; }
 
-/* Live job folded onto a workspace card — no separate jobs strip. */
-.fc-job { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 8px;
+/* Live job folded onto a workspace row — no separate jobs strip. */
+.fc-job { display: flex; align-items: flex-start; gap: 8px;
   padding: 9px 11px; border-radius: var(--radius-sm); border: 1px solid var(--line);
   background: var(--panel-3); font-size: 12.5px; }
 .fc-job-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -260,19 +237,17 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .fc-job-stale { color: var(--fg-dim); line-height: 1.45; }
 .fc-job-stale strong { color: var(--major); }
 .fc-job-dismiss { flex: none; }
-/* tint the card border by job state so a glance reads "busy / blocked / failed" */
+/* tint the row border by job state so a glance reads "busy / blocked / failed" */
 .fc-busy { border-color: var(--accent-line); }
 .fc-busy-error { border-color: var(--notready-line); }
-/* Needs-your-input cards are sorted to the top and tinted whole-card so they can't be missed. The
-   inbox row wears the same fc-busy-* classes rather than a parallel ir-busy-* set: one job state,
-   one tint, and a row that has folded a job on is the same object a card is. */
-.feature-card.fc-busy-needs,
+/* Needs-your-input rows are sorted to the top and tinted whole-row so they can't be missed. The
+   `fc-` prefix on the job classes is kept on purpose: it names the JOB state — one job state, one
+   tint — and it is shared with the job line (.fc-job) the row folds in. */
 .inbox-row.fc-busy-needs { border-color: var(--major-line); background: var(--major-soft); }
-.feature-card.fc-busy-needs:hover,
 .inbox-row.fc-busy-needs:hover { border-color: var(--major); }
 .fc-busy-needs .fc-job { border-color: var(--major-line); background: var(--major-soft); }
 .fc-busy-error .fc-job { border-color: var(--notready-line); background: var(--notready-soft); }
-/* Stalled: amber like needs-input (it needs you), but the card border stays calm — the point is
+/* Stalled: amber like needs-input (it needs you), but the row border stays calm — the point is
    "nothing is happening here", not "emergency". */
 .fc-busy-stale { border-color: var(--major-line); }
 .fc-busy-stale .fc-job { border-color: var(--major-line); background: var(--major-soft); }
@@ -305,16 +280,14 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 /* Compact bands pack tighter: less air between rows that hold one line each. Keyed off the density
    the band emits, never off which bands happen to be compact today — a list of band names here is
    a second copy of WS_BANDS' `density` column, and flipping that column would leave the spacing
-   behind on a band that no longer holds one-liners. Both containers the one band loop can draw
-   into, because the sections and the inbox are banded by the same code and must breathe alike.
+   behind on a band that no longer holds one-liners. One selector now, because the sections and the
+   inbox are banded by the same code into the same container and must breathe alike.
 
    8px, and chosen rather than inherited: it arrived as an unremarked 10px → 8px in the commit that
    added the .inbox selector, so it is restated here with its reason. .inbox already sits at 10px in
    its full-density form, so a compact override of 10px would be no override at all — the rule would
-   claim to pack the parked bands tighter while leaving the inbox exactly as loose as the band that
-   demands action. 8px is the smallest step that still reads as a gap between one-line rows, and it
-   is the only value that makes this rule true of BOTH containers it names. */
-.band-density-compact .features-grid,
+   claim to pack the parked bands tighter while leaving the list exactly as loose as the band that
+   demands action. 8px is the smallest step that still reads as a gap between one-line rows. */
 .band-density-compact .inbox { gap: 8px; }
 
 /* The note a polled list shows while it is holding its repaint (web/app.js, zoneHeldNote). The
@@ -354,20 +327,6 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
    the page — wider than the viewport at 420px. */
 .zone-held-text { min-width: 0; }
 
-/* A compact card — same object, denser: title, why it's parked, one stamp, the job row. The dial,
- * the severity counts and the sources line are decision material, and nothing in these bands is
- * waiting on a decision from you. */
-.fc-compact { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
-.fc-compact .fc-top { display: block; margin-bottom: 0; }
-.fc-compact .fc-title { font-size: 13.5px; font-weight: 600; }
-.fc-why { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; margin-top: 5px; font-size: 11.5px; }
-.fc-compact .fc-job { padding: 6px 9px; font-size: 12px; }
-
-/* The full card's chip row: the state pill and the lifecycle chip sit side by side and must be
-   allowed to wrap, because the longest pill ("Checking for updates") next to "draft" outruns a
-   narrow card and an overflowing header is worse than a two-line one. */
-.fc-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
-
 /* State pill: the WS_STATES label, tinted by band so the pill and the header agree at a glance.
  * Qualified with .chip on purpose — these sit above the chip block, and a bare .ws-pill-* would
  * lose the tint to .chip's own colours on source order alone. */
@@ -376,11 +335,14 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .chip.ws-pill-in-progress { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
 .chip.ws-pill-waiting     { color: var(--fg-mute); }
 
-/* placeholder card for a review whose workspace doesn't exist yet */
-.fc-pending { border-style: dashed; cursor: default; }
-.fc-pending:hover { border-color: var(--accent-line); box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight); }
-.fc-pending-dial { width: 64px; height: 64px; display: grid; place-items: center; color: var(--fg-mute);
-  border: 2px dashed var(--line); border-radius: 999px; font-size: 18px; }
+/* Placeholder row for a review whose workspace doesn't exist yet. Dashed all through — border and
+   dial alike — because that is the whole message: this is not a workspace yet, there is nothing to
+   open and nothing to score. `cursor: default` and no hover lift for the same reason: the row is not
+   a link, and a row that highlights under the pointer promises somewhere to go. */
+.inbox-row.ir-pending { border-style: dashed; cursor: default; }
+.inbox-row.ir-pending:hover { border-color: var(--glass-border); box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight); }
+.ir-pending-dial { width: 44px; height: 44px; flex: none; display: grid; place-items: center; color: var(--fg-mute);
+  border: 2px dashed var(--line); border-radius: 999px; font-size: 15px; }
 
 /* ============================== readiness dial ============================== */
 
@@ -404,7 +366,11 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 
 /* ============================== severity counts ============================== */
 
-.sev-counts { display: flex; gap: 14px; align-items: center; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+/* The open-severity breakdown, drawn inline on a full section row's "why it is here" line (web/app.js,
+   workspaceRow). It used to be a full-width strip under a card, separated by a rule — on a row that
+   separator would be the row pretending to be a card, so what divides it from the counts beside it is
+   the gap, and nothing else. */
+.sev-counts { display: inline-flex; gap: 12px; align-items: center; }
 .sev { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 560; }
 .sev-glyph { font-size: 11px; }
 .sev-blocker { color: var(--blocker); }
@@ -435,9 +401,7 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .btn-complete:hover { background: var(--ready); color: var(--bg); border-color: var(--ready); }
 .btn-complete.is-done { border-color: var(--line); color: var(--fg-dim); background: var(--panel-3); }
 .btn-complete.is-done:hover { background: var(--panel-2); color: var(--fg); }
-/* Completed workspaces read as settled: dimmed card, muted inbox row. */
-.fc-done { opacity: .6; }
-.fc-done:hover { opacity: .85; }
+/* Completed workspaces read as settled: a muted row. */
 .ir-wrap.ir-done .inbox-row { opacity: .62; }
 .ir-wrap.ir-done .inbox-row:hover { opacity: .9; }
 .ir-done-chip { margin-left: 8px; }
@@ -501,8 +465,23 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .ir-compact .ir-title { font-size: 13.5px; font-weight: 600; }
 .ir-compact .ir-needs { font-size: 11.5px; }
 
-/* The live job folded onto a row. `.fc-job` is written for a card's grid, where it spans the full
-   width by itself; inside the row's text column it needs its own separation from the line above. */
+/* The open-severity counts sit on the row's own "why it is here" line, so they take that line's
+   scale rather than the card's — one line of information, not a block bolted under one. */
+.ir-needs .sev-counts { gap: 11px; }
+.ir-needs .sev { font-size: 12px; }
+
+/* What a spec workspace is assembled from, and when we last ran a round — the line the full section
+   cards carried, on full section rows only (web/app.js, rowParts). Same metrics the card's meta line
+   had, including the "·" between parts, which is what keeps "4 specs · 4 work items" reading as one
+   sentence rather than two columns. */
+.ir-meta {
+  margin-top: 3px; color: var(--fg-mute); font-size: 12.5px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px;
+}
+.ir-meta > span + span::before { content: "·"; margin-right: 9px; color: var(--line); }
+
+/* The live job folded onto a row. `.fc-job` sits inside the row's text column, so it needs its own
+   separation from the line above. */
 .ir-main .fc-job { margin-top: 8px; }
 .ir-compact .fc-job { padding: 6px 9px; font-size: 12px; }
 .empty-icon { display: inline-flex; color: var(--fg-mute); opacity: .6; margin-bottom: 12px; }
@@ -616,8 +595,8 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 .review-cta.review-cta-rereview.is-hot { background: var(--kind-review); color: var(--bg); border-color: var(--kind-review); font-weight: 680; }
 .review-cta.review-cta-rereview.is-hot:hover { filter: brightness(1.08); }
 
-/* Card review-state line (section cards, no job running). */
-.fc-review { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+/* The review-state line a full section row draws when no job is running. */
+.fc-review { display: flex; align-items: center; gap: 6px; font-size: 12.5px; margin-top: 8px; }
 .fc-review-waiting { color: var(--fg-mute); }
 .fc-review-responded { color: var(--kind-review); font-weight: 560; }
 
@@ -634,7 +613,6 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   font-size: 11.5px; color: var(--fg-mute);
 }
 .detail .review-stamps { margin: -4px 0 14px; padding: 0 2px; }
-.fc-stamps { grid-column: 1 / -1; }
 .ir-stamps { margin-top: 3px; }
 .stamp { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
 .stamp-label { color: var(--fg-mute); }
@@ -1532,7 +1510,6 @@ body.modal-open { overflow: hidden; }
 .empty code { font-family: var(--mono); background: var(--panel-3); padding: 2px 8px; border-radius: 6px; color: var(--fg-dim); }
 
 .skel { background: linear-gradient(90deg, var(--panel) 25%, var(--panel-3) 37%, var(--panel) 63%); background-size: 400% 100%; animation: shimmer 1.4s ease infinite; border-radius: var(--radius-sm); }
-.skel-card  { height: 130px; border-radius: var(--radius-card); }
 .skel-row   { height: 74px; border-radius: var(--radius); }
 .skel-col   { height: 200px; border-radius: var(--radius); }
 .skel-strip { height: 44px; margin-bottom: 18px; }
@@ -1679,7 +1656,7 @@ a.f-dup-chip:hover { border-color: var(--major); filter: brightness(1.15); }
 .rail-item:focus-visible,
 a.mchip:focus-visible,
 a.src-link:focus-visible,
-a.feature-card:focus-visible,
+a.inbox-row:focus-visible,
 a.backlink:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1858,7 +1835,7 @@ a.backlink:focus-visible {
 .ir-wrap:hover .ir-delete,
 .ir-wrap:focus-within .ir-delete { opacity: 1; }
 
-/* Inline confirm that replaces the inbox row or feature card on trash click */
+/* Inline confirm that replaces the row on trash click — one confirm, because there is one row. */
 .ir-wrap .delete-confirm {
   flex: 1;
   display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
@@ -1867,21 +1844,6 @@ a.backlink:focus-visible {
   border-radius: var(--radius);
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
 }
-
-/* Feature card wrapper — relative container for the trash button overlay */
-.fc-wrap { position: relative; }
-.fc-delete {
-  position: absolute; top: 10px; right: 10px;
-  opacity: 0; transition: opacity var(--dur-fast) var(--ease-interactive);
-}
-.fc-wrap:hover .fc-delete,
-.fc-wrap:focus-within .fc-delete { opacity: 1; }
-/* Confirm takes over the full card area */
-.fc-wrap .delete-confirm {
-  display: flex; flex-direction: column; gap: 14px;
-  padding: 20px; cursor: default;
-}
-.fc-wrap .delete-confirm.feature-card { cursor: default; }
 
 /* Shared confirm message text */
 .delete-confirm-msg { font-size: 13.5px; color: var(--fg-dim); }
