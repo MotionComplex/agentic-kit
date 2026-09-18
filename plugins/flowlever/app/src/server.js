@@ -177,9 +177,6 @@ function handleFeatureList(res, kindFilter) {
       // The one canonical answer to "what is going on here" (ledger.WORKSPACE_STATES). Computed
       // server-side so the inbox and the section lists can never disagree about it.
       state: ledger.workspaceState(f, findings, lastRoundAt),
-      // Which PR vote this review has earned, and why. Derived from the ledger only — FlowLever
-      // never casts it; the reviewer votes on the PR.
-      approval: ledger.approvalSignal(f, findings, lastRoundAt),
       // When we last reviewed vs. when the PR was last touched by the other side — so a card
       // can say "reviewed 3h ago · PR updated 20m ago" and flag that a re-review is worthwhile.
       stamps: ledger.reviewStamps(f, lastRoundAt),
@@ -225,7 +222,6 @@ function handleHome(res) {
       // The one canonical answer to "what is going on here" (ledger.WORKSPACE_STATES); the
       // grouping the inbox draws from it is the browser's job, so the sort below is unchanged.
       state: ledger.workspaceState(f, findings, lastRoundAt),
-      approval: ledger.approvalSignal(f, findings, lastRoundAt),
     };
   });
   rows.sort((a, b) =>

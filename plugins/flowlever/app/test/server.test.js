@@ -2123,17 +2123,19 @@ test('U5: the section poll asks the binding predicate instead of restating it', 
   // Behaviour preserved exactly, which is the whole requirement: this is a RELEVANCE filter, not
   // the binding rule. Same-kind jobs reach the grid whether or not they bind a workspace — that is
   // what lets an in-flight review with no workspace yet draw its pending placeholder — and the
-  // predicate guards only the `apply` arm, where the old copy sat.
-  // The kind arm is KIND_ACTIONS now rather than `r.action === kind` (see U6), but its POSITION in
-  // the filter is the property that mattered and still does.
+  // predicate guards only the wsId-targeted arm, where the old copy sat.
+  // The kind arm is KIND_ACTIONS now rather than `r.action === kind` (see U6), and the second arm
+  // is WSID_JOB_ACTIONS rather than a hardcoded `apply` (it has to admit `summarize` too, and a
+  // third site hardcoding the list is how `summarize` shipped invisible on this very grid) — but
+  // their POSITIONS in the filter are the property that mattered and still do.
   const kindArm = poll.indexOf('actsOnKind(r, kind)');
-  const applyArm = poll.indexOf("r.action === 'apply'");
+  const wsidArm = poll.indexOf('WSID_JOB_ACTIONS.includes(r.action)');
   const asked = poll.indexOf('jobBindsTo(');
   assert.ok(kindArm > -1, 'every job of this section\'s own kind must still be relevant to it');
-  assert.ok(applyArm > -1 && asked > applyArm,
-    'and the predicate must guard the apply arm — asking it of the kind arm would drop the '
+  assert.ok(wsidArm > -1 && asked > wsidArm,
+    'and the predicate must guard the wsId-targeted arm — asking it of the kind arm would drop the '
     + 'workspace-less reviews that placeholders are made of');
-  assert.ok(kindArm < applyArm, 'with the unconditional kind arm first, as it was');
+  assert.ok(kindArm < wsidArm, 'with the unconditional kind arm first, as it was');
 
   // The filter must be computed before the grid is drawn from it, or it decides nothing.
   const relAt = poll.indexOf('const rel =');
@@ -3595,6 +3597,59 @@ test('V3: the PR quick link points at the PR, and only ever at the PR', () => {
   // A PR recorded without a usable url cannot be opened, so it does not get an arrow that 404s.
   assert.equal(prSource({ sources: { ado: [{ id: 5882, type: 'Pull Request', url: 'javascript:alert(1)' }] } }), null,
     'and the href goes through safeHref, so a non-http scheme never reaches an anchor');
+});
+
+test('V5: the chip states a vote, it does not cast one — and the summarize job is drawn everywhere', () => {
+  const ui = readUi();
+
+  // FlowLever never votes: the user said "I will be the one that approves. I will do that on the
+  // PR." A control that looked pressable and changed nothing over there would be worse than no
+  // indicator at all, so the chip is a div — and that is a design claim, which means it is tested.
+  const chip = fnSource(ui, 'function approvalChip(');
+  assert.ok(!/h\('button'/.test(chip) && !/onclick/.test(chip),
+    'approvalChip must not render a button or bind a click — the vote is cast on the PR, not here');
+  assert.match(chip, /if \(!a \|\| !a\.vote\) return null;/,
+    'and a null vote draws nothing at all: a greyed-out vote reads as a broken control');
+
+  // A queue action that names one workspace must be in ONE list, not hardcoded per site. It was
+  // hardcoded at three, which is how `summarize` shipped invisible on the section grid, labelled
+  // "Re-reviewing" on Home, and unnoticed by the detail page when it finished.
+  // fnSource() brace-matches, so it is the wrong tool for an ARRAY literal — it would run off to
+  // the next `{` in the file. Read these as arrays.
+  const arrayLiteral = (name) => {
+    const m = ui.match(new RegExp(`^const ${name} = (\\[[\\s\\S]*?\\]);$`, 'm'));
+    assert.ok(m, `${name} must be one array literal at module scope`);
+    // eslint-disable-next-line no-new-func
+    return new Function(`return ${m[1]};`)();
+  };
+  const wsidList = arrayLiteral('WSID_JOB_ACTIONS');
+  assert.deepEqual(wsidList, ['apply', 'summarize']);
+  for (const [fn, why] of [
+    ['function startSectionRequestsPoll(', 'the section grid folds the job onto its row'],
+    ['function ensureFeatureJobPolling(', 'the detail page reloads when the summary lands'],
+  ]) {
+    assert.match(codeOnly(fnBody(ui, fn)), /WSID_JOB_ACTIONS|DETAIL_JOB_ACTIONS/,
+      `${fn} must read the shared list, not its own copy — ${why}`);
+  }
+
+  // Every action the server can enqueue needs a human-readable verb and a band, or a live job row
+  // wears the raw action string and lands under someone else's label.
+  const labels = new Function(`${ui.match(/^const REQ_ACTION_LABEL = .*$/m)[0]};\nreturn REQ_ACTION_LABEL;`)();
+  for (const a of ledger.REQUEST_ACTIONS) {
+    assert.ok(labels[a], `REQ_ACTION_LABEL must name "${a}" — a job row otherwise prints the action id`);
+  }
+  assert.match(codeOnly(fnBody(ui, 'function categoryOf(')), /summarize/,
+    'categoryOf must claim summarize, or it falls through to the "Re-reviewing" default');
+  const states = arrayLiteral('WS_STATES');
+  const summarizing = states.find((st) => st.key === 'job-summarizing');
+  assert.ok(summarizing && summarizing.band === 'in-progress', 'and its band must be in-progress');
+
+  // Its banner must not borrow the write-job wording — "Posting…" on a job that posts nothing.
+  const banner = fnSource(ui, 'function summarizeJobBanner(');
+  assert.ok(!/Posting|Applying|review queue/.test(banner),
+    'the summarize banner must not claim a post, an apply, or items to put back — it has none');
+  assert.match(codeOnly(fnBody(ui, 'function specJobBanner(')), /summarizeJobBanner\(j\)/,
+    'and specJobBanner must hand off to it before the write-job branches');
 });
 
 test('V4: the summary is written, never invented', () => {

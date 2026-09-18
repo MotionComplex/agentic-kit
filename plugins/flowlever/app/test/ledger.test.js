@@ -1583,3 +1583,76 @@ test('workspaceState: a finished PR review is NEEDS-YOU, not "waiting on others"
   assert.equal(ledger.workspaceState(prFeature({ status: 'done' }), [], ROUND_AT), 'done');
   assert.equal(ledger.workspaceState(prFeature(), [{ fp: 'p', status: 'open', pending: 'post', suggestion: 'x' }], ROUND_AT), 'posting');
 });
+
+test('approvalSignal: a PR that moved after the round NEVER gets a vote — even with nothing outstanding', () => {
+  // B1, and the worst output this feature has. `workspaceState` only reaches its `author-responded`
+  // rule from INSIDE the "something is still posted" branch, so a review whose findings were all
+  // resolved — the clean review, the finished one — walked straight past it. Reading the state
+  // string therefore answered "did the PR move?" with "no" for exactly the workspaces where it
+  // matters most, and the chip said Approve on code the author had pushed to since anybody read it.
+  // 14 of the user's own workspaces had this shape.
+  const moved = prFeature({ review: { lastActivityAt: '2026-09-18T12:00:00.000Z', lastActivityBy: 'Piotr' } });
+  const flagged = prFeature({ review: { authorRespondedAt: '2026-09-18T12:00:00.000Z' } });
+  const allHandled = [{ fp: 'a', severity: 'blocker', status: 'resolved', postedAt: '2026-09-18T07:00:00.000Z' }];
+
+  for (const [name, f] of [['activity newer than the round', moved], ['the runner flagged a response', flagged]]) {
+    for (const [shape, list] of [['every finding handled', allHandled], ['no findings at all', []],
+      ['only suggestions out', [posted({ severity: 'minor' })]]]) {
+      const s = ledger.approvalSignal(f, list, ROUND_AT);
+      assert.equal(s.vote, null, `${name} + ${shape} must not produce a vote`);
+      assert.match(s.reason, /re-review first/);
+    }
+    // …and the row must not say "Ready to approve" either, or the band and the chip disagree.
+    assert.notEqual(ledger.workspaceState(f, allHandled, ROUND_AT), 'needs-approval');
+    assert.notEqual(ledger.workspaceState(f, [], ROUND_AT), 'needs-approval');
+    // A workspace already marked done is not exempt: `done` outranks every state, so gating on the
+    // state string would have let the stalest workspaces keep a green Approve.
+    assert.equal(ledger.approvalSignal({ ...f, status: 'done' }, allHandled, ROUND_AT).vote, null);
+  }
+
+  // The guard must not cost the honest case: same shapes, PR untouched since the round.
+  const still = prFeature({ review: { lastActivityAt: '2026-09-18T07:00:00.000Z' } });
+  assert.equal(ledger.approvalSignal(still, allHandled, ROUND_AT).vote, 'approve');
+  assert.equal(ledger.workspaceState(still, allHandled, ROUND_AT), 'needs-approval');
+});
+
+test('approvalSignal: an unrecognised severity withholds the vote rather than passing as a suggestion', () => {
+  for (const severity of [undefined, null, 'critical', 'BLOCKER', '']) {
+    const s = ledger.approvalSignal(prFeature(), [posted({ severity })], ROUND_AT);
+    assert.equal(s.vote, 'wait-for-author', `severity ${JSON.stringify(severity)} must not read as a suggestion`);
+    assert.equal(s.outstanding.blocking, 1);
+  }
+  // The four real severities are unaffected.
+  assert.equal(ledger.approvalSignal(prFeature(), [posted({ severity: 'minor' })], ROUND_AT).vote, 'approve-with-suggestions');
+});
+
+test('addRequest: an action that needs a workspace is refused without one', () => {
+  for (const action of ledger.WSID_REQUIRED_ACTIONS) {
+    assert.throws(() => ledger.addRequest({ action }), (e) => e.code === 'EUSER',
+      `${action} without a wsId would queue a row the runner can never dispatch`);
+  }
+  assert.ok(ledger.WSID_REQUIRED_ACTIONS.includes('summarize'));
+  // `audit` still takes either a wsId or URLs, and `poll` needs neither.
+  assert.ok(!ledger.WSID_REQUIRED_ACTIONS.includes('audit'));
+  assert.doesNotThrow(() => ledger.addRequest({ action: 'poll' }));
+});
+
+test('addSource: a blank title or url is dropped, never stored over a real one', () => {
+  const id = 'blank-title-guard';
+  ledger.createFeature({ id, title: 'x' });
+  ledger.addSource(id, { type: 'ado', id: 43099, title: 'Atrius map on Wayfinding', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43099' });
+  const src = () => ledger.getFeature(id).sources.ado[0];
+
+  // /flowlever:summarize re-registers EVERY ado source passing --title "<System.Title>" across 36
+  // workspaces. An unset shell variable would otherwise blank the real titles — silently destroying
+  // the data that step exists to repair — and a blank url would take the Vertec prefix with it.
+  ledger.addSource(id, { type: 'ado', id: 43099, title: '   ' });
+  assert.equal(src().title, 'Atrius map on Wayfinding');
+  ledger.addSource(id, { type: 'ado', id: 43099, url: '' });
+  assert.equal(src().url, 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43099');
+  // Real values still update, and an explicit null still clears.
+  ledger.addSource(id, { type: 'ado', id: 43099, title: 'The real System.Title' });
+  assert.equal(src().title, 'The real System.Title');
+  ledger.addSource(id, { type: 'ado', id: 43099, title: null });
+  assert.equal(src().title, null);
+});

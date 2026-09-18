@@ -54,6 +54,7 @@ const WS_STATES = [
   { key: 'job-rereviewing',  band: 'in-progress', label: 'Re-reviewing'        },
   { key: 'job-reviewing',    band: 'in-progress', label: 'Reviewing'           },
   { key: 'job-polling',      band: 'in-progress', label: 'Checking for updates'},
+  { key: 'job-summarizing',  band: 'in-progress', label: 'Writing summary'      },
   { key: 'posting',          band: 'in-progress', label: 'Posting…'            },
   { key: 'awaiting-author',  band: 'waiting',     label: 'Waiting on author'   },
   { key: 'awaiting-reaudit', band: 'waiting',     label: 'Waiting on re-audit' },
@@ -3654,6 +3655,7 @@ function categoryOf(f, job) {
     if (needsInput || job.status === 'error' || isStaleJob(job)) return 'job-attention';
     if (job.action === 'apply') return 'job-posting';
     if (job.action === 'poll') return 'job-polling';
+    if (job.action === 'summarize') return 'job-summarizing';
     // A re-run against a workspace that already has findings/rounds is a re-review, not a first
     // pass — the same distinction cardJobRow's verb makes, read from the same derivation.
     return hasFindingsOf(f) ? 'job-rereviewing' : 'job-reviewing';
@@ -3685,6 +3687,16 @@ const KIND_ACTIONS = {
   'pr-respond': ['pr-respond'],
 };
 function actsOnKind(job, kind) { return (KIND_ACTIONS[kind] || []).includes(job.action); }
+
+/* Queue actions that name ONE workspace by `wsId` and that any kind can host, so KIND_ACTIONS
+ * cannot own them — jobBindsTo's wsId arm is their way onto a row. One table, for the same reason
+ * KIND_ACTIONS is one: `apply` was hardcoded at each site instead, so adding `summarize` left its
+ * job invisible on the section list and mislabelled everywhere else. A new action added here shows
+ * up on every surface at once. (`poll` is not here — it names no workspace and drives the Refresh
+ * button instead of a row.) */
+const WSID_JOB_ACTIONS = ['apply', 'summarize'];
+/* …plus the ones a kind already owns that can still change what the DETAIL page is showing. */
+const DETAIL_JOB_ACTIONS = [...WSID_JOB_ACTIONS, 'propose'];
 
 /* The rows for a section, drawn as ordered bands: what needs you, what a runner is mid-way
  * through, what is parked on somebody else — then the collapsed Done list, unchanged. Each
@@ -3810,7 +3822,7 @@ function startSectionRequestsPoll(kind) {
     // `audit`/`re-audit`/`propose` — matched nothing at all under it.
     const known = state.section.features;
     const rel = reqs.filter((r) => actsOnKind(r, kind)
-      || (r.action === 'apply' && known.some((f) => jobBindsTo(r, f))));
+      || (WSID_JOB_ACTIONS.includes(r.action) && known.some((f) => jobBindsTo(r, f))));
     // The manual-refresh pass has no workspace of its own — it drives the Refresh button
     // instead of a card. An unscoped (`kind: null`) poll covers every PR section.
     renderRefreshZone($('#refresh-zone'), kind, pickPollJob(reqs, kind));
@@ -3949,7 +3961,7 @@ const REQ_STATUS = {
   done:    { glyph: '✓', label: 'Done' },
   error:   { glyph: '✗', label: 'Error' },
 };
-const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis', propose: 'Draft changes', poll: 'Refresh' };
+const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis', propose: 'Draft changes', poll: 'Refresh', summarize: 'Summary' };
 
 /* ---- live job ↔ card binding ----------------------------------------------
  * Instead of a separate "jobs" strip duplicating the cards, the active request
@@ -4819,7 +4831,7 @@ function rerenderDetail() {
 function ensureFeatureJobPolling(id) {
   startPolling(`featjob:${id}`, (reqs) => {
     if (current.view !== 'detail' || current.id !== id) return;
-    const mine = (reqs || []).filter((r) => (r.action === 'propose' || r.action === 'apply') && r.wsId === id);
+    const mine = (reqs || []).filter((r) => DETAIL_JOB_ACTIONS.includes(r.action) && r.wsId === id);
     const latest = mine.length
       ? [...mine].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] : null;
     // Staleness rides in the signature: it flips with the passage of time, not with a server
@@ -4835,6 +4847,47 @@ function ensureFeatureJobPolling(id) {
     if (justDone) { loadDetail(id, true).then(() => rerenderDetail()).catch(() => rerenderDetail()); }
     else rerenderDetail();
   });
+}
+
+/* The summarize job's own banner. Deliberately quiet: this job reads registered sources and writes
+ * one field, so there is nothing to reassure the user about and nothing to take back. It says what
+ * is happening, and — the one case that matters — that nothing is running it. `done` returns null
+ * because the detail reloads on completion and the filled-in summary is the better answer. */
+function summarizeJobBanner(j) {
+  if (j.needsInput) {
+    return h('div', { class: 'apply-status apply-needs-input feat-job' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, j.note || 'Waiting on you — approve the auth prompt in your other window.'));
+  }
+  if (j.status === 'error') {
+    return h('div', { class: 'apply-status apply-stalled feat-job' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, `Could not write the summary${j.note ? ` — ${j.note}` : '.'} Nothing else was changed.`));
+  }
+  if (isStaleJob(j)) {
+    return h('div', { class: 'apply-status apply-stalled feat-job' },
+      h('span', { class: 'apply-dot' }, '⏸'),
+      h('div', { class: 'apply-stalled-body' },
+        h('span', {}, `Summary — ${j.status} ${fmtAge(jobAgeMs(j))} ago and no runner picked it up.`),
+        h('span', { class: 'meta-dim' }, 'Nothing has been read or written.')),
+      h('div', { class: 'apply-stalled-actions' },
+        runnerZone(1, '▶ Run it now'),
+        h('button', { class: 'btn btn-cancel-pending', type: 'button', onclick: () => cancelStalledJob(j) },
+          '✕ Cancel job')));
+  }
+  if (j.status === 'queued') {
+    const idle = !runnerBusy();
+    return h('div', { class: 'apply-status apply-running feat-job' },
+      idle ? h('span', { class: 'apply-dot' }, '⏳') : h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, `Writing the summary — queued${idle ? ', nothing running it yet' : ' for the runner…'}`),
+      idle ? runnerZone(1, '▶ Run it now') : null);
+  }
+  if (j.status === 'running') {
+    return h('div', { class: 'apply-status apply-running feat-job' },
+      h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, `Writing the summary${j.phase ? ` — ${j.phase}` : '…'}`));
+  }
+  return null;
 }
 
 /* The live banner above the board: what the runner is doing for this workspace right now — and,
@@ -4865,6 +4918,13 @@ function specJobBanner(data) {
       }, '↩ Back to the review queue'));
   }
   if (!j) return null;
+
+  // A summarize job takes its own branch rather than borrowing the wording below. Everything after
+  // this point is built for jobs that WRITE — the verbs are "Posting"/"Applying", the recovery is
+  // "put the items back in the review queue", and the loud reassurance is "nothing has been
+  // posted". All four are wrong here: this job posts nothing, moves no findings, and has no items
+  // to put back. Left to fall through, it told the user their PR was mid-post.
+  if (j.action === 'summarize') return summarizeJobBanner(j);
 
   const isPropose = j.action === 'propose';
   if (j.needsInput) {
@@ -5558,15 +5618,22 @@ function summarizeButton(feature) {
         // Same rule as Post/Apply: queueing a job nobody runs is a silent no-op, so the runner is
         // started here rather than left for the user to remember.
         const r = await refreshRunner();
+        // Says the runner STARTED, not that anything has been read — the job banner above the
+        // board reports the actual phases, and claiming progress the runner has not made is the
+        // habit this app is careful about everywhere else.
         if (r && r.available && !r.running) {
           await startRunner('watch', { silent: true });
-          toast('Writing the summary — reading the registered sources now', 'success');
+          toast('Summary queued — a runner is starting on it', 'success');
         } else if (r && r.running) {
           toast('Summary queued — the running session will pick it up', 'success');
         } else {
           toast('Summary queued — run /flowlever:watch in Claude Code to execute it', 'success');
         }
-        ensureApplyPolling();
+        // A pressed button must not read "Queueing…" for ever. It stays disabled because a second
+        // press would only dedupe onto the same request; the job banner takes over from here, and
+        // the panel is rebuilt (with a fresh, enabled button) the moment the job errors or ends.
+        btn.textContent = 'Queued';
+        ensureFeatureJobPolling(current.id);
         pollRequestsNow();
       } catch (e) {
         btn.disabled = false;

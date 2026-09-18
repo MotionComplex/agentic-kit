@@ -54,6 +54,10 @@ const TARGET_SYSTEMS = ['ado', 'confluence'];
 //                            PRs and re-check known ones for counterpart updates. Optional
 //                            `kind` narrows it to one section (pr-review / pr-respond)
 const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose', 'poll', 'summarize'];
+// Actions that are meaningless without a target workspace. Enqueuing one without a `wsId`
+// creates a row the runner can never dispatch and nothing ever cleans up — it just sits in the
+// queue looking like work. (`audit` is absent on purpose: it takes EITHER a wsId or URLs.)
+const WSID_REQUIRED_ACTIONS = ['apply', 're-audit', 'propose', 'summarize'];
 const REQUEST_STATUSES = ['queued', 'running', 'done', 'error'];
 // Workspace kinds a `poll` request may be narrowed to (null = both).
 const REQUEST_KINDS = ['pr-review', 'pr-respond'];
@@ -687,7 +691,10 @@ const APPROVAL_VOTES = ['approve', 'approve-with-suggestions', 'wait-for-author'
 // and one that never went out was never the author's to answer.
 function outstandingByWeight(findings) {
   const out = (Array.isArray(findings) ? findings : []).filter((f) => f && isPosted(f));
-  const isBlocking = (f) => APPROVAL_BLOCKING_SEVERITIES.includes(f.severity);
+  // An unrecognised or missing severity counts as BLOCKING. Ingest validates severity, so this
+  // only reaches a hand-edited or legacy ledger — but the safe default for a vote is to withhold
+  // it, not to quietly file the unknown thing under "suggestion" and recommend an approve.
+  const isBlocking = (f) => !SEVERITIES.includes(f.severity) || APPROVAL_BLOCKING_SEVERITIES.includes(f.severity);
   const isQuestion = (f) => f.dimension === QUESTION_DIMENSION;
   return {
     blocking: out.filter(isBlocking).length,
@@ -703,6 +710,20 @@ function voteFor(o) {
   if (o.blocking || o.questions) return 'wait-for-author';
   if (o.suggestions) return 'approve-with-suggestions';
   return 'approve';
+}
+
+// Has the PR moved since our last round? Either the runner flagged a response, or the recorded
+// activity is newer than the round.
+//
+// This is a FACT about the workspace, not a workspace *state*, and the difference is the whole of
+// bug B1: `workspaceState` only ever reaches its `author-responded` rule from inside the
+// "something is still posted" branch, so a review whose findings were all resolved — the clean
+// review, the finished one — walked straight past it. Reading the state string therefore answered
+// "did the PR move?" with "no" for exactly the workspaces where the question matters most, and the
+// signal recommended Approve on code the author had pushed to since anybody read it. Ask the facts.
+function prMovedSinceRound(feature, lastRoundAt) {
+  return Boolean(feature && feature.review && feature.review.authorRespondedAt)
+    || reviewStamps(feature, lastRoundAt).newSinceReview;
 }
 
 // Is this finding still LIVE work on the reviewer's side? Open/reworking and not already out of
@@ -760,14 +781,16 @@ function workspaceState(feature, findings, lastRoundAt = null) {
   if (list.some(isPosted)) {
     // Either the runner explicitly flagged a response, or the recorded PR activity is newer than
     // our last round. Both mean the same thing: there is a delta on the PR to reconcile.
-    const responded = Boolean(feature && feature.review && feature.review.authorRespondedAt)
-      || reviewStamps(feature, lastRoundAt).newSinceReview;
-    if (responded) return 'author-responded';
+    if (prMovedSinceRound(feature, lastRoundAt)) return 'author-responded';
     // Comments are out, but if NONE of them blocks — only suggestions, no unanswered questions —
     // the reviewer is not actually waiting on anybody: they can approve-with-suggestions now. That
     // is a `needs-you` move, and filing it under "waiting on others" is exactly how it gets
     // forgotten. Anything blocking stays `awaiting-author`, which is the truth.
-    if (isPrReviewKind(feature) && voteFor(outstandingByWeight(list)) === 'approve-with-suggestions') {
+    // `lastRoundAt` is required for the same reason it is below: the row would otherwise say
+    // "Ready to approve" on a workspace whose chip declines to name a vote, and a row and a chip
+    // that disagree are worse than either alone.
+    if (isPrReviewKind(feature) && lastRoundAt
+        && voteFor(outstandingByWeight(list)) === 'approve-with-suggestions') {
       return 'needs-approval';
     }
     return 'awaiting-author';
@@ -788,7 +811,13 @@ function workspaceState(feature, findings, lastRoundAt = null) {
   // — it is the moment the PR can be approved, and the moment the reviewer forgets to. It only
   // counts once a round has run: recommending an approve on a workspace nobody has reviewed would
   // be the worst thing this feature could do.
-  if (isPrReviewKind(feature) && lastRoundAt) return 'needs-approval';
+  // …and only while the PR has not moved since. A review whose findings were all resolved is the
+  // likeliest workspace to reach here, and if the author has pushed since, whether the fixes are
+  // real is the open question — not something to badge "Ready to approve". Such a workspace stays
+  // `settled`, exactly as it did before this state existed.
+  if (isPrReviewKind(feature) && lastRoundAt && !prMovedSinceRound(feature, lastRoundAt)) {
+    return 'needs-approval';
+  }
   // Otherwise a real resting place, not an error — hence a name of its own.
   return 'settled';
 }
@@ -814,14 +843,20 @@ function approvalSignal(feature, findings, lastRoundAt = null) {
   // look exactly like a clean review; it is not one.
   if (!lastRoundAt) return none('no review round has run yet');
 
-  const state = workspaceState(feature, list, lastRoundAt);
-  if (state === 'posting') return none('a post is still in flight');
-  if (state === 'needs-review' || state === 'needs-rereview' || state === 'ready-to-post') {
-    return none('the review is not finished');
-  }
+  // Gated on FACTS, not on the state string. A denylist of states was how B1 shipped: a state this
+  // list forgot — or one `workspaceState` could not reach, which is what happened — falls through
+  // to a vote, and the failure direction is "recommend Approve", the worst output this has. Each
+  // test below asks the ledger directly, so there is nothing to forget.
+  if (list.some(isPending)) return none('a post is still in flight');
+  // Anything open that has not gone out yet: the review is not finished, whatever else is true.
+  if (list.some(isLiveFinding)) return none('the review is not finished');
   // The PR moved after our last round, so whether the feedback was handled is precisely what we
-  // do not know. Approving here would be signing off on code nobody re-read.
-  if (state === 'author-responded') return none('the PR changed after your last round — re-review first');
+  // do not know. Approving here would be signing off on code nobody re-read. This must be asked
+  // even when NOTHING is still outstanding — a clean review of a PR that has since been pushed to
+  // is the single most inviting way to get a false Approve.
+  if (prMovedSinceRound(feature, lastRoundAt)) {
+    return none('the PR changed after your last round — re-review first');
+  }
 
   const vote = voteFor(outstanding);
   // The words matter here, because this chip sits directly under the readiness gate, which says
@@ -860,7 +895,12 @@ function addSource(featureId, { type, ...fields }) {
   // an explicit booking-key override. Trimmed to null when blank so "recorded as empty" and "never
   // recorded" are the same thing to the cockpit — it labels a missing phase rather than drawing a
   // blank one, and a re-added source with a blank flag must not wipe a phase already on file.
-  for (const k of ['vertecPhase', 'vertecKey']) {
+  // A blank value is DROPPED, never stored. `title` and `url` are here for the same reason the
+  // vertec fields are, and they earned it late: /flowlever:summarize re-registers every ado source
+  // on a workspace passing `--title "<System.Title>"`, so an unset shell variable would blank the
+  // real titles across 36 workspaces — silently destroying exactly the data that step exists to
+  // repair. Clearing stays possible, but only by passing an explicit null.
+  for (const k of ['vertecPhase', 'vertecKey', 'title', 'url']) {
     if (!(k in entry)) continue;
     if (entry[k] === null) continue;                       // explicit clear
     if (typeof entry[k] !== 'string') throw euser(`${k} must be a string`);
@@ -2054,7 +2094,7 @@ function addRequest({ action, prId, wsId, title, instructions, kind } = {}) {
   if ((action === 'pr-review' || action === 'pr-respond') && (prId === undefined || prId === null || String(prId).trim() === '')) {
     throw euser(`${action} requires "prId"`);
   }
-  if ((action === 'apply' || action === 're-audit' || action === 'propose') && (wsId === undefined || wsId === null || String(wsId).trim() === '')) {
+  if (WSID_REQUIRED_ACTIONS.includes(action) && (wsId === undefined || wsId === null || String(wsId).trim() === '')) {
     throw euser(`${action} requires "wsId"`);
   }
   // `audit` is either a NEW analysis (needs `instructions` = the spec/work-item/Figma URLs) or a
@@ -2263,6 +2303,7 @@ module.exports = {
   setFeatureReview,
   reviewStamps,
   WORKSPACE_STATES,
+  WSID_REQUIRED_ACTIONS,
   APPROVAL_VOTES,
   APPROVAL_BLOCKING_SEVERITIES,
   QUESTION_DIMENSION,

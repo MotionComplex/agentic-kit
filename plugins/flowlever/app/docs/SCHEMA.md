@@ -273,8 +273,10 @@ findings that are **posted and still open** (`isPosted`) — a finding resolved 
 handled (fixed, pushed back, or accepted), and one that never went out was never the author's to
 answer. `outstanding` splits those into `{ blocking, questions, suggestions }`, a partition:
 
-- **blocking** — severity `blocker` or `major`. `major` sits here on the reviewer's rule, not Azure
-  DevOps': an approve says "my feedback was handled", and a major IS feedback.
+- **blocking** — severity `blocker` or `major`, **or any severity the config does not define**.
+  `major` sits here on the reviewer's rule, not Azure DevOps': an approve says "my feedback was
+  handled", and a major IS feedback. An unknown severity fails toward withholding the vote rather
+  than quietly counting as a suggestion.
 - **questions** — dimension `ambiguity` (what `/flowlever:pr-review` posts as a `question`
   conventional comment) at any lesser severity. An unanswered question is never an approve.
 - **suggestions** — everything else: minor/info, non-question. These ride along under
@@ -285,13 +287,24 @@ else `approve`.
 
 `vote` is **null** — and `reason` says which — whenever the honest answer is "not yet": the
 workspace is not a `pr-review`; no round has run (`lastRoundAt` null — a fresh workspace with no
-findings would otherwise look exactly like a clean review); a post is in flight; the review is
-unfinished (`needs-review` / `needs-rereview` / `ready-to-post`); or the PR moved after the last
-round (`author-responded`), where whether the feedback was handled is precisely what is unknown.
+findings would otherwise look exactly like a clean review); a post is in flight (`isPending`); the
+review is unfinished (any `isLiveFinding`); or **the PR moved after the last round**, where whether
+the feedback was handled is precisely what is unknown.
 
-`workspaceState` reads the same rule twice, so the band agrees with the chip: a `pr-review` that
-would be `settled` **and has had a round** is `needs-approval` instead, and one that would be
-`awaiting-author` with only suggestions out is `needs-approval` too — with nothing blocking, the
+Each of those is asked of the **ledger directly**, never of `workspaceState`'s return value, and
+that is load-bearing rather than stylistic. Gating on the state string shipped a false Approve:
+`workspaceState` only reaches its `author-responded` rule from inside the "something is still
+posted" branch, so a review whose findings were *all resolved* — the clean, finished one — walked
+straight past it, and the state string answered "did the PR move?" with "no" for exactly the
+workspaces where it matters most. A denylist of states also fails open, and its failure direction
+is "recommend Approve". `prMovedSinceRound(feature, lastRoundAt)` is the shared fact; `done` is not
+exempt from it, since `done` outranks every state and would otherwise shield the stalest
+workspaces.
+
+`workspaceState` reads the same facts, so the band agrees with the chip: a `pr-review` that would
+be `settled`, **has had a round, and whose PR has not moved since** is `needs-approval` instead,
+and one that would be `awaiting-author` with only suggestions out (same two conditions) is
+`needs-approval` too — with nothing blocking, the
 reviewer is not waiting on anybody and can approve-with-suggestions now. Anything blocking stays
 `awaiting-author`. Note `reason` deliberately says "blocking **comments**": the readiness gate
 beside it says "nothing blocking" about a different set (the reviewer's own open queue, which a
