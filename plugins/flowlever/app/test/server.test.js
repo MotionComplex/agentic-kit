@@ -3312,3 +3312,182 @@ test('U9: nothing the row draws is left unstyled, and nothing styled is left und
     + 'the poll writing into nothing, silently');
   assert.ok(!ui.includes('features-grid'), 'and no reference to the old grid may survive anywhere');
 });
+
+/* ============================================================================================
+ * V — "which link is which": source roles, the Vertec booking line, the PR quick link, the summary.
+ * The complaint these answer: every Azure DevOps source wore one checkbox icon, so opening the user
+ * story meant reading a truncated title and clicking the PR by mistake.
+ * ========================================================================================== */
+
+/* The real shape of a pr-review workspace's sources, as `/flowlever:pr-review` registers them:
+ * the PR first (it is what the review is of), then the story, then the epic above it. */
+function prWorkspaceSources() {
+  return {
+    confluence: [
+      { id: '988446724', title: 'Atrius migration — specification (index)', url: 'https://uniccom.atlassian.net/wiki/x/BIDqOg' },
+    ],
+    ado: [
+      { id: 5882, type: 'Pull Request', title: "PR #5882 — [43057] Atrius 2.3: the map reads in the visitor's language",
+        url: 'https://dev.azure.com/FZAG/dxp/_git/DXP-Website/pullrequest/5882' },
+      { id: 43057, type: 'User Story', title: "Atrius 2.3 — The map reads in the visitor's language",
+        url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057',
+        vertecPhase: 'Maps Integration // 12. Atrius 2.3 — The map looks and reads like a DXP map' },
+      { id: 43049, type: 'Feature', title: 'Epic 2 — Map parity with PointConsulting (parent of 43057)',
+        url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43049' },
+    ],
+    figma: [],
+  };
+}
+
+function liftSources(ui) {
+  const decl = fnSource(ui, 'const SOURCE_ROLES = ');
+  return {
+    // The role table is read from the source, never re-typed here: a test carrying its own copy
+    // would keep passing while the strip rendered something else.
+    // eslint-disable-next-line no-new-func
+    SOURCE_ROLES: new Function(`${decl};\nreturn SOURCE_ROLES;`)(),
+    ...liftUi(ui, [decl, 'function isPrUrl(', 'function adoRole(', 'function trimIdPrefix(', 'function sourceEntries(']),
+  };
+}
+
+test('V1: every source names what it IS, and the two you reach for come first', () => {
+  const ui = readUi();
+  const { adoRole, sourceEntries, trimIdPrefix } = liftSources(ui);
+
+  // The mapping that carries the whole feature: the work-item type decides the role.
+  assert.equal(adoRole({ type: 'Pull Request' }), 'pr');
+  assert.equal(adoRole({ type: 'User Story' }), 'story');
+  assert.equal(adoRole({ type: 'Product Backlog Item' }), 'story', 'the Agile and Scrum templates name the same thing differently');
+  assert.equal(adoRole({ type: 'Bug' }), 'bug');
+  assert.equal(adoRole({ type: 'Feature' }), 'feature');
+  assert.equal(adoRole({ type: 'Epic' }), 'epic');
+  assert.equal(adoRole({ type: 'user story' }), 'story', 'the type is compared case-insensitively');
+  // An ADO instance can carry types we do not map; it must still get a role rather than throw.
+  assert.equal(adoRole({ type: 'Impediment' }), 'item');
+
+  // The fallback that makes this work on the workspaces the user already has: everything reviewed
+  // before `--itemType` was passed carries NO type at all, and those are exactly the PRs on screen
+  // today. A /pullrequest/<id> url is unambiguous.
+  assert.equal(adoRole({ url: 'https://dev.azure.com/FZAG/dxp/_git/DXP-Website/pullrequest/5882' }), 'pr',
+    'an untyped source at a pull-request url is a PR');
+  assert.equal(adoRole({ url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057' }), 'item',
+    'but an untyped work item is never guessed into a story');
+  assert.equal(adoRole({}), 'item');
+
+  const entries = sourceEntries({ sources: prWorkspaceSources() });
+  assert.deepEqual(entries.map((e) => e.role), ['pr', 'story', 'feature', 'spec'],
+    'the PR and its story sort first — they are what the reviewer reaches for');
+  assert.deepEqual(entries.map((e) => e.label), ['PR', 'Story', 'Feature', 'Spec']);
+  assert.deepEqual(entries.map((e) => e.idText), ['#5882', '#43057', '#43049', '']);
+
+  // The badge already says "PR #5882", so the title must not say it a second time and lose the
+  // width that would have shown what the PR is about.
+  assert.equal(entries[0].text, "[43057] Atrius 2.3: the map reads in the visitor's language");
+  assert.equal(entries[1].text, "Atrius 2.3 — The map reads in the visitor's language",
+    'a title that never restated its id is left exactly as it is');
+
+  // trimIdPrefix must never eat the title down to nothing, and must not match a longer number.
+  assert.equal(trimIdPrefix('#5882', 5882), '#5882', 'a title that is only its own id keeps it');
+  assert.equal(trimIdPrefix('58821 other thing', 5882), '58821 other thing', 'a prefix match must be the whole number');
+  assert.equal(trimIdPrefix(null, 5882), '');
+
+  // An unmapped type shows its REAL name — "Work item" would throw away what ADO told us.
+  const odd = sourceEntries({ sources: { ado: [{ id: 7, type: 'Impediment', title: 'Blocked on vendor' }] } });
+  assert.equal(odd[0].label, 'Impediment');
+
+  // Every role the mapper can return must have a row in the table the strip renders from.
+  for (const it of [{ type: 'Pull Request' }, { type: 'User Story' }, { type: 'Bug' }, { type: 'Task' },
+    { type: 'Feature' }, { type: 'Epic' }, {}]) {
+    const { SOURCE_ROLES } = liftSources(ui);
+    assert.ok(SOURCE_ROLES[adoRole(it)], `SOURCE_ROLES must describe role ${adoRole(it)}`);
+  }
+});
+
+test('V1b: nothing the sources strip draws is left unstyled', () => {
+  const ui = readUi();
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
+  const { SOURCE_ROLES } = liftSources(ui);
+  for (const role of Object.keys(SOURCE_ROLES)) {
+    assert.match(css, new RegExp(`\\.src-role-${role}(?![\\w-])`),
+      `style.css must tint .src-role-${role} — an untinted role is a chip that looks like every other`);
+    assert.ok(ui.includes(`${SOURCE_ROLES[role].icon}:`) || ['confluence', 'figma'].includes(SOURCE_ROLES[role].icon),
+      `ICONS must carry the glyph ${SOURCE_ROLES[role].icon} that role ${role} names`);
+  }
+  for (const live of ['.src-badge', '.src-id', '.src-text', '.src-out', '.vertec-row', '.vertec-label',
+    '.vertec-body', '.vertec-text', '.vertec-missing', '.vertec-phase', '.vertec-phase-label',
+    '.vertec-phase-text', '.copy-btn', '.dh-titlerow', '.dh-prlink', '.ws-summary',
+    '.ws-summary-label', '.ws-summary-body', '.ws-summary-empty']) {
+    assert.match(css, new RegExp(`\\${live}(?![\\w-])`), `style.css must style ${live}`);
+  }
+});
+
+test('V2: the Vertec line is the booking string, assembled from real fields only', () => {
+  const ui = readUi();
+  const { bookingItem, vertecBookingText, vertecPrefix } = liftUi(ui, [
+    fnSource(ui, 'const VERTEC_RANK = '),
+    'function isPrUrl(', 'function adoRole(', 'function bookingItem(',
+    'function vertecPrefix(', 'function vertecBookingText(',
+  ], { location: { href: 'http://localhost:4173/' } });
+
+  const feature = { sources: prWorkspaceSources() };
+  const item = bookingItem(feature);
+  assert.equal(item.id, 43057, 'a booking is made on the story, never on the PR that implements it');
+
+  // The exact string the user pastes into Vertec. Byte-for-byte, because it is pasted, not read.
+  assert.equal(vertecBookingText(item),
+    "FZAG-43057 Atrius 2.3 — The map reads in the visitor's language");
+
+  // The prefix is the Azure DevOps ORGANISATION — derived, so a new project needs no configuration.
+  assert.equal(vertecPrefix({ url: 'https://dev.azure.com/DXN/web/_workitems/edit/42507' }), 'DXN');
+  assert.equal(vertecPrefix({ url: 'https://fzag.visualstudio.com/dxp/_workitems/edit/1' }), 'FZAG',
+    'the pre-dev.azure.com host form still resolves');
+  assert.equal(vertecPrefix({ url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/1', vertecKey: 'fzag-web' }),
+    'FZAG-WEB', 'an explicit key wins over the derived org');
+
+  // The refusals. A booking line with a guessed prefix would be pasted into a real booking, so a
+  // missing org produces NO line rather than a plausible one.
+  assert.equal(vertecPrefix({ url: 'https://example.com/whatever' }), null);
+  assert.equal(vertecPrefix({}), null);
+  assert.equal(vertecBookingText({ id: 43057, title: 'x', url: 'https://example.com/x' }), null);
+  assert.equal(vertecBookingText({ title: 'x', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/1' }), null,
+    'no id, no booking key');
+  assert.equal(vertecBookingText(null), null);
+
+  // A PR-only workspace has nothing bookable — the row must not fall back to the PR.
+  assert.equal(bookingItem({ sources: { ado: [prWorkspaceSources().ado[0]] } }), null);
+  assert.equal(bookingItem({}), null);
+
+  // A bug is booked on the bug; a feature only when there is no story/bug/task above it.
+  const bugFirst = { sources: { ado: [
+    { id: 1, type: 'Feature', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/1' },
+    { id: 2, type: 'Bug', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/2' },
+  ] } };
+  assert.equal(bookingItem(bugFirst).id, 2, 'the feature is a last resort, not the first ado source');
+});
+
+test('V3: the PR quick link points at the PR, and only ever at the PR', () => {
+  const ui = readUi();
+  const { prSource } = liftUi(ui, [
+    'function safeHref(', 'function isPrUrl(', 'function adoRole(', 'function prSource(',
+  ]);
+
+  assert.equal(prSource({ sources: prWorkspaceSources() }).id, 5882);
+  // A spec workspace has no PR: the arrow must be absent, not pointed at the story.
+  assert.equal(prSource({ sources: { ado: [prWorkspaceSources().ado[1]] } }), null);
+  assert.equal(prSource({}), null);
+  // A PR recorded without a usable url cannot be opened, so it does not get an arrow that 404s.
+  assert.equal(prSource({ sources: { ado: [{ id: 5882, type: 'Pull Request', url: 'javascript:alert(1)' }] } }), null,
+    'and the href goes through safeHref, so a non-http scheme never reaches an anchor');
+});
+
+test('V4: the summary is written, never invented', () => {
+  const ui = readUi();
+  const body = fnBody(ui, 'function summaryPanel(');
+  // The app has no model. The ONLY text it may draw is feature.summary — a panel that fell back to
+  // the title or to the findings would be paraphrasing the thing the user already cannot parse.
+  assert.match(body, /feature\.summary/);
+  assert.ok(!/feature\.title/.test(body),
+    'summaryPanel must never fall back to the workspace title — that is the text it exists to explain');
+  // And an empty one says so, on PR workspaces, naming the command that fills it.
+  assert.match(body, /feature summary/, 'the empty state must name the command that writes one');
+});

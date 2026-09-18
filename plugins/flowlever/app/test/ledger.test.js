@@ -1373,3 +1373,70 @@ test('workspaceState: the backstop only catches LIVE findings, and outranks noth
   assert.equal(ledger.workspaceState(feature, [bare('b3', { pending: 'post' })], null), 'posting');
   assert.equal(ledger.workspaceState({ status: 'done', review: {} }, [bare('b4')], null), 'done');
 });
+
+/* ---- the workspace summary: written by the review skills, never by the app ---- */
+
+test('setFeatureSummary: set, trim, clear — and "empty" is always null, never ""', () => {
+  const id = 'summary-roundtrip';
+  ledger.createFeature({ id, title: 'PR #1 — something', kind: 'pr-review' });
+  assert.equal(ledger.getFeature(id).summary, null, 'a fresh workspace has no summary — nobody has written one');
+
+  const set = ledger.setFeatureSummary(id, '  Adds per-language venue ids so the map POIs read in the visitor\'s language.  ');
+  assert.equal(set.summary, "Adds per-language venue ids so the map POIs read in the visitor's language.");
+  assert.equal(ledger.getFeature(id).summary, set.summary, 'and it survives the round trip to disk');
+
+  // Both clears collapse to the same null the UI tests for, so "cleared" and "never written" are
+  // one state rather than two that render differently.
+  assert.equal(ledger.setFeatureSummary(id, '   ').summary, null);
+  assert.equal(ledger.setFeatureSummary(id, 'again').summary, 'again');
+  assert.equal(ledger.setFeatureSummary(id, null).summary, null);
+
+  assert.throws(() => ledger.setFeatureSummary(id, { text: 'no' }), (e) => e.code === 'EUSER');
+  assert.throws(() => ledger.setFeatureSummary('no-such-workspace', 'x'), (e) => e.code === 'EUSER');
+});
+
+test('normalizeFeature: a junk or missing summary reads as "none", not as content', () => {
+  const id = 'summary-junk';
+  ledger.createFeature({ id, title: 'x' });
+  const file = path.join(tmpDir, 'features', `${id}.json`);
+  for (const junk of [{ paragraphs: [] }, 42, '', '   ', [], null]) {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    raw.summary = junk;
+    fs.writeFileSync(file, JSON.stringify(raw));
+    assert.equal(ledger.getFeature(id).summary, null, `summary ${JSON.stringify(junk)} must read as none`);
+  }
+  // The field absent entirely — every workspace written before this existed.
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete raw.summary;
+  fs.writeFileSync(file, JSON.stringify(raw));
+  assert.equal(ledger.getFeature(id).summary, null);
+});
+
+test('addSource: the Vertec phase rides the work item, and a blank one never erases a real one', () => {
+  const id = 'vertec-source';
+  ledger.createFeature({ id, title: 'PR #5882', kind: 'pr-review' });
+  ledger.addSource(id, {
+    type: 'ado', id: 43057, itemType: 'User Story', title: "Atrius 2.3 — The map reads in the visitor's language",
+    url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057',
+    vertecPhase: '  Maps Integration // 12. Atrius 2.3  ',
+  });
+  let [story] = ledger.getFeature(id).sources.ado;
+  assert.equal(story.type, 'User Story', '--itemType still lands on the source as its work-item type');
+  assert.equal(story.vertecPhase, 'Maps Integration // 12. Atrius 2.3');
+
+  // Re-registering on a later round without the phase (or with a blank one) must not wipe it —
+  // addSource merges, and a dropped phase would silently un-answer the header's read-out.
+  ledger.addSource(id, { type: 'ado', id: 43057, title: 'retitled', vertecPhase: '   ' });
+  [story] = ledger.getFeature(id).sources.ado;
+  assert.equal(story.vertecPhase, 'Maps Integration // 12. Atrius 2.3');
+  assert.equal(story.title, 'retitled', 'while everything actually supplied does update');
+
+  // An explicit null is the way to take a wrong phase back off.
+  ledger.addSource(id, { type: 'ado', id: 43057, vertecPhase: null });
+  assert.equal(ledger.getFeature(id).sources.ado[0].vertecPhase, null);
+
+  assert.throws(() => ledger.addSource(id, { type: 'ado', id: 1, vertecPhase: 7 }), (e) => e.code === 'EUSER');
+  // The booking-key override takes the same treatment.
+  ledger.addSource(id, { type: 'ado', id: 99, vertecKey: ' fzag-web ' });
+  assert.equal(ledger.getFeature(id).sources.ado.find((s) => s.id === 99).vertecKey, 'fzag-web');
+});

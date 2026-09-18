@@ -25,10 +25,22 @@ Usage: node src/cli.js <command> [args]
                                          Mark/clear "author responded" on a posted PR review (runner).
                                          --at/--by record WHEN the counterpart last updated the PR and
                                          who — shown in the cockpit next to when we last reviewed it.
+  feature summary <id> --text "..." | --file <md> | --clear
+                                         Set the plain-language "what is this change about" blurb
+                                         shown at the top of the workspace. Written by the review
+                                         skills, which have just read the PR, ticket and specs —
+                                         the app has no model of its own, so nothing else fills it.
   source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--title "..."] [--url <url>]
+                               [--vertecPhase "..."] [--vertecKey <KEY>]
   source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title "..."] [--url <url>]
                                          confluence/ado need --id; figma needs --fileKey (--nodeId
-                                         optional). --itemType (ado only) stores the work-item type.
+                                         optional). --itemType (ado only) stores the work-item type
+                                         ("User Story", "Bug", "Pull Request", …) — the cockpit
+                                         badges each source by it, so a PR is never mistaken for a
+                                         story. --vertecPhase (ado only) stores the work item's
+                                         Vertec booking phase (ADO field Custom.Vertec, under
+                                         Administration); --vertecKey overrides the booking prefix
+                                         the cockpit otherwise derives from the ADO org in --url.
   threads set <featureId> --file threads.json | --none
                                          Record the comment threads the PR ALREADY carries (other
                                          reviewers' and your own). Required before "ingest" on a
@@ -281,11 +293,25 @@ function cmdFeatureShow({ pos, flags }) {
     ['  Open', openSummary(r.openBySeverity)],
   ]));
 
+  if (feature.summary) {
+    console.log('\nSummary:');
+    for (const line of feature.summary.split('\n')) console.log(`  ${line}`);
+  }
+
   const sources = feature.sources || {};
   const srcRows = [];
   for (const type of ['confluence', 'ado', 'figma']) {
     for (const s of sources[type] || []) {
-      srcRows.push([`  ${type}`, s.id != null ? s.id : `${s.fileKey || ''}${s.nodeId ? '#' + s.nodeId : ''}`, s.title || '', s.url || '']);
+      // The work-item type is what tells a PR apart from the story it implements, so it is
+      // printed next to the id rather than left to the title's wording.
+      srcRows.push([
+        `  ${type}`,
+        s.type ? `[${s.type}]` : '',
+        s.id != null ? s.id : `${s.fileKey || ''}${s.nodeId ? '#' + s.nodeId : ''}`,
+        s.title || '',
+        s.url || '',
+      ]);
+      if (s.vertecPhase) srcRows.push(['', '', '', `Vertec phase: ${s.vertecPhase}`, '']);
     }
   }
   console.log('\nSources:');
@@ -323,6 +349,30 @@ function cmdFeatureDelete({ pos, flags }) {
   console.log(`Deleted feature ${id}`);
 }
 
+// The workspace's plain-language summary. `--file` exists because a good summary is a short
+// paragraph or a few bullets, and a shell argument is a poor place to keep newlines.
+function cmdFeatureSummary({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const given = ['text', 'file', 'clear'].filter((k) => flags[k] !== undefined);
+  if (given.length !== 1) {
+    throw userError('Pass exactly one of --text "...", --file <path> or --clear');
+  }
+  let summary = null;
+  if (flags.text !== undefined) summary = String(flags.text);
+  if (flags.file !== undefined) {
+    const file = path.resolve(String(flags.file));
+    try {
+      summary = fs.readFileSync(file, 'utf8');
+    } catch (err) {
+      throw userError(`Cannot read summary file '${flags.file}': ${err.message}`);
+    }
+  }
+  const feature = ledger.setFeatureSummary(featureId, summary);
+  console.log(feature.summary
+    ? `${feature.id} summary set (${feature.summary.length} chars)`
+    : `${feature.id} summary cleared`);
+}
+
 function cmdSourceAdd({ pos, flags }) {
   const featureId = need(pos[0], '<featureId>');
   const type = need(flags.type, '--type');
@@ -344,6 +394,14 @@ function cmdSourceAdd({ pos, flags }) {
     // ledger.addSource maps itemType -> the source's "type" field (the work-item type); this
     // command used to never read the flag at all, so `--itemType` was accepted and dropped.
     if (type === 'ado' && flags.itemType !== undefined) source.itemType = flags.itemType;
+    // The Vertec booking phase + prefix override ride on the work item, so they are ado-only. A
+    // hard error beats silently dropping them on a confluence/figma source: a skill that put the
+    // flag on the wrong source would otherwise look like it worked and show no phase.
+    for (const k of ['vertecPhase', 'vertecKey']) {
+      if (flags[k] === undefined) continue;
+      if (type !== 'ado') throw userError(`--${k} applies to --type ado only (got '${type}')`);
+      source[k] = flags[k];
+    }
     label = id;
   }
   if (flags.title !== undefined) source.title = flags.title;
@@ -878,6 +936,7 @@ async function run(argv) {
     case 'feature show': return cmdFeatureShow(rest);
     case 'feature delete': return cmdFeatureDelete(rest);
     case 'feature activity': return cmdFeatureActivity(rest);
+    case 'feature summary': return cmdFeatureSummary(rest);
     case 'source add': return cmdSourceAdd(rest);
     case 'threads set': return cmdThreadsSet(rest);
     case 'threads list': return cmdThreadsList(rest);

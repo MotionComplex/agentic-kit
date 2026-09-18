@@ -134,6 +134,20 @@ const ICONS = {
   kindSpec: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>',
   kindReview: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7"/><circle cx="18" cy="18" r="2.5"/><path d="M18 15.5V12a4 4 0 0 0-4-4h-3"/><path d="M13 5l-2 3 2 3"/></svg>',
   kindRespond: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/><path d="M11 8l-3 3 3 3"/><path d="M8 11h6a2 2 0 0 1 2 2v1"/></svg>',
+  // source-role glyphs (lucide-style). A PR, the story it implements and the epic above it used to
+  // share one checkbox icon, so telling them apart meant reading the title — the thing you click
+  // BEFORE you have read it. Each role gets its own silhouette.
+  srcPr: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7"/><circle cx="18" cy="18" r="2.5"/><path d="M18 15.5V12a4 4 0 0 0-4-4h-3"/><path d="M13 5l-2 3 2 3"/></svg>',
+  srcStory: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H2z"/><path d="M22 5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H22z"/></svg>',
+  srcBug: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M8 11H4M20 11h-4M8 16H4.5M20 16h-3.5M9 6.5L7 4M15 6.5L17 4"/></svg>',
+  srcTask: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 12l2.5 2.5L15.5 9.5"/></svg>',
+  srcEpic: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 4.5-9 4.5-9-4.5z"/><path d="M3 12l9 4.5 9-4.5"/><path d="M3 16.5L12 21l9-4.5"/></svg>',
+  // clipboard-copy, and its "done" twin — the copy button swaps glyph on success so the feedback
+  // is on the control you pressed, not only in a toast that may be off-screen.
+  copy: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  copied: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>',
+  // the "open this elsewhere" arrow, at control size (ICONS.link is the 10px in-chip version)
+  openExternal: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>',
 };
 
 /* The three workflow kinds a workspace can host. Each rides the SAME finding model
@@ -5054,13 +5068,19 @@ function detailView(data, tab) {
     h('div', { class: 'detail-head' },
       h('div', { class: 'dh-left' },
         h('a', { class: 'backlink', href: km.section }, `← ${km.label}`),
-        h('h1', { class: 'dh-title' }, feature.title || feature.id || current.id),
+        // The title and the "open the PR" arrow ride the same line, so the quick link is where the
+        // thing it opens is named rather than parked in the metadata row below.
+        h('div', { class: 'dh-titlerow' },
+          h('h1', { class: 'dh-title' }, feature.title || feature.id || current.id),
+          prQuickLink(feature),
+        ),
         h('div', { class: 'dh-meta' },
           kindBadge(kind),
           statusChip(feature.status),
           feature.id ? h('code', { class: 'feature-id' }, feature.id) : null,
           detailDeleteZone(feature),
         ),
+        vertecRow(feature),
       ),
       h('div', { class: 'dh-right' },
         dialEl(r.score, r.gate, 96, 'dial-lg'),
@@ -5073,6 +5093,9 @@ function detailView(data, tab) {
         ),
       ),
     ),
+    // First thing under the header, because "what is this even about" is the question you have
+    // before any of the workflow controls mean anything.
+    summaryPanel(feature),
     loopStrip(data, reviewCta(data)),
     // When we reviewed vs. when the PR last changed — the re-review decision, in one line.
     reviewStampsRow(data, kind),
@@ -5153,36 +5176,262 @@ function reviewScopeNote(feature) {
     h('span', { class: 'review-scope-text' }, brief));
 }
 
-/* ============================== sources strip ============================== */
+/* ============================== sources: roles, badges, the strip ============================== */
+
+/* What a linked source IS, as opposed to which system it lives in. The system was never the useful
+ * distinction: a PR, the user story it implements and the epic above it are all "Azure DevOps" and
+ * all wore the same checkbox icon, so the only way to tell the story from the PR was to read a
+ * title that a chip truncates — i.e. after clicking the wrong one. `rank` orders the strip so the
+ * two you reach for most (the PR and its story) are always the first two chips.
+ * `tint` keys the colour in style.css. */
+const SOURCE_ROLES = {
+  pr:      { label: 'PR',        icon: 'srcPr',      rank: 0 },
+  story:   { label: 'Story',     icon: 'srcStory',   rank: 1 },
+  bug:     { label: 'Bug',       icon: 'srcBug',     rank: 2 },
+  task:    { label: 'Task',      icon: 'srcTask',    rank: 3 },
+  feature: { label: 'Feature',   icon: 'srcEpic',    rank: 4 },
+  epic:    { label: 'Epic',      icon: 'srcEpic',    rank: 5 },
+  item:    { label: 'Work item', icon: 'srcTask',    rank: 6 },
+  spec:    { label: 'Spec',      icon: 'confluence', rank: 7 },
+  design:  { label: 'Design',    icon: 'figma',      rank: 8 },
+};
+
+/* ADO work-item type (source.type, set via `source add --itemType`) → role.
+ * The url fallback matters and is not cosmetic: every workspace registered before --itemType was
+ * used carries no type at all, and those are exactly the PRs the user is looking at today. A PR
+ * url is unambiguous (`/pullrequest/<id>`), so an untyped source at that url is a PR. */
+function adoRole(it) {
+  const t = String((it && it.type) || '').trim().toLowerCase();
+  if (t === 'pull request' || t === 'pullrequest' || t === 'pr') return 'pr';
+  if (t === 'user story' || t === 'product backlog item' || t === 'story' || t === 'requirement') return 'story';
+  if (t === 'bug' || t === 'defect') return 'bug';
+  if (t === 'task') return 'task';
+  if (t === 'feature') return 'feature';
+  if (t === 'epic') return 'epic';
+  if (isPrUrl(it && it.url)) return 'pr';
+  return 'item';
+}
+
+function isPrUrl(url) { return /\/pullrequest\/\d+/i.test(String(url ?? '')); }
+
+/* Sources are registered with a title that frequently restates the id the badge now carries
+ * ("#5882" + "PR #5882 — [43057] Atrius 2.3…"). Drop the leading restatement so the chip spends
+ * its width on what the item is about. Never returns empty — a title that is ONLY its own id
+ * keeps it. */
+function trimIdPrefix(title, id) {
+  const t = String(title ?? '').trim();
+  if (id === undefined || id === null || t === '') return t;
+  const esc = String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const next = t.replace(new RegExp(`^(?:pr\\s*)?#?${esc}(?![\\w-])\\s*(?:[-—–:·]\\s*)?`, 'i'), '').trim();
+  return next || t;
+}
+
+/* Every linked source as one uniform shape, ordered by role. */
+function sourceEntries(feature) {
+  const s = (feature && feature.sources) || {};
+  const out = [];
+  for (const it of s.ado || []) {
+    if (!it) continue;
+    const role = adoRole(it);
+    out.push({
+      role,
+      // An ADO instance can carry work-item types we don't map ("Impediment", "Test Case"). Showing
+      // the real type beats a generic "Work item" — the badge exists to name the thing exactly.
+      label: role === 'item' && it.type ? String(it.type).trim() : SOURCE_ROLES[role].label,
+      idText: it.id != null ? `#${it.id}` : '',
+      text: trimIdPrefix(it.title, it.id) || (it.id != null ? `#${it.id}` : 'work item'),
+      system: 'Azure DevOps',
+      url: it.url,
+    });
+  }
+  for (const it of s.confluence || []) {
+    if (!it) continue;
+    out.push({ role: 'spec', label: SOURCE_ROLES.spec.label, idText: '',
+      text: String(it.title || it.id || 'page').trim(), system: 'Confluence', url: it.url });
+  }
+  for (const it of s.figma || []) {
+    if (!it) continue;
+    out.push({ role: 'design', label: SOURCE_ROLES.design.label, idText: '',
+      text: String(it.title || it.fileKey || 'frame').trim(), system: 'Figma', url: it.url });
+  }
+  // Stable within a rank: sources keep the order they were registered in, which is the order the
+  // review skill walked them.
+  return out.map((e, i) => ({ e, i }))
+    .sort((a, b) => (SOURCE_ROLES[a.e.role].rank - SOURCE_ROLES[b.e.role].rank) || (a.i - b.i))
+    .map(({ e }) => e);
+}
 
 function sourcesStrip(feature) {
-  const s = feature.sources || {};
-  const groups = [
-    { key: 'confluence', icon: 'confluence', label: 'Confluence', items: s.confluence || [],
-      text: (it) => it.title || it.id || 'page' },
-    { key: 'ado', icon: 'ado', label: 'Azure DevOps', items: s.ado || [],
-      text: (it) => (it.id != null ? `#${it.id}` : '') + (it.title ? ` ${it.title}` : '') || 'item' },
-    { key: 'figma', icon: 'figma', label: 'Figma', items: s.figma || [],
-      text: (it) => it.title || it.fileKey || 'frame' },
-  ];
-  const any = groups.some((g) => g.items.length);
+  const entries = sourceEntries(feature);
   return h('div', { class: 'sources-strip' },
     h('span', { class: 'src-label' }, 'Sources'),
-    !any ? h('span', { class: 'meta-dim' }, 'none linked') :
-      groups.filter((g) => g.items.length).map((g) =>
-        h('span', { class: 'src-group' },
-          g.items.map((it) => {
-            const href = safeHref(it.url);
-            const txt = g.text(it).trim();
-            const ttl = `${g.label}: ${txt}`;
-            const inner = [iconSpan(g.icon, `icon src-icon src-${g.key}`),
-              h('span', { class: 'src-text' }, txt),
-              href ? iconSpan('link', 'icon src-out') : null];
-            return href
-              ? h('a', { class: 'src-link', href, target: '_blank', rel: 'noopener noreferrer', title: ttl }, inner)
-              : h('span', { class: 'src-link src-nolink', title: ttl }, inner);
-          }))),
+    !entries.length ? h('span', { class: 'meta-dim' }, 'none linked') :
+      h('div', { class: 'src-group' }, entries.map((e) => {
+        const href = safeHref(e.url);
+        const ttl = `${e.label} · ${e.system}${e.idText ? ` ${e.idText}` : ''} — ${e.text}`;
+        const inner = [
+          iconSpan(SOURCE_ROLES[e.role].icon, `icon src-icon src-${e.role}`),
+          h('span', { class: `src-badge src-badge-${e.role}` }, e.label),
+          e.idText ? h('span', { class: 'src-id' }, e.idText) : null,
+          h('span', { class: 'src-text' }, e.text),
+          href ? iconSpan('link', 'icon src-out') : null,
+        ];
+        return href
+          ? h('a', { class: `src-link src-role-${e.role}`, href, target: '_blank', rel: 'noopener noreferrer', title: ttl }, inner)
+          : h('span', { class: `src-link src-nolink src-role-${e.role}`, title: ttl }, inner);
+      })),
   );
+}
+
+/* ============================== Vertec booking line ============================== */
+
+/* The work item a Vertec booking is made against: the STORY (or bug/task) the change belongs to,
+ * never the PR that implements it and, only as a last resort, the feature/epic above it. Ranked
+ * rather than "first ado source" because the sources are registered in review order, which puts
+ * the PR first. */
+const VERTEC_RANK = { story: 0, bug: 1, task: 2, item: 3, feature: 4, epic: 5 };
+function bookingItem(feature) {
+  const list = (((feature || {}).sources || {}).ado || []).filter(Boolean);
+  let best = null;
+  let bestRank = Infinity;
+  for (const it of list) {
+    const rank = VERTEC_RANK[adoRole(it)];
+    if (rank === undefined) continue;          // a PR is not bookable
+    if (rank < bestRank) { best = it; bestRank = rank; }
+  }
+  return best;
+}
+
+/* The booking key's prefix is the Azure DevOps ORGANISATION the work item lives in — `FZAG` in
+ * `dev.azure.com/FZAG/dxp/_workitems/edit/43057`, `DXN` for DXN's board. That is derived, not
+ * configured, so a new project needs no setup; `--vertecKey` on the source overrides it for an org
+ * whose Vertec prefix is spelled differently. No url ⇒ no prefix ⇒ no booking line: an invented
+ * prefix would be pasted into a real booking. */
+function vertecPrefix(it) {
+  const override = it && typeof it.vertecKey === 'string' ? it.vertecKey.trim() : '';
+  if (override) return override.toUpperCase();
+  let u = null;
+  try { u = new URL(String((it && it.url) || ''), location.href); } catch { return null; }
+  const host = u.hostname.toLowerCase();
+  if (host === 'dev.azure.com' || host.endsWith('.dev.azure.com')) {
+    const seg = u.pathname.split('/').filter(Boolean)[0];
+    if (!seg) return null;
+    try { return decodeURIComponent(seg).toUpperCase(); } catch { return seg.toUpperCase(); }
+  }
+  const legacy = /^([^.]+)\.visualstudio\.com$/.exec(host);   // the pre-dev.azure.com host form
+  return legacy ? legacy[1].toUpperCase() : null;
+}
+
+/* `FZAG-43057 Atrius 2.3 — The map reads in the visitor's language` — the exact string that goes
+ * into a Vertec booking, so it is assembled from the id and the work item's own title with nothing
+ * added. Returns null when any part is missing rather than a half-built line. */
+function vertecBookingText(it) {
+  if (!it || it.id === undefined || it.id === null || String(it.id).trim() === '') return null;
+  const prefix = vertecPrefix(it);
+  if (!prefix) return null;
+  const title = String(it.title || '').trim();
+  return `${prefix}-${String(it.id).trim()}${title ? ` ${title}` : ''}`;
+}
+
+/* One-click booking text for Vertec, on the workspace header. The phase is shown beside it as
+ * information only — it is not part of what gets copied. */
+function vertecRow(feature) {
+  const it = bookingItem(feature);
+  if (!it) return null;
+  const text = vertecBookingText(it);
+  const phase = typeof it.vertecPhase === 'string' && it.vertecPhase.trim() ? it.vertecPhase.trim() : null;
+  if (!text && !phase) return null;
+
+  const row = h('div', { class: 'vertec-row' },
+    h('span', { class: 'vertec-label' }, 'Vertec'),
+    h('div', { class: 'vertec-body' },
+      text
+        // user-select:all (style.css) so a manual drag also grabs exactly the booking string.
+        ? h('span', { class: 'vertec-text' }, text)
+        : h('span', { class: 'vertec-text vertec-missing' },
+            `Can't build the booking text — no Azure DevOps organisation in #${it.id}'s url. `
+            + 'Re-register the source with --url, or set --vertecKey.'),
+      h('span', { class: 'vertec-phase' },
+        h('span', { class: 'vertec-phase-label' }, 'Phase'),
+        phase
+          ? h('span', { class: 'vertec-phase-text' }, phase)
+          : h('span', { class: 'vertec-phase-text meta-dim' }, 'not recorded — the next review round reads it off the work item')),
+    ),
+    text ? copyButton(text, 'Vertec booking text', 'Copy the Vertec booking text') : null,
+  );
+  return row;
+}
+
+/* A copy-to-clipboard icon button that confirms on itself (glyph swap) as well as in a toast.
+ * `label` names WHAT was copied, so the toast reads "Vertec booking text copied". */
+function copyButton(text, label, title) {
+  let timer = null;
+  const btn = h('button', {
+    class: 'btn-icon copy-btn', type: 'button', title, 'aria-label': title,
+    onclick: async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        toast('Clipboard unavailable — select the text and copy it manually');
+        return;
+      }
+      toast(`${label} copied`, 'success');
+      btn.classList.add('copied');
+      btn.replaceChildren(iconSpan('copied', 'icon'));
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // The row is re-rendered on every poll tick, so the button may be detached by now; the
+        // guard keeps the timer from resurrecting a node nobody is looking at.
+        if (!btn.isConnected) return;
+        btn.classList.remove('copied');
+        btn.replaceChildren(iconSpan('copy', 'icon'));
+      }, 1600);
+    },
+  }, iconSpan('copy', 'icon'));
+  return btn;
+}
+
+/* ============================== PR quick link + summary ============================== */
+
+/* The PR this workspace is about, as a linkable source. */
+function prSource(feature) {
+  return (((feature || {}).sources || {}).ado || [])
+    .find((it) => it && adoRole(it) === 'pr' && safeHref(it.url)) || null;
+}
+
+/* The diagonal arrow beside the workspace title: open the PR in Azure DevOps, in a new tab. */
+function prQuickLink(feature) {
+  const pr = prSource(feature);
+  if (!pr) return null;
+  const label = `Open PR${pr.id != null ? ` #${pr.id}` : ''} in Azure DevOps (new tab)`;
+  return h('a', {
+    class: 'dh-prlink', href: safeHref(pr.url), target: '_blank', rel: 'noopener noreferrer',
+    title: label, 'aria-label': label,
+  }, iconSpan('openExternal', 'icon'));
+}
+
+/* The plain-language "what is this change about" blurb (feature.summary), written by the review
+ * skills from the PR description, the linked work item and the specs they already fetched. The app
+ * has no model, so it NEVER invents one: a workspace reviewed before this existed says so, and
+ * names the command that fills it, rather than paraphrasing its own title back at the reader. */
+function summaryPanel(feature) {
+  const text = feature && typeof feature.summary === 'string' ? feature.summary.trim() : '';
+  if (text) {
+    return h('div', { class: 'ws-summary' },
+      h('span', { class: 'ws-summary-label' }, 'What this is about'),
+      // `md-prose` strips the report view's document chrome off the rendered markdown — a bare
+      // `.md` carries a panel + border and would draw a second box inside this one.
+      h('div', { class: 'ws-summary-body' }, mdBlock(text, 'md-prose')));
+  }
+  const kind = (feature && feature.kind) || 'spec';
+  if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
+  return h('div', { class: 'ws-summary ws-summary-empty' },
+    h('span', { class: 'ws-summary-label' }, 'What this is about'),
+    h('span', { class: 'meta-dim' },
+      'No summary yet — the next review round writes one. To fill it in now: ',
+      h('code', {}, `cli.js feature summary ${(feature && feature.id) || '<id>'} --text "…"`)));
 }
 
 /* ============================== diff engine + renderer ============================== */

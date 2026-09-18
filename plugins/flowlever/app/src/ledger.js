@@ -460,6 +460,10 @@ function normalizeFeature(feature, idFromPath = null) {
     : null;
   if (!Array.isArray(feature.specSections)) feature.specSections = [];
   if (!Array.isArray(feature.coverage)) feature.coverage = [];
+  // Absent, blank or the wrong type all collapse to null — "nobody has written one". The cockpit
+  // draws the summary block only for a non-empty string, so a workspace written before this field
+  // existed simply doesn't show one rather than rendering `undefined` or an empty panel.
+  feature.summary = typeof feature.summary === 'string' && feature.summary.trim() ? feature.summary : null;
   return feature;
 }
 
@@ -528,6 +532,20 @@ function setFeatureStatus(featureId, status) {
     throw euser(`invalid feature status "${status}": must be one of ${FEATURE_STATUSES.join(', ')}`);
   }
   return mutateFeature(featureId, (feature) => { feature.status = status; });
+}
+
+// The plain-language "what is this change actually about" blurb shown at the top of a workspace.
+// The app carries no model of its own, so this is written by the review skills — which have just
+// read the PR description, the linked work item and the specs — and by nothing else. An empty
+// summary therefore means NOBODY HAS WRITTEN ONE YET, never "this workspace has nothing to say":
+// the cockpit says exactly that rather than inventing a sentence from the title.
+// `null`/`''` clears it, so a wrong summary can be withdrawn without deleting the workspace.
+function setFeatureSummary(featureId, summary) {
+  if (summary !== null && summary !== undefined && typeof summary !== 'string') {
+    throw euser('summary must be a string (or null to clear it)');
+  }
+  const text = typeof summary === 'string' ? summary.trim() : '';
+  return mutateFeature(featureId, (feature) => { feature.summary = text || null; });
 }
 
 // The PR-review "waiting on author" tracker (pr-review / pr-respond). After posting, a
@@ -731,6 +749,18 @@ function addSource(featureId, { type, ...fields }) {
   if (type === 'ado' && 'itemType' in entry) {
     entry.type = entry.itemType;
     delete entry.itemType;
+  }
+  // The work item's Vertec booking phase (ADO's `Custom.Vertec` field, under Administration) and
+  // an explicit booking-key override. Trimmed to null when blank so "recorded as empty" and "never
+  // recorded" are the same thing to the cockpit — it labels a missing phase rather than drawing a
+  // blank one, and a re-added source with a blank flag must not wipe a phase already on file.
+  for (const k of ['vertecPhase', 'vertecKey']) {
+    if (!(k in entry)) continue;
+    if (entry[k] === null) continue;                       // explicit clear
+    if (typeof entry[k] !== 'string') throw euser(`${k} must be a string`);
+    const v = entry[k].trim();
+    if (v) entry[k] = v;
+    else delete entry[k];
   }
   const keyField = type === 'figma' ? 'fileKey' : 'id';
   if (entry[keyField] === undefined || entry[keyField] === null || entry[keyField] === '') {
@@ -2117,6 +2147,7 @@ module.exports = {
   threadCollisions,
   unreconciledAgainstThreads,
   setFeatureStatus,
+  setFeatureSummary,
   setFeatureReview,
   reviewStamps,
   WORKSPACE_STATES,

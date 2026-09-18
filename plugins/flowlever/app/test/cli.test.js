@@ -289,3 +289,54 @@ test('requests claim narrows to --actions', () => {
   const claimed = JSON.parse(claim.stdout);
   assert.equal(claimed.action, 'poll');
 });
+
+test('feature summary: --text / --file / --clear, exactly one of them', () => {
+  const id = nextId('summary-cli');
+  run(['feature', 'add', id, '--title', 'PR #5882', '--kind', 'pr-review']);
+
+  const set = run(['feature', 'summary', id, '--text', 'Boots the Atrius map against a per-language venue.']);
+  assert.equal(set.status, 0, set.stderr);
+  assert.equal(readJson('features', `${id}.json`).summary, 'Boots the Atrius map against a per-language venue.');
+
+  // A good summary is a short paragraph, so it has to be able to arrive from a file with newlines.
+  const file = path.join(fixturesDir, 'summary.md');
+  fs.writeFileSync(file, 'What it does\n\n- normalises the language\n- derives the venue id\n');
+  assert.equal(run(['feature', 'summary', id, '--file', file]).status, 0);
+  assert.match(readJson('features', `${id}.json`).summary, /derives the venue id/);
+
+  assert.equal(run(['feature', 'summary', id, '--clear']).status, 0);
+  assert.equal(readJson('features', `${id}.json`).summary, null);
+
+  // Ambiguity is refused rather than resolved by precedence: two sources for one field is a
+  // mistake in the caller, and picking one silently discards the other.
+  const both = run(['feature', 'summary', id, '--text', 'a', '--clear']);
+  assert.equal(both.status, 1);
+  assert.match(both.stderr + both.stdout, /exactly one of/i);
+  assert.equal(run(['feature', 'summary', id]).status, 1, 'and none of them is not a no-op either');
+  assert.equal(run(['feature', 'summary', id, '--file', path.join(fixturesDir, 'nope.md')]).status, 1);
+});
+
+test('source add: --itemType and --vertecPhase land on the work item; --vertecPhase is ado-only', () => {
+  const id = nextId('vertec-cli');
+  run(['feature', 'add', id, '--title', 'PR #5882', '--kind', 'pr-review']);
+  const added = run(['source', 'add', id, '--type', 'ado', '--id', '43057',
+    '--itemType', 'User Story', '--title', 'Atrius 2.3 — The map reads in the visitor\'s language',
+    '--url', 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057',
+    '--vertecPhase', 'Maps Integration // 12. Atrius 2.3']);
+  assert.equal(added.status, 0, added.stderr);
+  const [story] = readJson('features', `${id}.json`).sources.ado;
+  assert.equal(story.type, 'User Story');
+  assert.equal(story.vertecPhase, 'Maps Integration // 12. Atrius 2.3');
+
+  // A phase on a Confluence page has nowhere to go. Dropping it silently would look like it worked
+  // and show no phase in the cockpit, so it is a hard error naming the flag.
+  const wrong = run(['source', 'add', id, '--type', 'confluence', '--id', '988446724',
+    '--vertecPhase', 'Maps Integration']);
+  assert.equal(wrong.status, 1);
+  assert.match(wrong.stderr + wrong.stdout, /--vertecPhase applies to --type ado only/);
+
+  // And `feature show` prints both, so the terminal tells the same story as the cockpit.
+  const shown = run(['feature', 'show', id]);
+  assert.match(shown.stdout, /\[User Story\]/);
+  assert.match(shown.stdout, /Vertec phase: Maps Integration/);
+});

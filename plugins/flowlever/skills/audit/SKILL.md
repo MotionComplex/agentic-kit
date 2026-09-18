@@ -72,7 +72,13 @@ With a `featureId` argument (run directly), ignore this and use §1 as normal.
   then add its sources. Discover sources from the user's message (Confluence/ADO/Figma URLs)
   and register each:
   - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type confluence --id <pageId> --title "..." --url "<url>"`
-  - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type ado --id <workItemId> --title "..." --url "<url>"` (work item type via `--itemType "User Story"` if available)
+  - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type ado --id <workItemId> --itemType "User Story" --title "..." --url "<url>" [--vertecPhase "..."]`
+    — **always pass `--itemType`** (the item's real type: User Story / Bug / Task / Feature / Epic /
+    Pull Request); the cockpit badges and colour-codes each source by it, so an untyped item is drawn
+    as a generic "Work item". **`--vertecPhase` is the work item's `Custom.Vertec` field** (the
+    "Vertec" field under *Administration*), read in §2 — it is shown beside the copyable Vertec
+    booking line. `--title` must be the item's own `System.Title`, verbatim: the booking line
+    (`FZAG-<id> <title>`) is assembled from it and gets pasted into a real booking.
   - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type figma --fileKey <key> --nodeId <node> --title "..." --url "<url>"`
   - If you cannot determine sources, ask the user for the spec page, the work item IDs, and the Figma file/frame — then proceed.
 
@@ -85,7 +91,10 @@ one failed fetch abort the whole audit — record what you couldn't read and con
   `searchConfluenceUsingCql` if you only have a title.
 - **Azure DevOps** (`mcp__azure-devops__*`): `wit_get_work_items_batch_by_ids` (or
   `wit_get_work_item`) for the work items — capture Description, Acceptance Criteria, State,
-  and relations. `wit_list_work_item_comments` if AC lives in discussion. The org here is
+  relations, the work-item **type**, and the **`Custom.Vertec`** field (the booking phase; ask for
+  `expand:"Fields"` so custom fields come back — `expand` and an explicit `fields` list are mutually
+  exclusive). Feed the type and the phase back to `source add` as `--itemType` / `--vertecPhase`.
+  `wit_list_work_item_comments` if AC lives in discussion. The org here is
   `FZAG`; the DXP project id is `c026630b-a803-4b06-9a1a-77db52707d9c`.
 - **Figma** (`mcp__claude_ai_Figma__*`): `get_metadata` for the frame tree and
   `get_screenshot` for the actual visuals of the relevant nodeIds.

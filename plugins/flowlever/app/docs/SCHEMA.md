@@ -303,11 +303,32 @@ disagreement takes a strict-subset accept with the remainder left untouched.
   "status": "auditing",            // draft | auditing | reworking | ready | implementing | done
   "createdAt": "2026-06-13T01:10:00Z",
   "updatedAt": "2026-06-13T01:10:00Z",
+  "summary": null,                 // OPTIONAL — the plain-language "what this change is about" blurb
+                                   // shown at the top of the workspace, as markdown. Written ONLY by
+                                   // the review skills (`feature summary`), which have just read the
+                                   // PR, the work item and the specs; the app has no model, so it
+                                   // never invents one. null ⇒ nobody has written one yet, which the
+                                   // cockpit says outright rather than paraphrasing the title.
+                                   // Absent / blank / non-string all normalize to null.
   "sources": {
     "confluence": [ { "id": "123456", "title": "Checkout Redesign Spec", "url": "https://...", "version": 14, "lastFetched": null } ],
     "ado":        [ { "id": 42695, "type": "User Story", "title": "...", "url": "https://...", "state": "New", "lastFetched": null } ],
     "figma":      [ { "fileKey": "abc123", "nodeId": "1:23", "title": "Checkout flow v3", "url": "https://...", "lastFetched": null } ]
   },
+  // ado sources carry two more OPTIONAL fields, both fed by `source add`:
+  //   "type"        — the WORK-ITEM type ("Pull Request" | "User Story" | "Bug" | "Task" | "Feature" |
+  //                   "Epic" | anything else the ADO instance defines), set via --itemType. The
+  //                   cockpit's Sources strip badges, colours and ORDERS each source by it, so the PR
+  //                   and the story it implements are distinguishable before their titles are read.
+  //                   Untyped is tolerated: a source at a `/pullrequest/<id>` url reads as a PR, and
+  //                   anything else as a generic work item — never guessed into a story.
+  //   "vertecPhase" — the work item's `Custom.Vertec` field (ADO, under Administration): the Vertec
+  //                   booking phase, shown beside the booking line as information only, never copied.
+  //   "vertecKey"   — OPTIONAL override for the booking prefix. By default the cockpit derives it
+  //                   from the ADO ORGANISATION in `url` (dev.azure.com/<org>/… → "FZAG"), and the
+  //                   booking line is `<PREFIX>-<id> <title>` built from `id` + the item's own
+  //                   `title`. No org and no override ⇒ NO booking line: a guessed prefix would be
+  //                   pasted into a real booking.
   "priorThreads": null,             // PR kinds: the comments the PR ALREADY carries. null = never
                                     // fetched (ingest refuses); { recordedAt, threads: [] } = a
                                     // positive "this PR has no comments". See "The duplicate gate".
@@ -623,10 +644,21 @@ feature delete <id> --yes                 delete workspace (features + ledger + 
                                           --yes is required — without it the command lists exactly
                                           which files it would remove and refuses.
 feature activity <id> [--responded] [--note "..."] [--at <iso>] [--by "<name>"] | --clear   mark/clear "author responded" on a posted PR review (watch runner); --at/--by record the REAL time + author of the newest counterpart update on the PR (review.lastActivityAt/lastActivityBy) — the "PR updated <when>" clock the cockpit pairs with "Reviewed <when>". Stamp-only (no --responded) is allowed.
+feature summary <id> --text "..." | --file <md> | --clear    set/clear the workspace's plain-language
+                                          "what this change is about" blurb (feature.summary). Written
+                                          by the review skills — the app has no model, so nothing else
+                                          fills it. Exactly one of the three flags; blank ⇒ null.
 source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--title ...] [--url ...]
+                               [--vertecPhase "..."] [--vertecKey <KEY>]
 source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title ...] [--url ...]
                                           confluence/ado are keyed by --id; figma is keyed by
                                           --fileKey (--nodeId optional) — figma has no --id.
+                                          --itemType (ado) is the work-item type the cockpit badges
+                                          each source by; --vertecPhase / --vertecKey are ado-only
+                                          (a hard error elsewhere) and feed the Vertec booking line.
+                                          A blank --vertecPhase/--vertecKey is DROPPED, not stored,
+                                          so re-registering a source never wipes a phase on file;
+                                          pass the field as `null` (ledger API) to clear it.
 threads set <featureId> --file threads.json | --none
                                           record the comment threads the PR already carries.
                                           REQUIRED before `ingest` on a pr-review/pr-respond
