@@ -762,6 +762,12 @@ function addSource(featureId, { type, ...fields }) {
     if (v) entry[k] = v;
     else delete entry[k];
   }
+  // The key becomes the `FZAG-` half of a string pasted into a booking, so it has to LOOK like a
+  // key. Without this, `--vertecKey "foo bar"` yields the booking line "FOO BAR-43057 …", which is
+  // wrong in a way nothing downstream can detect.
+  if (typeof entry.vertecKey === 'string' && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.vertecKey)) {
+    throw euser(`vertecKey "${entry.vertecKey}" is not a booking key: letters, digits, . _ - only`);
+  }
   const keyField = type === 'figma' ? 'fileKey' : 'id';
   if (entry[keyField] === undefined || entry[keyField] === null || entry[keyField] === '') {
     throw euser(`${type} source requires "${keyField}"`);

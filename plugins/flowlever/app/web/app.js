@@ -5222,7 +5222,17 @@ function trimIdPrefix(title, id) {
   const t = String(title ?? '').trim();
   if (id === undefined || id === null || t === '') return t;
   const esc = String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const next = t.replace(new RegExp(`^(?:pr\\s*)?#?${esc}(?![\\w-])\\s*(?:[-—–:·]\\s*)?`, 'i'), '').trim();
+  // A BARE leading number is only a restatement when a separator follows it. Without that lookahead
+  // a work item #5 titled "5 Whys analysis of the outage" renders as "Whys analysis of the outage"
+  // — the strip mangling the very title it exists to make identifiable. The `#`/`PR` forms are
+  // unambiguous and need no separator.
+  const re = new RegExp(
+    '^(?:'
+    + `(?:pr\\s*)?#\\s*${esc}(?![\\w-])`        // "#5882", "PR #5882"
+    + `|pr\\s+${esc}(?![\\w-])`                 // "PR 5882"
+    + `|${esc}(?![\\w-])(?=\\s*[-—–:·])`        // bare "5882", but only before a separator
+    + ')\\s*(?:[-—–:·]\\s*)?', 'i');
+  const next = t.replace(re, '').trim();
   return next || t;
 }
 
@@ -5288,18 +5298,37 @@ function sourcesStrip(feature) {
 /* The work item a Vertec booking is made against: the STORY (or bug/task) the change belongs to,
  * never the PR that implements it and, only as a last resort, the feature/epic above it. Ranked
  * rather than "first ado source" because the sources are registered in review order, which puts
- * the PR first. */
-const VERTEC_RANK = { story: 0, bug: 1, task: 2, item: 3, feature: 4, epic: 5 };
+ * the PR first.
+ *
+ * `item` — the UNTYPED fallback role — is deliberately absent from this table, and that is the
+ * whole guard. A source registered without `--itemType` tells us two things we would otherwise
+ * have to invent: which of several work items is the story (rather than the epic above it), and
+ * whether `title` is the work item's own `System.Title` or the audit skill's paraphrase of it
+ * ("FOAN00 #42700" is a real example from the ledger). Ranking an untyped item as bookable made
+ * the ranking meaningless — it collapsed to "whichever was registered first" — and put a
+ * plausible, wrong string on the clipboard, which is the one failure this feature cannot have:
+ * it gets pasted into a real booking. Unverified ⇒ no booking line, exactly as an underivable
+ * prefix means no booking line. The next review round records the type and it starts working. */
+const VERTEC_RANK = { story: 0, bug: 1, task: 2, feature: 3, epic: 4 };
 function bookingItem(feature) {
   const list = (((feature || {}).sources || {}).ado || []).filter(Boolean);
   let best = null;
   let bestRank = Infinity;
   for (const it of list) {
     const rank = VERTEC_RANK[adoRole(it)];
-    if (rank === undefined) continue;          // a PR is not bookable
+    if (rank === undefined) continue;          // a PR, or an untyped work item, is not bookable
     if (rank < bestRank) { best = it; bestRank = rank; }
   }
   return best;
+}
+
+/* The best candidate we had to REFUSE for want of a recorded work-item type. It carries no booking
+ * line, only the explanation: without this the row simply vanishes on the 36-of-55 workspaces
+ * reviewed before `--itemType` was passed, and "missing" reads as "broken" rather than as
+ * "not confirmed yet". */
+function unverifiedBookingItem(feature) {
+  return (((feature || {}).sources || {}).ado || [])
+    .find((it) => it && adoRole(it) === 'item') || null;
 }
 
 /* The booking key's prefix is the Azure DevOps ORGANISATION the work item lives in — `FZAG` in
@@ -5334,23 +5363,41 @@ function vertecBookingText(it) {
 }
 
 /* One-click booking text for Vertec, on the workspace header. The phase is shown beside it as
- * information only — it is not part of what gets copied. */
+ * information only — it is not part of what gets copied.
+ *
+ * There are three outcomes, and only the first one gets a copy button. The other two state WHY
+ * there is no booking text, because a row that silently disappears is indistinguishable from a
+ * broken one — and, far worse, a row that quietly guessed would be believed. */
 function vertecRow(feature) {
   const it = bookingItem(feature);
-  if (!it) return null;
-  const text = vertecBookingText(it);
-  const phase = typeof it.vertecPhase === 'string' && it.vertecPhase.trim() ? it.vertecPhase.trim() : null;
-  if (!text && !phase) return null;
+  const unverified = it ? null : unverifiedBookingItem(feature);
+  const subject = it || unverified;
+  if (!subject) return null;
 
-  const row = h('div', { class: 'vertec-row' },
+  const text = it ? vertecBookingText(it) : null;
+  const phase = typeof subject.vertecPhase === 'string' && subject.vertecPhase.trim()
+    ? subject.vertecPhase.trim() : null;
+  if (!text && !phase && !unverified) return null;
+
+  let line;
+  if (text) {
+    // user-select:all (style.css) so a manual drag also grabs exactly the booking string.
+    line = h('span', { class: 'vertec-text' }, text);
+  } else if (unverified) {
+    line = h('span', { class: 'vertec-text vertec-missing' },
+      `No booking text — #${unverified.id}'s work-item type was never recorded, so this can't `
+      + 'confirm which item to book or that its title matches Azure DevOps. The next review round '
+      + 'records both.');
+  } else {
+    line = h('span', { class: 'vertec-text vertec-missing' },
+      `No booking text — no Azure DevOps organisation in #${subject.id}'s url. `
+      + 'Re-register the source with --url, or set --vertecKey.');
+  }
+
+  return h('div', { class: 'vertec-row' },
     h('span', { class: 'vertec-label' }, 'Vertec'),
     h('div', { class: 'vertec-body' },
-      text
-        // user-select:all (style.css) so a manual drag also grabs exactly the booking string.
-        ? h('span', { class: 'vertec-text' }, text)
-        : h('span', { class: 'vertec-text vertec-missing' },
-            `Can't build the booking text — no Azure DevOps organisation in #${it.id}'s url. `
-            + 'Re-register the source with --url, or set --vertecKey.'),
+      line,
       h('span', { class: 'vertec-phase' },
         h('span', { class: 'vertec-phase-label' }, 'Phase'),
         phase
@@ -5359,7 +5406,6 @@ function vertecRow(feature) {
     ),
     text ? copyButton(text, 'Vertec booking text', 'Copy the Vertec booking text') : null,
   );
-  return row;
 }
 
 /* A copy-to-clipboard icon button that confirms on itself (glyph swap) as well as in a toast.

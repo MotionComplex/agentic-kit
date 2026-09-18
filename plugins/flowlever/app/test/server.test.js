@@ -3390,6 +3390,14 @@ test('V1: every source names what it IS, and the two you reach for come first', 
   assert.equal(trimIdPrefix('#5882', 5882), '#5882', 'a title that is only its own id keeps it');
   assert.equal(trimIdPrefix('58821 other thing', 5882), '58821 other thing', 'a prefix match must be the whole number');
   assert.equal(trimIdPrefix(null, 5882), '');
+  // A BARE leading number is only a restatement when a separator follows. Work item #5 titled
+  // "5 Whys analysis of the outage" used to render as "Whys analysis of the outage" — the strip
+  // mangling the very title it exists to make identifiable.
+  assert.equal(trimIdPrefix('5 Whys analysis of the outage', 5), '5 Whys analysis of the outage');
+  assert.equal(trimIdPrefix('2026 roadmap alignment', 2026), '2026 roadmap alignment');
+  assert.equal(trimIdPrefix('5 — Whys analysis', 5), 'Whys analysis', 'but with a separator it IS a restatement');
+  assert.equal(trimIdPrefix('#5 Whys analysis', 5), 'Whys analysis', 'and the # form needs no separator');
+  assert.equal(trimIdPrefix('PR 5882 fixes the thing', 5882), 'fixes the thing');
 
   // An unmapped type shows its REAL name — "Work item" would throw away what ADO told us.
   const odd = sourceEntries({ sources: { ado: [{ id: 7, type: 'Impediment', title: 'Blocked on vendor' }] } });
@@ -3423,10 +3431,10 @@ test('V1b: nothing the sources strip draws is left unstyled', () => {
 
 test('V2: the Vertec line is the booking string, assembled from real fields only', () => {
   const ui = readUi();
-  const { bookingItem, vertecBookingText, vertecPrefix } = liftUi(ui, [
+  const { bookingItem, vertecBookingText, vertecPrefix, unverifiedBookingItem } = liftUi(ui, [
     fnSource(ui, 'const VERTEC_RANK = '),
     'function isPrUrl(', 'function adoRole(', 'function bookingItem(',
-    'function vertecPrefix(', 'function vertecBookingText(',
+    'function unverifiedBookingItem(', 'function vertecPrefix(', 'function vertecBookingText(',
   ], { location: { href: 'http://localhost:4173/' } });
 
   const feature = { sources: prWorkspaceSources() };
@@ -3463,6 +3471,51 @@ test('V2: the Vertec line is the booking string, assembled from real fields only
     { id: 2, type: 'Bug', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/2' },
   ] } };
   assert.equal(bookingItem(bugFirst).id, 2, 'the feature is a last resort, not the first ado source');
+});
+
+test('V2b: an UNTYPED work item is never bookable — the regression that put a made-up booking on the clipboard', () => {
+  const ui = readUi();
+  const { bookingItem, unverifiedBookingItem, vertecBookingText } = liftUi(ui, [
+    fnSource(ui, 'const VERTEC_RANK = '),
+    'function isPrUrl(', 'function adoRole(', 'function bookingItem(',
+    'function unverifiedBookingItem(', 'function vertecPrefix(', 'function vertecBookingText(',
+  ], { location: { href: 'http://localhost:4173/' } });
+
+  // The real shape of a workspace audited before `--itemType` existed — 36 of the user's 55
+  // bookable workspaces looked exactly like this. Neither item carries a type, and the titles are
+  // the audit skill's annotations, NOT the work items' own System.Title.
+  const legacy = { sources: { ado: [
+    { id: 42702, title: 'FOAN02 - Analytics Flight Overview (the date/time-filter surface)',
+      url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/42702' },
+    { id: 42640, title: 'Flight Overview Page (parent Feature)',
+      url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/42640' },
+  ] } };
+
+  // The bug: `item` ranked 3 — ahead of feature (4) and epic (5) — so an untyped source was
+  // bookable AND outranked the roles the ranking was written to demote. The ranking collapsed to
+  // "whichever was registered first", and the copy button offered
+  // `FZAG-42702 FOAN02 - Analytics Flight Overview (the date/time-filter surface)` — a paraphrase,
+  // on an item nobody confirmed was the story — with the same confidence as a verified line.
+  assert.equal(bookingItem(legacy), null,
+    'an untyped work item must not be bookable: neither which item nor the title can be confirmed');
+  // …but the row can still explain itself, so "missing" does not read as "broken".
+  assert.equal(unverifiedBookingItem(legacy).id, 42702);
+  assert.equal(unverifiedBookingItem({ sources: { ado: [{ id: 1, type: 'User Story' }] } }), null,
+    'and a typed workspace has nothing to explain');
+
+  // The guard must not cost the verified path: one typed item among untyped ones still books.
+  const mixed = { sources: { ado: [
+    legacy.sources.ado[0],
+    { id: 43057, type: 'User Story', title: 'The real System.Title',
+      url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057' },
+  ] } };
+  assert.equal(bookingItem(mixed).id, 43057);
+  assert.equal(vertecBookingText(bookingItem(mixed)), 'FZAG-43057 The real System.Title');
+
+  // `item` must stay out of the rank table — this is the assertion that fails if someone
+  // "helpfully" re-adds the fallback.
+  const rank = new Function(`${fnSource(ui, 'const VERTEC_RANK = ')};\nreturn VERTEC_RANK;`)();
+  assert.equal(rank.item, undefined, 'VERTEC_RANK must not make the untyped fallback role bookable');
 });
 
 test('V3: the PR quick link points at the PR, and only ever at the PR', () => {

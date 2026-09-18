@@ -340,3 +340,25 @@ test('source add: --itemType and --vertecPhase land on the work item; --vertecPh
   assert.match(shown.stdout, /\[User Story\]/);
   assert.match(shown.stdout, /Vertec phase: Maps Integration/);
 });
+
+test('source add: --clear-vertec-phase is the only way to remove a phase, and a blank never is', () => {
+  const id = nextId('vertec-clear-cli');
+  run(['feature', 'add', id, '--title', 'x']);
+  run(['source', 'add', id, '--type', 'ado', '--id', '43057', '--vertecPhase', 'Maps Integration']);
+  const phase = () => readJson('features', `${id}.json`).sources.ado[0].vertecPhase;
+  assert.equal(phase(), 'Maps Integration');
+
+  // The accident this protects against: `--vertecPhase "$PHASE"` with an empty PHASE.
+  assert.equal(run(['source', 'add', id, '--type', 'ado', '--id', '43057', '--vertecPhase=']).status, 0);
+  assert.equal(phase(), 'Maps Integration', 'a blank value must never wipe a real phase');
+
+  assert.equal(run(['source', 'add', id, '--type', 'ado', '--id', '43057', '--clear-vertec-phase']).status, 0);
+  assert.equal(phase(), null, 'but the explicit flag does');
+
+  // Contradicting yourself is an error, not a precedence puzzle.
+  const both = run(['source', 'add', id, '--type', 'ado', '--id', '43057',
+    '--vertecPhase', 'A', '--clear-vertec-phase']);
+  assert.equal(both.status, 1);
+  assert.match(both.stderr + both.stdout, /contradict/);
+  assert.equal(run(['source', 'add', id, '--type', 'confluence', '--id', '9', '--clear-vertec-phase']).status, 1);
+});

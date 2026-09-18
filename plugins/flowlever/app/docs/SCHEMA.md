@@ -328,7 +328,14 @@ disagreement takes a strict-subset accept with the remainder left untouched.
   //                   from the ADO ORGANISATION in `url` (dev.azure.com/<org>/… → "FZAG"), and the
   //                   booking line is `<PREFIX>-<id> <title>` built from `id` + the item's own
   //                   `title`. No org and no override ⇒ NO booking line: a guessed prefix would be
-  //                   pasted into a real booking.
+  //                   pasted into a real booking. Validated as a key ([A-Za-z0-9][A-Za-z0-9._-]*).
+  //
+  // THE BOOKING LINE REQUIRES A RECORDED `type`. An ado source with no `type` is NOT bookable —
+  // the cockpit will not pick which work item to book (story vs. the epic above it) nor trust that
+  // `title` is the item's own `System.Title` rather than the audit skill's paraphrase of it
+  // ("FOAN00 #42700" is a real example on disk). Such a workspace shows the Vertec row with an
+  // explanation and NO copy button, until a review round records the type. This is the same rule
+  // as the prefix: unverified ⇒ no line, because the line gets pasted into a real booking.
   "priorThreads": null,             // PR kinds: the comments the PR ALREADY carries. null = never
                                     // fetched (ingest refuses); { recordedAt, threads: [] } = a
                                     // positive "this PR has no comments". See "The duplicate gate".
@@ -650,6 +657,7 @@ feature summary <id> --text "..." | --file <md> | --clear    set/clear the works
                                           fills it. Exactly one of the three flags; blank ⇒ null.
 source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--title ...] [--url ...]
                                [--vertecPhase "..."] [--vertecKey <KEY>]
+                               [--clear-vertec-phase] [--clear-vertec-key]
 source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title ...] [--url ...]
                                           confluence/ado are keyed by --id; figma is keyed by
                                           --fileKey (--nodeId optional) — figma has no --id.
@@ -657,8 +665,10 @@ source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title .
                                           each source by; --vertecPhase / --vertecKey are ado-only
                                           (a hard error elsewhere) and feed the Vertec booking line.
                                           A blank --vertecPhase/--vertecKey is DROPPED, not stored,
-                                          so re-registering a source never wipes a phase on file;
-                                          pass the field as `null` (ledger API) to clear it.
+                                          so re-registering a source never wipes a phase on file
+                                          by interpolating an empty shell variable;
+                                          --clear-vertec-phase / --clear-vertec-key remove one
+                                          explicitly (and contradict the value flags).
 threads set <featureId> --file threads.json | --none
                                           record the comment threads the PR already carries.
                                           REQUIRED before `ingest` on a pr-review/pr-respond

@@ -110,6 +110,9 @@ thread — **other reviewers' and your own from earlier rounds**. Use the same
    dependencies, what the ticket rescoped). Markdown is rendered — short paragraphs or a few
    bullets. Write it from the sources; **never paraphrase the PR title back**, which is the text
    already on screen. Re-write it on every re-review so it tracks what the PR has become.
+   **A run that finishes with `feature.summary` still null is a FAILURE of this skill** — same bar
+   as step 3's registered specs. Check it before §4: `... cli.js feature show <wsId> --json` must
+   show a non-null `summary`, and the run summary must say so.
 
 Then `requests set <reqId> --phase "reviewing changes"` and run the spec-aware review: check the PR's
 implementation against the fetched specs (contract/schema/column/AC compliance), not just code quality →
@@ -224,6 +227,14 @@ genuinely has no author activity to point at.
 The runner then marks the request `done --phase "review ready" --wsId <wsId>`.
 
 ## 4. Hand to the cockpit
+Before handing over, confirm the three things the cockpit's header reads and cannot derive itself —
+each one is a `source add` / `feature summary` you were told to make in §2, and each shows as a
+visible gap if it was skipped:
+`... cli.js feature show <wsId>` → a non-null **Summary**, every ado source carrying a `[type]`,
+and a **Vertec phase** on the ticket (unless `Custom.Vertec` is genuinely empty — then say so).
+An untyped ticket suppresses the Vertec booking line entirely, by design: the cockpit will not
+guess which work item to book or trust a title it cannot confirm.
+
 Tell the user to open **Home → PR Review → this workspace** (or `/flowlever:start`) and step through:
 each finding shows the diff + decision row (Accept · Edit · Redirect · Waive · Skip). Decisions persist.
 

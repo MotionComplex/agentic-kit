@@ -32,6 +32,7 @@ Usage: node src/cli.js <command> [args]
                                          the app has no model of its own, so nothing else fills it.
   source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--title "..."] [--url <url>]
                                [--vertecPhase "..."] [--vertecKey <KEY>]
+                               [--clear-vertec-phase] [--clear-vertec-key]
   source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title "..."] [--url <url>]
                                          confluence/ado need --id; figma needs --fileKey (--nodeId
                                          optional). --itemType (ado only) stores the work-item type
@@ -41,6 +42,10 @@ Usage: node src/cli.js <command> [args]
                                          Vertec booking phase (ADO field Custom.Vertec, under
                                          Administration); --vertecKey overrides the booking prefix
                                          the cockpit otherwise derives from the ADO org in --url.
+                                         A BLANK --vertecPhase/--vertecKey is dropped, never stored,
+                                         so re-registering a source can't wipe a real value by
+                                         interpolating an empty variable; --clear-vertec-phase /
+                                         --clear-vertec-key are the explicit way to remove one.
   threads set <featureId> --file threads.json | --none
                                          Record the comment threads the PR ALREADY carries (other
                                          reviewers' and your own). Required before "ingest" on a
@@ -126,7 +131,7 @@ function userError(msg) {
 
 // ---------- arg parsing (hand-rolled) ----------
 
-const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear', 'dedupe', 'yes', 'force']);
+const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear', 'clear-vertec-phase', 'clear-vertec-key', 'dedupe', 'yes', 'force']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -401,6 +406,15 @@ function cmdSourceAdd({ pos, flags }) {
       if (flags[k] === undefined) continue;
       if (type !== 'ado') throw userError(`--${k} applies to --type ado only (got '${type}')`);
       source[k] = flags[k];
+    }
+    // Clearing is its own explicit flag, never a blank value: `--vertecPhase "$PHASE"` with an
+    // empty PHASE is an accident and must not wipe a real phase (addSource drops blanks for that
+    // reason), but a phase emptied in ADO still needs a way off the source.
+    for (const [flag, field] of [['clear-vertec-phase', 'vertecPhase'], ['clear-vertec-key', 'vertecKey']]) {
+      if (!flags[flag]) continue;
+      if (type !== 'ado') throw userError(`--${flag} applies to --type ado only (got '${type}')`);
+      if (flags[field] !== undefined) throw userError(`--${flag} and --${field} contradict each other`);
+      source[field] = null;
     }
     label = id;
   }

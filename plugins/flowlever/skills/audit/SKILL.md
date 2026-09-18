@@ -106,6 +106,12 @@ Parse the Confluence page headings into a stable outline. Slugify each heading t
 directly with the Edit tool (it is plain JSON; keep the schema in `docs/SCHEMA.md`).
 Stable section keys matter — the coverage matrix and finding loci depend on them.
 
+**Write the workspace summary here too**, now that you have read every source:
+`... cli.js feature summary <id> --text "<2–4 sentences: what this feature is and why>"` (or
+`--file <md>`). Same rule as `/flowlever:pr-review` §2 step 5 — the cockpit has no model and will
+never invent one, so if you skip this the workspace shows nothing. Write it from the spec and work
+items; never paraphrase the workspace title back. Re-write it on each re-audit.
+
 ## 4. Run the 7-dimension audit
 If the user has opted into swarms/workflows, fan out one subagent **per dimension** in
 parallel, each given the fetched source material and instructed to return findings in the

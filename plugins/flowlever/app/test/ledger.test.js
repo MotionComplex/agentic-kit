@@ -1440,3 +1440,24 @@ test('addSource: the Vertec phase rides the work item, and a blank one never era
   ledger.addSource(id, { type: 'ado', id: 99, vertecKey: ' fzag-web ' });
   assert.equal(ledger.getFeature(id).sources.ado.find((s) => s.id === 99).vertecKey, 'fzag-web');
 });
+
+test('addSource: a Vertec value can be cleared explicitly, and a key that is not a key is refused', () => {
+  const id = 'vertec-clear';
+  ledger.createFeature({ id, title: 'x' });
+  ledger.addSource(id, { type: 'ado', id: 1, vertecPhase: 'Phase A', vertecKey: 'FZAG' });
+  assert.equal(ledger.getFeature(id).sources.ado[0].vertecPhase, 'Phase A');
+  ledger.addSource(id, { type: 'ado', id: 1, vertecPhase: null });
+  assert.equal(ledger.getFeature(id).sources.ado[0].vertecPhase, null);
+  assert.equal(ledger.getFeature(id).sources.ado[0].vertecKey, 'FZAG', 'clearing one leaves the other');
+
+  // The key becomes the `FZAG-` half of a string pasted into a real booking, so it must look like
+  // a key — "foo bar" would silently produce the booking line "FOO BAR-43057 …".
+  for (const bad of ['foo bar', 'a/b', '-lead', 'FZ AG', 'x y']) {
+    assert.throws(() => ledger.addSource(id, { type: 'ado', id: 2, vertecKey: bad }),
+      (e) => e.code === 'EUSER', `vertecKey "${bad}" must be refused`);
+  }
+  for (const ok of ['FZAG', 'fzag-web', 'DXN', 'a.b_c-1']) {
+    ledger.addSource(id, { type: 'ado', id: 3, vertecKey: ok });
+    assert.equal(ledger.getFeature(id).sources.ado.find((s) => s.id === 3).vertecKey, ok);
+  }
+});
