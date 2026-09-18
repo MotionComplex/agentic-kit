@@ -41,7 +41,9 @@ countered items** against the counter, then stop:
    - **Or, if you disagree with the counter,** keep the original draft and reply in the `note`
      explaining why (leave `verdict=redirect`) so the user sees your reasoning on the next pass.
 3. Report what you re-drafted / waived per finding and stop. Do **not** run the full 7-dimension sweep
-   or ingest a new round. This keeps the per-item refine loop tight. (Skip the rest of this skill.)
+   or ingest a new round. This keeps the per-item refine loop tight. (Skip the rest of this skill —
+   **except §3b**: if `feature.summary` is still null, write it before you stop. A workspace that
+   only ever reaches this short-circuit would otherwise never get one.)
    **If you ever DO need to ingest here** (e.g. you re-fetched sources and want the ledger to
    recompute readiness for these items) — never call a bare `ingest`. Without an explicit scope,
    `ingestRound` auto-resolves every OTHER open finding it doesn't see in this narrow batch,
@@ -106,11 +108,19 @@ Parse the Confluence page headings into a stable outline. Slugify each heading t
 directly with the Edit tool (it is plain JSON; keep the schema in `docs/SCHEMA.md`).
 Stable section keys matter — the coverage matrix and finding loci depend on them.
 
-**Write the workspace summary here too**, now that you have read every source:
-`... cli.js feature summary <id> --text "<2–4 sentences: what this feature is and why>"` (or
-`--file <md>`). Same rule as `/flowlever:pr-review` §2 step 5 — the cockpit has no model and will
-never invent one, so if you skip this the workspace shows nothing. Write it from the spec and work
-items; never paraphrase the workspace title back. Re-write it on each re-audit.
+## 3b. Write the workspace summary — MANDATORY
+You have now read every source, which is the only moment this can be written: the cockpit has no
+model of its own and will never invent one, so skipping this leaves the workspace blank forever.
+```
+... cli.js feature summary <id> --text "<2–4 sentences: what this feature is and why>"   # or --file <md>
+```
+Answer the question someone has *before* opening the findings: what is this feature, and why. Write
+it from the spec and the work items; **never paraphrase the workspace title back**, which is the
+text already on screen. Re-write it on every re-audit so it tracks what the feature has become.
+
+**A run that finishes with `feature.summary` still null is a FAILURE of this skill** — the same bar
+as an unregistered spec source. Verify before §8: `... cli.js feature show <id> --json` must show a
+non-null `summary`, and say so in the report.
 
 ## 4. Run the 7-dimension audit
 If the user has opted into swarms/workflows, fan out one subagent **per dimension** in

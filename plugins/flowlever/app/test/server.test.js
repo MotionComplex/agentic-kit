@@ -3518,6 +3518,54 @@ test('V2b: an UNTYPED work item is never bookable — the regression that put a 
   assert.equal(rank.item, undefined, 'VERTEC_RANK must not make the untyped fallback role bookable');
 });
 
+test('V2c: "not bookable" and "type never recorded" are different sentences', () => {
+  const ui = readUi();
+  const { unbookableReason, unverifiedBookingItem } = liftUi(ui, [
+    'function isPrUrl(', 'function adoRole(', 'function unverifiedBookingItem(',
+    'function unbookableReason(',
+  ]);
+
+  // `adoRole` returns 'item' for BOTH "no type on file" and "a type we don't book against". Telling
+  // an Impediment that its type "was never recorded — the next review round records it" is false
+  // (the badge beside it reads IMPEDIMENT) and is a dead end: re-recording changes nothing.
+  const untyped = unbookableReason({ id: 42702 });
+  assert.match(untyped, /never recorded/);
+  assert.match(untyped, /next review round/, 'the untyped case has an action, so it names it');
+
+  const impediment = unbookableReason({ id: 66001, type: 'Impediment' });
+  assert.match(impediment, /#66001 with type "Impediment"/);
+  // No article before a type that comes from the ADO instance — "a Impediment" is the failure case
+  // of any article this code could pick.
+  assert.ok(!/\b(a|an) Impediment\b/.test(impediment));
+  assert.ok(!/never recorded/.test(impediment),
+    'a recorded type must not be told it was never recorded');
+  assert.ok(!/next review round/.test(impediment),
+    'nor pointed at a re-review that would change nothing');
+  assert.match(impediment, /story or bug/, 'it names what the user can actually do instead');
+
+  // Of several unbookable candidates, prefer the one that at least carries a phase.
+  const withPhase = unverifiedBookingItem({ sources: { ado: [
+    { id: 1, title: 'first' },
+    { id: 2, title: 'second', vertecPhase: 'Maps Integration' },
+  ] } });
+  assert.equal(withPhase.id, 2);
+});
+
+test('V2d: the Vertec row explains itself instead of vanishing — every combination', () => {
+  const ui = readUi();
+  // vertecRow builds DOM, so it is checked through its own source rather than run: the one thing
+  // that must hold is that the ONLY early return is "no work item at all".
+  const body = fnBody(ui, 'function vertecRow(');
+  const returns = body.match(/return null;/g) || [];
+  assert.equal(returns.length, 1,
+    'vertecRow may bail exactly once — on a workspace with no bookable-or-explainable work item. '
+    + 'A second bail is how a typed item with an underivable org and no phase used to vanish '
+    + 'silently, which the row\'s own comment says must never happen');
+  assert.match(body, /if \(!subject\) return null;/);
+  // And the copy button is built only alongside real booking text — never for an explanation.
+  assert.match(body, /text \? copyButton\(/);
+});
+
 test('V3: the PR quick link points at the PR, and only ever at the PR', () => {
   const ui = readUi();
   const { prSource } = liftUi(ui, [

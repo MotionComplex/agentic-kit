@@ -362,3 +362,18 @@ test('source add: --clear-vertec-phase is the only way to remove a phase, and a 
   assert.match(both.stderr + both.stdout, /contradict/);
   assert.equal(run(['source', 'add', id, '--type', 'confluence', '--id', '9', '--clear-vertec-phase']).status, 1);
 });
+
+test('source add: the vertec flags are ado-only on EVERY type, figma included', () => {
+  const id = nextId('vertec-figma');
+  run(['feature', 'add', id, '--title', 'x']);
+  // The guard used to live inside the id-keyed branch, so --type figma skipped it entirely: the
+  // command exited 0, stored nothing, and the help text promised "a hard error elsewhere".
+  for (const extra of [['--vertecPhase', 'Nope'], ['--vertecKey', 'FOO'], ['--clear-vertec-phase']]) {
+    const res = run(['source', 'add', id, '--type', 'figma', '--fileKey', 'abc', ...extra]);
+    assert.equal(res.status, 1, `figma + ${extra[0]} must be refused, not silently dropped`);
+    assert.match(res.stderr + res.stdout, /applies to --type ado only/);
+  }
+  // And the figma source itself still registers fine without them.
+  assert.equal(run(['source', 'add', id, '--type', 'figma', '--fileKey', 'abc', '--nodeId', '1:23']).status, 0);
+  assert.equal(readJson('features', `${id}.json`).sources.figma[0].nodeId, '1:23');
+});

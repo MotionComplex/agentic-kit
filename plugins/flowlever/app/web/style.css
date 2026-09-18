@@ -565,8 +565,11 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
  * holds the colour the prose sits on. */
 .ws-summary-body { color: var(--fg-dim); }
 /* A summary that opens with `# Heading` must not draw an h1 inside a panel that already has a
- * label — md-prose resets the report chrome but leaves the document type scale alone. */
-.ws-summary-body h1, .ws-summary-body h2, .ws-summary-body h3 {
+ * label — md-prose resets the report chrome but leaves the document type scale alone.
+ * The `.md` in the middle is load-bearing: `.ws-summary-body h1` ties (0,1,1) with `.md h1`, which
+ * is declared LATER in this file and therefore won. Only font-weight/border landed — enough to
+ * look styled while the 22px scale stayed. */
+.ws-summary-body .md h1, .ws-summary-body .md h2, .ws-summary-body .md h3 {
   font-size: 13px; font-weight: 640; margin: 10px 0 4px; padding: 0; border: 0; letter-spacing: 0;
 }
 .ws-summary-body > .md > :first-child { margin-top: 0; }

@@ -399,24 +399,26 @@ function cmdSourceAdd({ pos, flags }) {
     // ledger.addSource maps itemType -> the source's "type" field (the work-item type); this
     // command used to never read the flag at all, so `--itemType` was accepted and dropped.
     if (type === 'ado' && flags.itemType !== undefined) source.itemType = flags.itemType;
-    // The Vertec booking phase + prefix override ride on the work item, so they are ado-only. A
-    // hard error beats silently dropping them on a confluence/figma source: a skill that put the
-    // flag on the wrong source would otherwise look like it worked and show no phase.
-    for (const k of ['vertecPhase', 'vertecKey']) {
-      if (flags[k] === undefined) continue;
-      if (type !== 'ado') throw userError(`--${k} applies to --type ado only (got '${type}')`);
-      source[k] = flags[k];
-    }
-    // Clearing is its own explicit flag, never a blank value: `--vertecPhase "$PHASE"` with an
-    // empty PHASE is an accident and must not wipe a real phase (addSource drops blanks for that
-    // reason), but a phase emptied in ADO still needs a way off the source.
-    for (const [flag, field] of [['clear-vertec-phase', 'vertecPhase'], ['clear-vertec-key', 'vertecKey']]) {
-      if (!flags[flag]) continue;
-      if (type !== 'ado') throw userError(`--${flag} applies to --type ado only (got '${type}')`);
-      if (flags[field] !== undefined) throw userError(`--${flag} and --${field} contradict each other`);
-      source[field] = null;
-    }
     label = id;
+  }
+  // The Vertec booking phase + prefix override ride on the work item, so they are ado-only, and a
+  // hard error beats silently dropping them: a skill that put the flag on the wrong source would
+  // otherwise look like it worked and show no phase. This guard sits OUTSIDE the id-keyed branch
+  // on purpose — inside it, `--type figma` never reached the check and exited 0 having stored
+  // nothing, while the help text promised "a hard error elsewhere".
+  for (const k of ['vertecPhase', 'vertecKey']) {
+    if (flags[k] === undefined) continue;
+    if (type !== 'ado') throw userError(`--${k} applies to --type ado only (got '${type}')`);
+    source[k] = flags[k];
+  }
+  // Clearing is its own explicit flag, never a blank value: `--vertecPhase "$PHASE"` with an
+  // empty PHASE is an accident and must not wipe a real phase (addSource drops blanks for that
+  // reason), but a phase emptied in ADO still needs a way off the source.
+  for (const [flag, field] of [['clear-vertec-phase', 'vertecPhase'], ['clear-vertec-key', 'vertecKey']]) {
+    if (!flags[flag]) continue;
+    if (type !== 'ado') throw userError(`--${flag} applies to --type ado only (got '${type}')`);
+    if (flags[field] !== undefined) throw userError(`--${flag} and --${field} contradict each other`);
+    source[field] = null;
   }
   if (flags.title !== undefined) source.title = flags.title;
   if (flags.url !== undefined) source.url = flags.url;

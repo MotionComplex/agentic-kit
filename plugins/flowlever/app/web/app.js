@@ -5322,13 +5322,30 @@ function bookingItem(feature) {
   return best;
 }
 
-/* The best candidate we had to REFUSE for want of a recorded work-item type. It carries no booking
- * line, only the explanation: without this the row simply vanishes on the 36-of-55 workspaces
- * reviewed before `--itemType` was passed, and "missing" reads as "broken" rather than as
- * "not confirmed yet". */
+/* The best candidate we had to REFUSE because its role is not bookable. It carries no booking line,
+ * only the explanation: without this the row simply vanishes on the 36-of-55 workspaces reviewed
+ * before `--itemType` was passed, and "missing" reads as "broken" rather than "not confirmed yet".
+ * Prefers a candidate that at least has a phase recorded — that is the one carrying real data. */
 function unverifiedBookingItem(feature) {
-  return (((feature || {}).sources || {}).ado || [])
-    .find((it) => it && adoRole(it) === 'item') || null;
+  const cands = (((feature || {}).sources || {}).ado || []).filter((it) => it && adoRole(it) === 'item');
+  return cands.find((it) => typeof it.vertecPhase === 'string' && it.vertecPhase.trim()) || cands[0] || null;
+}
+
+/* Why that candidate is not bookable — and these are NOT the same problem, so they must not share
+ * a sentence. `adoRole` returns 'item' both for "no type on file" and for a type Azure DevOps
+ * records but we don't book against (Impediment, Test Case, Risk…). Telling the second case that
+ * its "type was never recorded, the next review round records it" is simply false: the type IS
+ * recorded, the badge beside it says so, and re-recording changes nothing — a dead end dressed as
+ * an action. */
+function unbookableReason(it) {
+  const type = String((it && it.type) || '').trim();
+  return type
+    // No article before `${type}` — it comes from the ADO instance, so "a Impediment" is the
+    // failure case of any article this code could pick.
+    ? `Azure DevOps records #${it.id} with type "${type}", which isn't a bookable work-item type. `
+      + 'Book against the story or bug this work belongs to.'
+    : `No booking text — #${it.id}'s work-item type was never recorded, so this can't confirm `
+      + 'which item to book or that its title matches Azure DevOps. The next review round records both.';
 }
 
 /* The booking key's prefix is the Azure DevOps ORGANISATION the work item lives in — `FZAG` in
@@ -5372,22 +5389,24 @@ function vertecRow(feature) {
   const it = bookingItem(feature);
   const unverified = it ? null : unverifiedBookingItem(feature);
   const subject = it || unverified;
+  // No work item at all (a PR-only or source-less workspace) is the ONE case with nothing to say.
+  // Every other case renders and explains itself — a row that vanishes because the org happened to
+  // be underivable is indistinguishable from a broken one, which is the whole reason this branch
+  // exists. (It used to also vanish when there was no phase to carry it.)
   if (!subject) return null;
 
   const text = it ? vertecBookingText(it) : null;
+  // The phase belongs to the item being booked, so it is read off THAT item — never borrowed from
+  // a sibling, which would attribute one work item's booking phase to another.
   const phase = typeof subject.vertecPhase === 'string' && subject.vertecPhase.trim()
     ? subject.vertecPhase.trim() : null;
-  if (!text && !phase && !unverified) return null;
 
   let line;
   if (text) {
     // user-select:all (style.css) so a manual drag also grabs exactly the booking string.
     line = h('span', { class: 'vertec-text' }, text);
   } else if (unverified) {
-    line = h('span', { class: 'vertec-text vertec-missing' },
-      `No booking text — #${unverified.id}'s work-item type was never recorded, so this can't `
-      + 'confirm which item to book or that its title matches Azure DevOps. The next review round '
-      + 'records both.');
+    line = h('span', { class: 'vertec-text vertec-missing' }, unbookableReason(unverified));
   } else {
     line = h('span', { class: 'vertec-text vertec-missing' },
       `No booking text — no Azure DevOps organisation in #${subject.id}'s url. `
