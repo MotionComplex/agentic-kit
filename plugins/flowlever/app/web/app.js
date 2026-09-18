@@ -2210,6 +2210,11 @@ function nextStepNote(data) {
       '🔒 Read-only mode: this is the end of the line. Nothing above will be written or posted.');
   }
   if (kind === 'pr-review' || kind === 'pr-respond') {
+    // Same reason as the read-only branch above: with nothing postable there IS no next step, and
+    // pointing at a post that cannot happen is the false promise this screen must not make.
+    if (nothingLeftToPost(data)) {
+      return h('div', { class: 'finish-next' }, '✓ Done: nothing goes back to the PR — Azure DevOps stays as it is.');
+    }
     return h('div', { class: 'finish-next' }, '↻ Next: post back to the PR above, then the threads update in Azure DevOps.');
   }
   return h('div', { class: 'finish-next' }, '↻ Next: ', h('strong', {}, 'Apply'),
@@ -2217,24 +2222,17 @@ function nextStepNote(data) {
     h('code', {}, '/flowlever:audit'), ' reconciles the ledger.');
 }
 
-function postActionEl(data) {
-  const kind = data.feature && data.feature.kind;
-  if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
-  const noun = kind === 'pr-review' ? ['comment', 'comments'] : ['reply', 'replies'];
-  // Only approved/edited (and, for respond, pushed-back or fix-only) items post; dismissed +
-  // undecided do not — the Post button counts exactly what will be sent.
-  const postable = kind === 'pr-review' ? ['accept', 'edit'] : ['accept', 'edit', 'fix-only', 'redirect'];
-  const decided = state.flow.items.map(flowDecisionKind);
-  const postN = decided.filter((k) => postable.includes(k)).length;
-  // A fix-only item writes code and resolves its thread but posts NO reply, so it must not be
-  // counted as one — "Post 3 replies" when only 2 are replies is exactly the kind of quiet
-  // inaccuracy that makes the cockpit disagree with the PR.
-  const fixOnlyN = decided.filter((k) => k === 'fix-only').length;
-  const replyN = postN - fixOnlyN;
-  const prNum = prNumber(data.feature);
-  const target = prNum ? `PR #${prNum}` : 'the PR';
-  const verb = kind === 'pr-review' ? 'Post comments' : (replyN === 0 && fixOnlyN > 0 ? 'Push fixes' : 'Post replies');
+// Only approved/edited (and, for respond, pushed-back or fix-only) items post; dismissed +
+// undecided do not — the Post button counts exactly what will be sent.
+const POSTABLE_DECISIONS = {
+  'pr-review': ['accept', 'edit'],
+  'pr-respond': ['accept', 'edit', 'fix-only', 'redirect'],
+};
 
+/* The post job the finish screen reflects: the most recent apply request plus the state the Post
+ * control and its status line both read. Split out so the "is a post still ahead?" question can be
+ * asked from more than one place without two answers. */
+function postJobState(data) {
   const reqs = (state.flow.applyReqs || []).slice()
     .sort((a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true }));
   const latest = reqs[reqs.length - 1];
@@ -2249,6 +2247,61 @@ function postActionEl(data) {
   const pendingLeft = ((data.ledger && data.ledger.findings) || []).filter(isPending).length;
   const posted = !!latest && latest.status === 'done' && pendingLeft === 0;
   const unconfirmed = !!latest && latest.status === 'done' && pendingLeft > 0;
+  return { latest, stalled, active, errored, pendingLeft, posted, unconfirmed };
+}
+
+/* The genuine dead end: every finding is decided, none of those decisions produces a comment or
+ * reply, and no earlier attempt is waiting to be retried or repeated. A Post button here can never
+ * do anything — it read "Post 0 comments to PR #5869" under the label "nothing is sent until you
+ * click this", which asks the reviewer to act on a control with nothing behind it. Both the
+ * control and the "next: post back to the PR" note have to stop promising the action. */
+function nothingLeftToPost(data) {
+  const kind = data.feature && data.feature.kind;
+  const postable = POSTABLE_DECISIONS[kind];
+  if (!postable) return false;
+  const postN = (state.flow.items || []).map(flowDecisionKind).filter((k) => postable.includes(k)).length;
+  if (postN > 0 || undecidedFlowFps().length > 0) return false;
+  const j = postJobState(data);
+  // A finished, failed or stalled attempt keeps its own control ("Post again" / "Retry post") —
+  // the dead end is only when there was never anything to send.
+  return !(j.latest && (j.active || j.posted || j.errored || j.stalled || j.unconfirmed));
+}
+
+/* Standing in for the Post control when nothing can be posted: state WHY there is nothing, and the
+ * way back to change it, rather than a disabled button counting to zero. An empty step set never
+ * reaches here — renderFlowInto swaps the whole screen for flowEmptyView before finishView runs —
+ * so there is always at least one decided finding to name. */
+function postEmptyEl(kind) {
+  const noun = kind === 'pr-review' ? ['comment', 'comments'] : ['reply', 'replies'];
+  const reviewedN = (state.flow.items || []).length;
+  const why = reviewedN === 1
+    ? `The one finding is decided, and it produces no ${noun[0]}.`
+    : `All ${reviewedN} findings are decided, and none of them produce a ${noun[0]}.`;
+  return h('div', { class: 'finish-post finish-post-empty' },
+    h('div', { class: 'step-section-label' }, 'Nothing to post'),
+    h('p', { class: 'post-empty-msg' }, why),
+    h('p', { class: 'meta-dim post-empty-hint' },
+      'Nothing will be written to the PR. Use ', h('strong', {}, '← Back to steps'), ' if a decision should change.'));
+}
+
+function postActionEl(data) {
+  const kind = data.feature && data.feature.kind;
+  if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
+  if (nothingLeftToPost(data)) return postEmptyEl(kind);
+  const noun = kind === 'pr-review' ? ['comment', 'comments'] : ['reply', 'replies'];
+  const postable = POSTABLE_DECISIONS[kind];
+  const decided = state.flow.items.map(flowDecisionKind);
+  const postN = decided.filter((k) => postable.includes(k)).length;
+  // A fix-only item writes code and resolves its thread but posts NO reply, so it must not be
+  // counted as one — "Post 3 replies" when only 2 are replies is exactly the kind of quiet
+  // inaccuracy that makes the cockpit disagree with the PR.
+  const fixOnlyN = decided.filter((k) => k === 'fix-only').length;
+  const replyN = postN - fixOnlyN;
+  const prNum = prNumber(data.feature);
+  const target = prNum ? `PR #${prNum}` : 'the PR';
+  const verb = kind === 'pr-review' ? 'Post comments' : (replyN === 0 && fixOnlyN > 0 ? 'Push fixes' : 'Post replies');
+
+  const { latest, stalled, active, errored, pendingLeft, posted, unconfirmed } = postJobState(data);
   const meta = latest ? (REQ_STATUS[latest.status] || REQ_STATUS.queued) : null;
 
   const statusLine = latest

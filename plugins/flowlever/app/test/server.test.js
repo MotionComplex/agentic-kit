@@ -1144,6 +1144,78 @@ test('U2: the zero-post label names the remaining work instead of dead-ending', 
     'read-only must also disable Post — it is the control that reaches a real pull request');
 });
 
+/* The other half of the zero-post screen, and the one the U2 label could not reach: a reviewer who
+ * DECIDES every finding away (dismiss/reject on all of them) has nothing left to decide, so "N still
+ * undecided" does not apply — and what they were shown instead was a disabled "Post 0 comments to
+ * PR #5869" under the section label "Post comments — nothing is sent until you click this", plus a
+ * next-step note promising a post back to the PR. Three sentences about an action that can never
+ * happen. Nothing postable and nothing left to decide is an END STATE, and the screen has to say so
+ * rather than render a control that counts to zero. */
+test('the finish screen offers no Post button when every decision posts nothing', () => {
+  const ui = readUi();
+  const state = {};
+  const { nothingLeftToPost } = liftUi(ui, [
+    fnSource(ui, 'const POSTABLE_DECISIONS = '),
+    'const JOB_STALE_MS = 3 * 60 * 1000;',
+    'function isOpenish(', 'function isPosted(', 'function isApplied(', 'function isPending(',
+    'function jobAgeMs(', 'function isStaleJob(',
+    'function flowDecisionKind(', 'function undecidedFlowFps(',
+    'function postJobState(', 'function nothingLeftToPost(',
+  ], { state, runnerBusy: () => false });
+
+  const fps = ['a', 'b', 'c', 'd'];
+  const decide = (kinds, applyReqs = []) => {
+    state.flow = {
+      items: fps,
+      decisions: Object.fromEntries(fps.map((fp, i) => (kinds[i] ? [fp, { kind: kinds[i] }] : []))
+        .filter((e) => e.length)),
+      applyReqs,
+    };
+  };
+  // Findings the reviewer dismissed are `waived` in the ledger, so none of them is still pending a
+  // post — which is what makes this an end state rather than an unfinished one.
+  const data = { feature: { kind: 'pr-review' }, ledger: { findings: fps.map((fp) => ({ fp, status: 'waived' })) } };
+
+  decide(['waive', 'waive', 'waive', 'waive']);
+  assert.equal(nothingLeftToPost(data), true,
+    'every finding dismissed and nothing postable is a dead end — no Post control belongs on it');
+
+  decide(['waive', 'reject', 'waive', 'reject']);
+  assert.equal(nothingLeftToPost(data), true,
+    'a Reject posts nothing either — the mix of refusals is still a dead end');
+
+  // The two states that are NOT dead ends, and must keep their button:
+  decide(['accept', 'waive', 'waive', 'waive']);
+  assert.equal(nothingLeftToPost(data), false,
+    'one approved comment is a post — the button must stay');
+  decide(['waive', 'waive', 'waive', null]);
+  assert.equal(nothingLeftToPost(data), false,
+    'an undecided finding is unfinished work, not an empty post set — U2\'s "still undecided" label owns it');
+
+  // A post that already ran (or failed) keeps its own control — "Post again" / "Retry post" — so the
+  // empty state must not swallow the reviewer's way back to it.
+  const pending = { feature: data.feature, ledger: { findings: fps.map((fp) => ({ fp, status: 'open', pending: true })) } };
+  decide(['waive', 'waive', 'waive', 'waive'], [{ id: '1', status: 'error', note: 'auth' }]);
+  assert.equal(nothingLeftToPost(data), false, 'a failed post keeps its Retry');
+  decide(['waive', 'waive', 'waive', 'waive'], [{ id: '1', status: 'done' }]);
+  assert.equal(nothingLeftToPost(data), false, 'a finished post keeps its "post again"');
+  assert.equal(nothingLeftToPost(pending), false,
+    'and a post that finished without confirming its items keeps its Retry too');
+
+  // The two callers must both route through this one predicate, so the control and the note beneath
+  // it can never disagree about whether a post is still ahead.
+  assert.match(codeOnly(fnBody(ui, 'function postActionEl(')), /if \(nothingLeftToPost\(data\)\) return postEmptyEl\(kind\);/,
+    'postActionEl must swap the whole Post control for the empty state, not merely relabel it');
+  assert.match(codeOnly(fnBody(ui, 'function nextStepNote(')), /nothingLeftToPost\(data\)/,
+    'nextStepNote must stop promising "post back to the PR" when there is nothing to post');
+  const empty = codeOnly(fnBody(ui, 'function postEmptyEl('));
+  assert.ok(!/h\('button'/.test(empty), 'the empty state must not draw a button of its own');
+  for (const live of ['.finish-post-empty', '.post-empty-msg', '.post-empty-hint']) {
+    assert.match(fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8'),
+      new RegExp(`\\${live}(?![\\w-])`), `style.css must style ${live} — the empty state draws it`);
+  }
+});
+
 /* Regression guard for NEW-3: route()'s two confirm resets have no test coverage of their own
  * today — a reviewer deleted the `confirmApproveAll` reset line entirely and the whole 209-test
  * suite stayed green, because nothing ever asserted route() clears either flag. Both resets exist
@@ -3445,6 +3517,36 @@ test('V1b: nothing the sources strip draws is left unstyled', () => {
     '.ws-summary-label', '.ws-summary-body', '.ws-summary-empty']) {
     assert.match(css, new RegExp(`\\${live}(?![\\w-])`), `style.css must style ${live}`);
   }
+});
+
+/* iconSpan's default class had no rule at all, so the span stayed an inline box and its svg sat on
+ * the TEXT BASELINE — the line box reserving descender space underneath it. Measured in the PR
+ * quick-link (a 30px control around a 15px glyph): 5.16px above, 9.84px below, i.e. the arrow rode
+ * ~2.3px high inside a control whose own CSS centres its children. Every glyph drawn through the
+ * default class had it; the three places that noticed (.src-icon, .f-pin, .btn-icon) each patched
+ * `display: inline-flex` locally, which is the same fix applied one caller at a time. */
+test('an icon glyph is centred by its own box, not parked on the text baseline', () => {
+  const ui = readUi();
+  const css = cssRules(fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8'));
+
+  // The default class iconSpan hands out when a caller names none — the one that was unstyled.
+  assert.match(codeOnly(fnSource(ui, 'function iconSpan(')), /cls = 'icon'/,
+    'iconSpan must still default to the class this rule styles');
+  const rule = css.match(/\n\.icon \{[^}]*\}/);
+  assert.ok(rule, 'style.css must carry a base rule for .icon — an unstyled icon span is baseline-aligned');
+  assert.match(rule[0], /display: inline-flex/,
+    '.icon must be a flex box: blockifying the svg is what takes the baseline out of the layout');
+  assert.match(css, /\.icon > svg \{[^}]*display: block/,
+    'and the svg itself must be a block, so a UA stylesheet cannot put the baseline back');
+
+  // The control this was reported on centres its children already — the glyph, not the button, was
+  // the thing off-centre, so the button's own rule must not be "corrected" to compensate.
+  const prlink = css.match(/\.dh-prlink \{[^}]*\}/);
+  assert.ok(prlink, 'style.css must still style .dh-prlink');
+  assert.match(prlink[0], /align-items: center/);
+  assert.match(prlink[0], /justify-content: center/);
+  assert.ok(!/padding|margin-bottom|line-height/.test(prlink[0]),
+    'the PR quick link must not nudge its glyph with padding or line-height — the fix belongs on .icon');
 });
 
 test('V2: the Vertec line is the booking string, assembled from real fields only', () => {
