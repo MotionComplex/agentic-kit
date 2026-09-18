@@ -10,6 +10,6 @@
 // BUMP THIS whenever the HTTP surface changes in a way the UI depends on (new route, new required
 // field, changed response shape). The browser compares its compiled-in expectation against
 // GET /api/version and tells the user to restart the cockpit instead of failing mysteriously.
-const API_VERSION = '4';
+const API_VERSION = '5';
 
 module.exports = { API_VERSION };

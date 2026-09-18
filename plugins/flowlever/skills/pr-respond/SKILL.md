@@ -35,7 +35,14 @@ work all threads awaiting your reply as usual.
 - Input = a PR id/URL, or auto-detect from the current git branch (as `/pr-respond` does). Ask if unclear.
 - Workspace id `pr-<id>-<short-slug>`, `--kind pr-respond`:
   `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature add <wsId> --title "PR #<id> — <pr title> (your PR)" --kind pr-respond`
-- Register the PR as a source.
+- Register the PR as a source — `--type ado --itemType "Pull Request" --url "<pr url>"`. Register the
+  **linked work item** too (`--itemType "<its real type>"`, `--title "<its own System.Title>"`,
+  `--url "<work item url>"`, and `--vertecPhase "<Custom.Vertec>"` when that field has a value —
+  ask for `expand:"Fields"` to get it). That is what gives this workspace the same source badges,
+  Vertec booking line and PR quick-link the review side has; without it they are simply absent.
+- **Write the workspace summary** once you have read the PR and its ticket:
+  `... cli.js feature summary <wsId> --text "<2–4 sentences: what this change is and why>"`. Write it
+  from the sources, never by paraphrasing the PR title — see `/flowlever:pr-review` §2 step 5.
 - If the request carried `instructions`, persist them onto the workspace as `feature.reviewBrief` here.
 
 > **When run from the cockpit queue (`/flowlever:watch`), emit phases** with the request id `<reqId>`:

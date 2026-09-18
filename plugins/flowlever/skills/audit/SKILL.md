@@ -41,7 +41,9 @@ countered items** against the counter, then stop:
    - **Or, if you disagree with the counter,** keep the original draft and reply in the `note`
      explaining why (leave `verdict=redirect`) so the user sees your reasoning on the next pass.
 3. Report what you re-drafted / waived per finding and stop. Do **not** run the full 7-dimension sweep
-   or ingest a new round. This keeps the per-item refine loop tight. (Skip the rest of this skill.)
+   or ingest a new round. This keeps the per-item refine loop tight. (Skip the rest of this skill —
+   **except §3b**: if `feature.summary` is still null, write it before you stop. A workspace that
+   only ever reaches this short-circuit would otherwise never get one.)
    **If you ever DO need to ingest here** (e.g. you re-fetched sources and want the ledger to
    recompute readiness for these items) — never call a bare `ingest`. Without an explicit scope,
    `ingestRound` auto-resolves every OTHER open finding it doesn't see in this narrow batch,
@@ -72,7 +74,13 @@ With a `featureId` argument (run directly), ignore this and use §1 as normal.
   then add its sources. Discover sources from the user's message (Confluence/ADO/Figma URLs)
   and register each:
   - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type confluence --id <pageId> --title "..." --url "<url>"`
-  - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type ado --id <workItemId> --title "..." --url "<url>"` (work item type via `--itemType "User Story"` if available)
+  - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type ado --id <workItemId> --itemType "User Story" --title "..." --url "<url>" [--vertecPhase "..."]`
+    — **always pass `--itemType`** (the item's real type: User Story / Bug / Task / Feature / Epic /
+    Pull Request); the cockpit badges and colour-codes each source by it, so an untyped item is drawn
+    as a generic "Work item". **`--vertecPhase` is the work item's `Custom.Vertec` field** (the
+    "Vertec" field under *Administration*), read in §2 — it is shown beside the copyable Vertec
+    booking line. `--title` must be the item's own `System.Title`, verbatim: the booking line
+    (`FZAG-<id> <title>`) is assembled from it and gets pasted into a real booking.
   - `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" source add <id> --type figma --fileKey <key> --nodeId <node> --title "..." --url "<url>"`
   - If you cannot determine sources, ask the user for the spec page, the work item IDs, and the Figma file/frame — then proceed.
 
@@ -85,7 +93,10 @@ one failed fetch abort the whole audit — record what you couldn't read and con
   `searchConfluenceUsingCql` if you only have a title.
 - **Azure DevOps** (`mcp__azure-devops__*`): `wit_get_work_items_batch_by_ids` (or
   `wit_get_work_item`) for the work items — capture Description, Acceptance Criteria, State,
-  and relations. `wit_list_work_item_comments` if AC lives in discussion. The org here is
+  relations, the work-item **type**, and the **`Custom.Vertec`** field (the booking phase; ask for
+  `expand:"Fields"` so custom fields come back — `expand` and an explicit `fields` list are mutually
+  exclusive). Feed the type and the phase back to `source add` as `--itemType` / `--vertecPhase`.
+  `wit_list_work_item_comments` if AC lives in discussion. The org here is
   `FZAG`; the DXP project id is `c026630b-a803-4b06-9a1a-77db52707d9c`.
 - **Figma** (`mcp__claude_ai_Figma__*`): `get_metadata` for the frame tree and
   `get_screenshot` for the actual visuals of the relevant nodeIds.
@@ -96,6 +107,20 @@ Parse the Confluence page headings into a stable outline. Slugify each heading t
 `specSections` array. If no CLI command exists for this, edit `${FLOWLEVER_DATA:-$HOME/.flowlever}/features/<id>.json`
 directly with the Edit tool (it is plain JSON; keep the schema in `docs/SCHEMA.md`).
 Stable section keys matter — the coverage matrix and finding loci depend on them.
+
+## 3b. Write the workspace summary — MANDATORY
+You have now read every source, which is the only moment this can be written: the cockpit has no
+model of its own and will never invent one, so skipping this leaves the workspace blank forever.
+```
+... cli.js feature summary <id> --text "<2–4 sentences: what this feature is and why>"   # or --file <md>
+```
+Answer the question someone has *before* opening the findings: what is this feature, and why. Write
+it from the spec and the work items; **never paraphrase the workspace title back**, which is the
+text already on screen. Re-write it on every re-audit so it tracks what the feature has become.
+
+**A run that finishes with `feature.summary` still null is a FAILURE of this skill** — the same bar
+as an unregistered spec source. Verify before §8: `... cli.js feature show <id> --json` must show a
+non-null `summary`, and say so in the report.
 
 ## 4. Run the 7-dimension audit
 If the user has opted into swarms/workflows, fan out one subagent **per dimension** in

@@ -49,10 +49,12 @@ const WS_STATES = [
   { key: 'needs-review',     band: 'needs-you',   label: 'New — to review'     },
   { key: 'needs-rereview',   band: 'needs-you',   label: 'Re-review'           },
   { key: 'author-responded', band: 'needs-you',   label: 'Author responded'    },
+  { key: 'needs-approval',   band: 'needs-you',   label: 'Ready to approve'    },
   { key: 'job-posting',      band: 'in-progress', label: 'Posting review'      },
   { key: 'job-rereviewing',  band: 'in-progress', label: 'Re-reviewing'        },
   { key: 'job-reviewing',    band: 'in-progress', label: 'Reviewing'           },
   { key: 'job-polling',      band: 'in-progress', label: 'Checking for updates'},
+  { key: 'job-summarizing',  band: 'in-progress', label: 'Writing summary'      },
   { key: 'posting',          band: 'in-progress', label: 'Posting…'            },
   { key: 'awaiting-author',  band: 'waiting',     label: 'Waiting on author'   },
   { key: 'awaiting-reaudit', band: 'waiting',     label: 'Waiting on re-audit' },
@@ -134,6 +136,20 @@ const ICONS = {
   kindSpec: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>',
   kindReview: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7"/><circle cx="18" cy="18" r="2.5"/><path d="M18 15.5V12a4 4 0 0 0-4-4h-3"/><path d="M13 5l-2 3 2 3"/></svg>',
   kindRespond: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/><path d="M11 8l-3 3 3 3"/><path d="M8 11h6a2 2 0 0 1 2 2v1"/></svg>',
+  // source-role glyphs (lucide-style). A PR, the story it implements and the epic above it used to
+  // share one checkbox icon, so telling them apart meant reading the title — the thing you click
+  // BEFORE you have read it. Each role gets its own silhouette.
+  srcPr: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7"/><circle cx="18" cy="18" r="2.5"/><path d="M18 15.5V12a4 4 0 0 0-4-4h-3"/><path d="M13 5l-2 3 2 3"/></svg>',
+  srcStory: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 5a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H2z"/><path d="M22 5a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H22z"/></svg>',
+  srcBug: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M8 11H4M20 11h-4M8 16H4.5M20 16h-3.5M9 6.5L7 4M15 6.5L17 4"/></svg>',
+  srcTask: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 12l2.5 2.5L15.5 9.5"/></svg>',
+  srcEpic: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l9 4.5-9 4.5-9-4.5z"/><path d="M3 12l9 4.5 9-4.5"/><path d="M3 16.5L12 21l9-4.5"/></svg>',
+  // clipboard-copy, and its "done" twin — the copy button swaps glyph on success so the feedback
+  // is on the control you pressed, not only in a toast that may be off-screen.
+  copy: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  copied: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>',
+  // the "open this elsewhere" arrow, at control size (ICONS.link is the 10px in-chip version)
+  openExternal: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>',
 };
 
 /* The three workflow kinds a workspace can host. Each rides the SAME finding model
@@ -187,7 +203,7 @@ const DISCLOSURE_LINE = '🤖 AI comment posted by Claude';
  * gets the newest app.js, but src/server.js is only read when the cockpit process starts, so an
  * updated plugin + a long-running server means the page calls routes the server has never heard of.
  * That used to surface as a bare "Not found"; now it says which half is stale. */
-const EXPECTED_API_VERSION = '4';
+const EXPECTED_API_VERSION = '5';
 
 /* ============================== tiny DOM lib ============================== */
 
@@ -3639,6 +3655,7 @@ function categoryOf(f, job) {
     if (needsInput || job.status === 'error' || isStaleJob(job)) return 'job-attention';
     if (job.action === 'apply') return 'job-posting';
     if (job.action === 'poll') return 'job-polling';
+    if (job.action === 'summarize') return 'job-summarizing';
     // A re-run against a workspace that already has findings/rounds is a re-review, not a first
     // pass — the same distinction cardJobRow's verb makes, read from the same derivation.
     return hasFindingsOf(f) ? 'job-rereviewing' : 'job-reviewing';
@@ -3670,6 +3687,16 @@ const KIND_ACTIONS = {
   'pr-respond': ['pr-respond'],
 };
 function actsOnKind(job, kind) { return (KIND_ACTIONS[kind] || []).includes(job.action); }
+
+/* Queue actions that name ONE workspace by `wsId` and that any kind can host, so KIND_ACTIONS
+ * cannot own them — jobBindsTo's wsId arm is their way onto a row. One table, for the same reason
+ * KIND_ACTIONS is one: `apply` was hardcoded at each site instead, so adding `summarize` left its
+ * job invisible on the section list and mislabelled everywhere else. A new action added here shows
+ * up on every surface at once. (`poll` is not here — it names no workspace and drives the Refresh
+ * button instead of a row.) */
+const WSID_JOB_ACTIONS = ['apply', 'summarize'];
+/* …plus the ones a kind already owns that can still change what the DETAIL page is showing. */
+const DETAIL_JOB_ACTIONS = [...WSID_JOB_ACTIONS, 'propose'];
 
 /* The rows for a section, drawn as ordered bands: what needs you, what a runner is mid-way
  * through, what is parked on somebody else — then the collapsed Done list, unchanged. Each
@@ -3795,7 +3822,7 @@ function startSectionRequestsPoll(kind) {
     // `audit`/`re-audit`/`propose` — matched nothing at all under it.
     const known = state.section.features;
     const rel = reqs.filter((r) => actsOnKind(r, kind)
-      || (r.action === 'apply' && known.some((f) => jobBindsTo(r, f))));
+      || (WSID_JOB_ACTIONS.includes(r.action) && known.some((f) => jobBindsTo(r, f))));
     // The manual-refresh pass has no workspace of its own — it drives the Refresh button
     // instead of a card. An unscoped (`kind: null`) poll covers every PR section.
     renderRefreshZone($('#refresh-zone'), kind, pickPollJob(reqs, kind));
@@ -3934,7 +3961,7 @@ const REQ_STATUS = {
   done:    { glyph: '✓', label: 'Done' },
   error:   { glyph: '✗', label: 'Error' },
 };
-const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis', propose: 'Draft changes', poll: 'Refresh' };
+const REQ_ACTION_LABEL = { 'pr-review': 'PR review', 'pr-respond': 'PR respond', apply: 'Post to PR', 're-audit': 'Re-audit', audit: 'Spec analysis', propose: 'Draft changes', poll: 'Refresh', summarize: 'Summary' };
 
 /* ---- live job ↔ card binding ----------------------------------------------
  * Instead of a separate "jobs" strip duplicating the cards, the active request
@@ -4804,7 +4831,7 @@ function rerenderDetail() {
 function ensureFeatureJobPolling(id) {
   startPolling(`featjob:${id}`, (reqs) => {
     if (current.view !== 'detail' || current.id !== id) return;
-    const mine = (reqs || []).filter((r) => (r.action === 'propose' || r.action === 'apply') && r.wsId === id);
+    const mine = (reqs || []).filter((r) => DETAIL_JOB_ACTIONS.includes(r.action) && r.wsId === id);
     const latest = mine.length
       ? [...mine].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] : null;
     // Staleness rides in the signature: it flips with the passage of time, not with a server
@@ -4820,6 +4847,47 @@ function ensureFeatureJobPolling(id) {
     if (justDone) { loadDetail(id, true).then(() => rerenderDetail()).catch(() => rerenderDetail()); }
     else rerenderDetail();
   });
+}
+
+/* The summarize job's own banner. Deliberately quiet: this job reads registered sources and writes
+ * one field, so there is nothing to reassure the user about and nothing to take back. It says what
+ * is happening, and — the one case that matters — that nothing is running it. `done` returns null
+ * because the detail reloads on completion and the filled-in summary is the better answer. */
+function summarizeJobBanner(j) {
+  if (j.needsInput) {
+    return h('div', { class: 'apply-status apply-needs-input feat-job' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, j.note || 'Waiting on you — approve the auth prompt in your other window.'));
+  }
+  if (j.status === 'error') {
+    return h('div', { class: 'apply-status apply-stalled feat-job' },
+      h('span', { class: 'apply-dot' }, '⚠'),
+      h('span', {}, `Could not write the summary${j.note ? ` — ${j.note}` : '.'} Nothing else was changed.`));
+  }
+  if (isStaleJob(j)) {
+    return h('div', { class: 'apply-status apply-stalled feat-job' },
+      h('span', { class: 'apply-dot' }, '⏸'),
+      h('div', { class: 'apply-stalled-body' },
+        h('span', {}, `Summary — ${j.status} ${fmtAge(jobAgeMs(j))} ago and no runner picked it up.`),
+        h('span', { class: 'meta-dim' }, 'Nothing has been read or written.')),
+      h('div', { class: 'apply-stalled-actions' },
+        runnerZone(1, '▶ Run it now'),
+        h('button', { class: 'btn btn-cancel-pending', type: 'button', onclick: () => cancelStalledJob(j) },
+          '✕ Cancel job')));
+  }
+  if (j.status === 'queued') {
+    const idle = !runnerBusy();
+    return h('div', { class: 'apply-status apply-running feat-job' },
+      idle ? h('span', { class: 'apply-dot' }, '⏳') : h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, `Writing the summary — queued${idle ? ', nothing running it yet' : ' for the runner…'}`),
+      idle ? runnerZone(1, '▶ Run it now') : null);
+  }
+  if (j.status === 'running') {
+    return h('div', { class: 'apply-status apply-running feat-job' },
+      h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', {}, `Writing the summary${j.phase ? ` — ${j.phase}` : '…'}`));
+  }
+  return null;
 }
 
 /* The live banner above the board: what the runner is doing for this workspace right now — and,
@@ -4850,6 +4918,13 @@ function specJobBanner(data) {
       }, '↩ Back to the review queue'));
   }
   if (!j) return null;
+
+  // A summarize job takes its own branch rather than borrowing the wording below. Everything after
+  // this point is built for jobs that WRITE — the verbs are "Posting"/"Applying", the recovery is
+  // "put the items back in the review queue", and the loud reassurance is "nothing has been
+  // posted". All four are wrong here: this job posts nothing, moves no findings, and has no items
+  // to put back. Left to fall through, it told the user their PR was mid-post.
+  if (j.action === 'summarize') return summarizeJobBanner(j);
 
   const isPropose = j.action === 'propose';
   if (j.needsInput) {
@@ -5054,13 +5129,19 @@ function detailView(data, tab) {
     h('div', { class: 'detail-head' },
       h('div', { class: 'dh-left' },
         h('a', { class: 'backlink', href: km.section }, `← ${km.label}`),
-        h('h1', { class: 'dh-title' }, feature.title || feature.id || current.id),
+        // The title and the "open the PR" arrow ride the same line, so the quick link is where the
+        // thing it opens is named rather than parked in the metadata row below.
+        h('div', { class: 'dh-titlerow' },
+          h('h1', { class: 'dh-title' }, feature.title || feature.id || current.id),
+          prQuickLink(feature),
+        ),
         h('div', { class: 'dh-meta' },
           kindBadge(kind),
           statusChip(feature.status),
           feature.id ? h('code', { class: 'feature-id' }, feature.id) : null,
           detailDeleteZone(feature),
         ),
+        vertecRow(feature),
       ),
       h('div', { class: 'dh-right' },
         dialEl(r.score, r.gate, 96, 'dial-lg'),
@@ -5069,10 +5150,16 @@ function detailView(data, tab) {
           h('div', { class: `dh-blocking ${blockers > 0 ? 'hot' : ''}` },
             blockers > 0 ? `${plural(blockers, 'blocker', 'blockers')} blocking` : 'nothing blocking'),
           h('div', { class: 'meta-dim num-line' }, `${totalOpen} open total`),
+          // Which vote this review has earned — directly above the button that ends the review,
+          // because "I finished in FlowLever and forgot to vote on the PR" is the gap it closes.
+          approvalChip(data),
           completeControl(feature),
         ),
       ),
     ),
+    // First thing under the header, because "what is this even about" is the question you have
+    // before any of the workflow controls mean anything.
+    summaryPanel(feature),
     loopStrip(data, reviewCta(data)),
     // When we reviewed vs. when the PR last changed — the re-review decision, in one line.
     reviewStampsRow(data, kind),
@@ -5153,36 +5240,409 @@ function reviewScopeNote(feature) {
     h('span', { class: 'review-scope-text' }, brief));
 }
 
-/* ============================== sources strip ============================== */
+/* ============================== sources: roles, badges, the strip ============================== */
+
+/* What a linked source IS, as opposed to which system it lives in. The system was never the useful
+ * distinction: a PR, the user story it implements and the epic above it are all "Azure DevOps" and
+ * all wore the same checkbox icon, so the only way to tell the story from the PR was to read a
+ * title that a chip truncates — i.e. after clicking the wrong one. `rank` orders the strip so the
+ * two you reach for most (the PR and its story) are always the first two chips.
+ * `tint` keys the colour in style.css. */
+const SOURCE_ROLES = {
+  pr:      { label: 'PR',        icon: 'srcPr',      rank: 0 },
+  story:   { label: 'Story',     icon: 'srcStory',   rank: 1 },
+  bug:     { label: 'Bug',       icon: 'srcBug',     rank: 2 },
+  task:    { label: 'Task',      icon: 'srcTask',    rank: 3 },
+  feature: { label: 'Feature',   icon: 'srcEpic',    rank: 4 },
+  epic:    { label: 'Epic',      icon: 'srcEpic',    rank: 5 },
+  item:    { label: 'Work item', icon: 'srcTask',    rank: 6 },
+  spec:    { label: 'Spec',      icon: 'confluence', rank: 7 },
+  design:  { label: 'Design',    icon: 'figma',      rank: 8 },
+};
+
+/* ADO work-item type (source.type, set via `source add --itemType`) → role.
+ * The url fallback matters and is not cosmetic: every workspace registered before --itemType was
+ * used carries no type at all, and those are exactly the PRs the user is looking at today. A PR
+ * url is unambiguous (`/pullrequest/<id>`), so an untyped source at that url is a PR. */
+function adoRole(it) {
+  const t = String((it && it.type) || '').trim().toLowerCase();
+  if (t === 'pull request' || t === 'pullrequest' || t === 'pr') return 'pr';
+  if (t === 'user story' || t === 'product backlog item' || t === 'story' || t === 'requirement') return 'story';
+  if (t === 'bug' || t === 'defect') return 'bug';
+  if (t === 'task') return 'task';
+  if (t === 'feature') return 'feature';
+  if (t === 'epic') return 'epic';
+  if (isPrUrl(it && it.url)) return 'pr';
+  return 'item';
+}
+
+function isPrUrl(url) { return /\/pullrequest\/\d+/i.test(String(url ?? '')); }
+
+/* Sources are registered with a title that frequently restates the id the badge now carries
+ * ("#5882" + "PR #5882 — [43057] Atrius 2.3…"). Drop the leading restatement so the chip spends
+ * its width on what the item is about. Never returns empty — a title that is ONLY its own id
+ * keeps it. */
+function trimIdPrefix(title, id) {
+  const t = String(title ?? '').trim();
+  if (id === undefined || id === null || t === '') return t;
+  const esc = String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // A BARE leading number is only a restatement when a separator follows it. Without that lookahead
+  // a work item #5 titled "5 Whys analysis of the outage" renders as "Whys analysis of the outage"
+  // — the strip mangling the very title it exists to make identifiable. The `#`/`PR` forms are
+  // unambiguous and need no separator.
+  const re = new RegExp(
+    '^(?:'
+    + `(?:pr\\s*)?#\\s*${esc}(?![\\w-])`        // "#5882", "PR #5882"
+    + `|pr\\s+${esc}(?![\\w-])`                 // "PR 5882"
+    + `|${esc}(?![\\w-])(?=\\s*[-—–:·])`        // bare "5882", but only before a separator
+    + ')\\s*(?:[-—–:·]\\s*)?', 'i');
+  const next = t.replace(re, '').trim();
+  return next || t;
+}
+
+/* Every linked source as one uniform shape, ordered by role. */
+function sourceEntries(feature) {
+  const s = (feature && feature.sources) || {};
+  const out = [];
+  for (const it of s.ado || []) {
+    if (!it) continue;
+    const role = adoRole(it);
+    out.push({
+      role,
+      // An ADO instance can carry work-item types we don't map ("Impediment", "Test Case"). Showing
+      // the real type beats a generic "Work item" — the badge exists to name the thing exactly.
+      label: role === 'item' && it.type ? String(it.type).trim() : SOURCE_ROLES[role].label,
+      idText: it.id != null ? `#${it.id}` : '',
+      text: trimIdPrefix(it.title, it.id) || (it.id != null ? `#${it.id}` : 'work item'),
+      system: 'Azure DevOps',
+      url: it.url,
+    });
+  }
+  for (const it of s.confluence || []) {
+    if (!it) continue;
+    out.push({ role: 'spec', label: SOURCE_ROLES.spec.label, idText: '',
+      text: String(it.title || it.id || 'page').trim(), system: 'Confluence', url: it.url });
+  }
+  for (const it of s.figma || []) {
+    if (!it) continue;
+    out.push({ role: 'design', label: SOURCE_ROLES.design.label, idText: '',
+      text: String(it.title || it.fileKey || 'frame').trim(), system: 'Figma', url: it.url });
+  }
+  // Stable within a rank: sources keep the order they were registered in, which is the order the
+  // review skill walked them.
+  return out.map((e, i) => ({ e, i }))
+    .sort((a, b) => (SOURCE_ROLES[a.e.role].rank - SOURCE_ROLES[b.e.role].rank) || (a.i - b.i))
+    .map(({ e }) => e);
+}
 
 function sourcesStrip(feature) {
-  const s = feature.sources || {};
-  const groups = [
-    { key: 'confluence', icon: 'confluence', label: 'Confluence', items: s.confluence || [],
-      text: (it) => it.title || it.id || 'page' },
-    { key: 'ado', icon: 'ado', label: 'Azure DevOps', items: s.ado || [],
-      text: (it) => (it.id != null ? `#${it.id}` : '') + (it.title ? ` ${it.title}` : '') || 'item' },
-    { key: 'figma', icon: 'figma', label: 'Figma', items: s.figma || [],
-      text: (it) => it.title || it.fileKey || 'frame' },
-  ];
-  const any = groups.some((g) => g.items.length);
+  const entries = sourceEntries(feature);
   return h('div', { class: 'sources-strip' },
     h('span', { class: 'src-label' }, 'Sources'),
-    !any ? h('span', { class: 'meta-dim' }, 'none linked') :
-      groups.filter((g) => g.items.length).map((g) =>
-        h('span', { class: 'src-group' },
-          g.items.map((it) => {
-            const href = safeHref(it.url);
-            const txt = g.text(it).trim();
-            const ttl = `${g.label}: ${txt}`;
-            const inner = [iconSpan(g.icon, `icon src-icon src-${g.key}`),
-              h('span', { class: 'src-text' }, txt),
-              href ? iconSpan('link', 'icon src-out') : null];
-            return href
-              ? h('a', { class: 'src-link', href, target: '_blank', rel: 'noopener noreferrer', title: ttl }, inner)
-              : h('span', { class: 'src-link src-nolink', title: ttl }, inner);
-          }))),
+    !entries.length ? h('span', { class: 'meta-dim' }, 'none linked') :
+      h('div', { class: 'src-group' }, entries.map((e) => {
+        const href = safeHref(e.url);
+        const ttl = `${e.label} · ${e.system}${e.idText ? ` ${e.idText}` : ''} — ${e.text}`;
+        const inner = [
+          iconSpan(SOURCE_ROLES[e.role].icon, `icon src-icon src-${e.role}`),
+          h('span', { class: `src-badge src-badge-${e.role}` }, e.label),
+          e.idText ? h('span', { class: 'src-id' }, e.idText) : null,
+          h('span', { class: 'src-text' }, e.text),
+          href ? iconSpan('link', 'icon src-out') : null,
+        ];
+        return href
+          ? h('a', { class: `src-link src-role-${e.role}`, href, target: '_blank', rel: 'noopener noreferrer', title: ttl }, inner)
+          : h('span', { class: `src-link src-nolink src-role-${e.role}`, title: ttl }, inner);
+      })),
   );
+}
+
+/* ============================== Vertec booking line ============================== */
+
+/* The work item a Vertec booking is made against: the STORY (or bug/task) the change belongs to,
+ * never the PR that implements it and, only as a last resort, the feature/epic above it. Ranked
+ * rather than "first ado source" because the sources are registered in review order, which puts
+ * the PR first.
+ *
+ * `item` — the UNTYPED fallback role — is deliberately absent from this table, and that is the
+ * whole guard. A source registered without `--itemType` tells us two things we would otherwise
+ * have to invent: which of several work items is the story (rather than the epic above it), and
+ * whether `title` is the work item's own `System.Title` or the audit skill's paraphrase of it
+ * ("FOAN00 #42700" is a real example from the ledger). Ranking an untyped item as bookable made
+ * the ranking meaningless — it collapsed to "whichever was registered first" — and put a
+ * plausible, wrong string on the clipboard, which is the one failure this feature cannot have:
+ * it gets pasted into a real booking. Unverified ⇒ no booking line, exactly as an underivable
+ * prefix means no booking line. The next review round records the type and it starts working. */
+const VERTEC_RANK = { story: 0, bug: 1, task: 2, feature: 3, epic: 4 };
+function bookingItem(feature) {
+  const list = (((feature || {}).sources || {}).ado || []).filter(Boolean);
+  let best = null;
+  let bestRank = Infinity;
+  for (const it of list) {
+    const rank = VERTEC_RANK[adoRole(it)];
+    if (rank === undefined) continue;          // a PR, or an untyped work item, is not bookable
+    if (rank < bestRank) { best = it; bestRank = rank; }
+  }
+  return best;
+}
+
+/* The best candidate we had to REFUSE because its role is not bookable. It carries no booking line,
+ * only the explanation: without this the row simply vanishes on the 36-of-55 workspaces reviewed
+ * before `--itemType` was passed, and "missing" reads as "broken" rather than "not confirmed yet".
+ * Prefers a candidate that at least has a phase recorded — that is the one carrying real data. */
+function unverifiedBookingItem(feature) {
+  const cands = (((feature || {}).sources || {}).ado || []).filter((it) => it && adoRole(it) === 'item');
+  return cands.find((it) => typeof it.vertecPhase === 'string' && it.vertecPhase.trim()) || cands[0] || null;
+}
+
+/* Why that candidate is not bookable — and these are NOT the same problem, so they must not share
+ * a sentence. `adoRole` returns 'item' both for "no type on file" and for a type Azure DevOps
+ * records but we don't book against (Impediment, Test Case, Risk…). Telling the second case that
+ * its "type was never recorded, the next review round records it" is simply false: the type IS
+ * recorded, the badge beside it says so, and re-recording changes nothing — a dead end dressed as
+ * an action. */
+function unbookableReason(it) {
+  const type = String((it && it.type) || '').trim();
+  return type
+    // No article before `${type}` — it comes from the ADO instance, so "a Impediment" is the
+    // failure case of any article this code could pick.
+    ? `Azure DevOps records #${it.id} with type "${type}", which isn't a bookable work-item type. `
+      + 'Book against the story or bug this work belongs to.'
+    : `No booking text — #${it.id}'s work-item type was never recorded, so this can't confirm `
+      + 'which item to book or that its title matches Azure DevOps. The next review round records both.';
+}
+
+/* The booking key's prefix is the Azure DevOps ORGANISATION the work item lives in — `FZAG` in
+ * `dev.azure.com/FZAG/dxp/_workitems/edit/43057`, `DXN` for DXN's board. That is derived, not
+ * configured, so a new project needs no setup; `--vertecKey` on the source overrides it for an org
+ * whose Vertec prefix is spelled differently. No url ⇒ no prefix ⇒ no booking line: an invented
+ * prefix would be pasted into a real booking. */
+function vertecPrefix(it) {
+  const override = it && typeof it.vertecKey === 'string' ? it.vertecKey.trim() : '';
+  if (override) return override.toUpperCase();
+  let u = null;
+  try { u = new URL(String((it && it.url) || ''), location.href); } catch { return null; }
+  const host = u.hostname.toLowerCase();
+  if (host === 'dev.azure.com' || host.endsWith('.dev.azure.com')) {
+    const seg = u.pathname.split('/').filter(Boolean)[0];
+    if (!seg) return null;
+    try { return decodeURIComponent(seg).toUpperCase(); } catch { return seg.toUpperCase(); }
+  }
+  const legacy = /^([^.]+)\.visualstudio\.com$/.exec(host);   // the pre-dev.azure.com host form
+  return legacy ? legacy[1].toUpperCase() : null;
+}
+
+/* `FZAG-43057 Atrius 2.3 — The map reads in the visitor's language` — the exact string that goes
+ * into a Vertec booking, so it is assembled from the id and the work item's own title with nothing
+ * added. Returns null when any part is missing rather than a half-built line. */
+function vertecBookingText(it) {
+  if (!it || it.id === undefined || it.id === null || String(it.id).trim() === '') return null;
+  const prefix = vertecPrefix(it);
+  if (!prefix) return null;
+  const title = String(it.title || '').trim();
+  return `${prefix}-${String(it.id).trim()}${title ? ` ${title}` : ''}`;
+}
+
+/* One-click booking text for Vertec, on the workspace header. The phase is shown beside it as
+ * information only — it is not part of what gets copied.
+ *
+ * There are three outcomes, and only the first one gets a copy button. The other two state WHY
+ * there is no booking text, because a row that silently disappears is indistinguishable from a
+ * broken one — and, far worse, a row that quietly guessed would be believed. */
+function vertecRow(feature) {
+  const it = bookingItem(feature);
+  const unverified = it ? null : unverifiedBookingItem(feature);
+  const subject = it || unverified;
+  // No work item at all (a PR-only or source-less workspace) is the ONE case with nothing to say.
+  // Every other case renders and explains itself — a row that vanishes because the org happened to
+  // be underivable is indistinguishable from a broken one, which is the whole reason this branch
+  // exists. (It used to also vanish when there was no phase to carry it.)
+  if (!subject) return null;
+
+  const text = it ? vertecBookingText(it) : null;
+  // The phase belongs to the item being booked, so it is read off THAT item — never borrowed from
+  // a sibling, which would attribute one work item's booking phase to another.
+  const phase = typeof subject.vertecPhase === 'string' && subject.vertecPhase.trim()
+    ? subject.vertecPhase.trim() : null;
+
+  let line;
+  if (text) {
+    // user-select:all (style.css) so a manual drag also grabs exactly the booking string.
+    line = h('span', { class: 'vertec-text' }, text);
+  } else if (unverified) {
+    line = h('span', { class: 'vertec-text vertec-missing' }, unbookableReason(unverified));
+  } else {
+    line = h('span', { class: 'vertec-text vertec-missing' },
+      `No booking text — no Azure DevOps organisation in #${subject.id}'s url. `
+      + 'Re-register the source with --url, or set --vertecKey.');
+  }
+
+  return h('div', { class: 'vertec-row' },
+    h('span', { class: 'vertec-label' }, 'Vertec'),
+    h('div', { class: 'vertec-body' },
+      line,
+      h('span', { class: 'vertec-phase' },
+        h('span', { class: 'vertec-phase-label' }, 'Phase'),
+        phase
+          ? h('span', { class: 'vertec-phase-text' }, phase)
+          : h('span', { class: 'vertec-phase-text meta-dim' }, 'not recorded — the next review round reads it off the work item')),
+    ),
+    text ? copyButton(text, 'Vertec booking text', 'Copy the Vertec booking text') : null,
+  );
+}
+
+/* A copy-to-clipboard icon button that confirms on itself (glyph swap) as well as in a toast.
+ * `label` names WHAT was copied, so the toast reads "Vertec booking text copied". */
+function copyButton(text, label, title) {
+  let timer = null;
+  const btn = h('button', {
+    class: 'btn-icon copy-btn', type: 'button', title, 'aria-label': title,
+    onclick: async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        toast('Clipboard unavailable — select the text and copy it manually');
+        return;
+      }
+      toast(`${label} copied`, 'success');
+      btn.classList.add('copied');
+      btn.replaceChildren(iconSpan('copied', 'icon'));
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // The row is re-rendered on every poll tick, so the button may be detached by now; the
+        // guard keeps the timer from resurrecting a node nobody is looking at.
+        if (!btn.isConnected) return;
+        btn.classList.remove('copied');
+        btn.replaceChildren(iconSpan('copy', 'icon'));
+      }, 1600);
+    },
+  }, iconSpan('copy', 'icon'));
+  return btn;
+}
+
+/* ============================== the approval indicator ============================== */
+
+/* The three votes, in the reviewer's words and Azure DevOps'. FlowLever never casts one — it only
+ * says which the review has earned, because noticing that for yourself is the step that gets
+ * skipped. `ado` is the literal vote name so the chip names the thing you press over there. */
+const APPROVAL_VOTES = {
+  approve:                   { label: 'Approve',                  ado: 'Approved',                   tone: 'go' },
+  'approve-with-suggestions': { label: 'Approve with suggestions', ado: 'Approved with suggestions', tone: 'go-soft' },
+  'wait-for-author':         { label: 'Wait for author',          ado: 'Waiting for the author',     tone: 'hold' },
+};
+
+/* The chip on the workspace header. Says the vote, and underneath it why — a recommendation whose
+ * reasoning you cannot see is one you have to re-derive before you trust it, which costs more than
+ * it saves. Renders nothing at all when the honest answer is "not yet": a greyed-out vote reads as
+ * a broken control, whereas an absent one reads as "the review isn't finished", which is the
+ * truth and is already said by the state pill beside it. */
+function approvalChip(data) {
+  const a = data && data.approval;
+  if (!a || !a.vote) return null;
+  const v = APPROVAL_VOTES[a.vote];
+  if (!v) return null;                      // a vote from a newer server this build doesn't know
+  return h('div', { class: `approval approval-${v.tone}`, title: `Vote "${v.ado}" on the pull request — FlowLever does not cast it` },
+    h('div', { class: 'approval-head' },
+      h('span', { class: 'approval-dot' }),
+      h('span', { class: 'approval-label' }, v.label)),
+    h('div', { class: 'approval-why' }, a.reason));
+}
+
+/* ============================== PR quick link + summary ============================== */
+
+/* The PR this workspace is about, as a linkable source. */
+function prSource(feature) {
+  return (((feature || {}).sources || {}).ado || [])
+    .find((it) => it && adoRole(it) === 'pr' && safeHref(it.url)) || null;
+}
+
+/* The diagonal arrow beside the workspace title: open the PR in Azure DevOps, in a new tab. */
+function prQuickLink(feature) {
+  const pr = prSource(feature);
+  if (!pr) return null;
+  const label = `Open PR${pr.id != null ? ` #${pr.id}` : ''} in Azure DevOps (new tab)`;
+  return h('a', {
+    class: 'dh-prlink', href: safeHref(pr.url), target: '_blank', rel: 'noopener noreferrer',
+    title: label, 'aria-label': label,
+  }, iconSpan('openExternal', 'icon'));
+}
+
+/* The plain-language "what is this change about" blurb (feature.summary), written by the review
+ * skills from the PR description, the linked work item and the specs they already fetched. The app
+ * has no model, so it NEVER invents one: a workspace reviewed before this existed says so, and
+ * names the command that fills it, rather than paraphrasing its own title back at the reader. */
+function summaryPanel(feature) {
+  const text = feature && typeof feature.summary === 'string' ? feature.summary.trim() : '';
+  if (text) {
+    return h('div', { class: 'ws-summary' },
+      h('span', { class: 'ws-summary-label' }, 'What this is about'),
+      // `md-prose` strips the report view's document chrome off the rendered markdown — a bare
+      // `.md` carries a panel + border and would draw a second box inside this one.
+      h('div', { class: 'ws-summary-body' }, mdBlock(text, 'md-prose')));
+  }
+  return h('div', { class: 'ws-summary ws-summary-empty' },
+    h('span', { class: 'ws-summary-label' }, 'What this is about'),
+    h('div', { class: 'ws-summary-emptyrow' },
+      h('span', { class: 'meta-dim' },
+        'No summary yet. The sources are already registered, so this only needs a read — not a whole re-review.'),
+      summarizeButton(feature)));
+}
+
+/* Ask the runner to write the summary for a workspace that has none. The sources are already on
+ * the workspace, so this is a read of material the review skills have fetched before — which is
+ * why it is its own small job rather than a full re-review.
+ *
+ * Read-only toward Azure DevOps and Confluence, and it writes nothing to the PR: the job fetches
+ * the registered sources and fills in what the cockpit cannot derive — the summary, and while it
+ * is there the work-item types and Vertec phase that a workspace reviewed before those existed is
+ * missing. See skills/summarize. */
+function summarizeButton(feature) {
+  const wsId = feature && feature.id;
+  if (!wsId) return null;
+  if (readOnlyMode()) {
+    return h('span', { class: 'meta-dim', title: READ_ONLY_TITLE }, 'read-only');
+  }
+  const btn = h('button', {
+    class: 'btn btn-accent ws-summary-btn', type: 'button',
+    title: 'Read the workspace\'s registered sources and write the summary — no PR writes, no re-review',
+    onclick: async () => {
+      btn.disabled = true;
+      btn.textContent = 'Queueing…';
+      try {
+        await api('/api/requests', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'summarize', wsId, dedupe: true }),
+        });
+        // Same rule as Post/Apply: queueing a job nobody runs is a silent no-op, so the runner is
+        // started here rather than left for the user to remember.
+        const r = await refreshRunner();
+        // Says the runner STARTED, not that anything has been read — the job banner above the
+        // board reports the actual phases, and claiming progress the runner has not made is the
+        // habit this app is careful about everywhere else.
+        if (r && r.available && !r.running) {
+          await startRunner('watch', { silent: true });
+          toast('Summary queued — a runner is starting on it', 'success');
+        } else if (r && r.running) {
+          toast('Summary queued — the running session will pick it up', 'success');
+        } else {
+          toast('Summary queued — run /flowlever:watch in Claude Code to execute it', 'success');
+        }
+        // A pressed button must not read "Queueing…" for ever. It stays disabled because a second
+        // press would only dedupe onto the same request; the job banner takes over from here, and
+        // the panel is rebuilt (with a fresh, enabled button) the moment the job errors or ends.
+        btn.textContent = 'Queued';
+        ensureFeatureJobPolling(current.id);
+        pollRequestsNow();
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Generate summary';
+        toast(`Could not queue the summary: ${e.message}`);
+      }
+    },
+  }, 'Generate summary');
+  return btn;
 }
 
 /* ============================== diff engine + renderer ============================== */

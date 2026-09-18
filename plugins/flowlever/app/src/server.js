@@ -237,11 +237,18 @@ function handleHome(res) {
 
 function handleFeatureDetail(res, id) {
   const feature = ledger.getFeature(id);
+  const led = ledger.loadLedger(id);
+  const rounds = ledger.loadRounds(id);
+  const list = (rounds && rounds.rounds) || [];
+  const lastRoundAt = list.length ? list[list.length - 1].at : null;
   sendJson(res, 200, {
     feature,
-    ledger: ledger.loadLedger(id),
-    rounds: ledger.loadRounds(id),
+    ledger: led,
+    rounds,
     readiness: ledger.readiness(id),
+    // Same derived recommendation the list rows carry, so the detail header and the row it was
+    // opened from can never disagree about which vote the review has earned.
+    approval: ledger.approvalSignal(feature, led.findings || [], lastRoundAt),
   });
 }
 

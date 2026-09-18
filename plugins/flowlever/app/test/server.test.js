@@ -2123,17 +2123,19 @@ test('U5: the section poll asks the binding predicate instead of restating it', 
   // Behaviour preserved exactly, which is the whole requirement: this is a RELEVANCE filter, not
   // the binding rule. Same-kind jobs reach the grid whether or not they bind a workspace — that is
   // what lets an in-flight review with no workspace yet draw its pending placeholder — and the
-  // predicate guards only the `apply` arm, where the old copy sat.
-  // The kind arm is KIND_ACTIONS now rather than `r.action === kind` (see U6), but its POSITION in
-  // the filter is the property that mattered and still does.
+  // predicate guards only the wsId-targeted arm, where the old copy sat.
+  // The kind arm is KIND_ACTIONS now rather than `r.action === kind` (see U6), and the second arm
+  // is WSID_JOB_ACTIONS rather than a hardcoded `apply` (it has to admit `summarize` too, and a
+  // third site hardcoding the list is how `summarize` shipped invisible on this very grid) — but
+  // their POSITIONS in the filter are the property that mattered and still do.
   const kindArm = poll.indexOf('actsOnKind(r, kind)');
-  const applyArm = poll.indexOf("r.action === 'apply'");
+  const wsidArm = poll.indexOf('WSID_JOB_ACTIONS.includes(r.action)');
   const asked = poll.indexOf('jobBindsTo(');
   assert.ok(kindArm > -1, 'every job of this section\'s own kind must still be relevant to it');
-  assert.ok(applyArm > -1 && asked > applyArm,
-    'and the predicate must guard the apply arm — asking it of the kind arm would drop the '
+  assert.ok(wsidArm > -1 && asked > wsidArm,
+    'and the predicate must guard the wsId-targeted arm — asking it of the kind arm would drop the '
     + 'workspace-less reviews that placeholders are made of');
-  assert.ok(kindArm < applyArm, 'with the unconditional kind arm first, as it was');
+  assert.ok(kindArm < wsidArm, 'with the unconditional kind arm first, as it was');
 
   // The filter must be computed before the grid is drawn from it, or it decides nothing.
   const relAt = poll.indexOf('const rel =');
@@ -2646,6 +2648,18 @@ test('U6: a section sees exactly the jobs that act on its own workspaces', () =>
     assert.equal(actsOnKind({ action: 'apply' }, kind), false,
       'apply must not be admitted by the kind arm — jobBindsTo is its only way in');
     assert.equal(actsOnKind({ action: 'poll' }, kind), false);
+    assert.equal(actsOnKind({ action: 'summarize' }, kind), false,
+      'nor summarize — it names one workspace, exactly like apply');
+  }
+  // …and the wsId arm really does admit it, on every kind. Without this, calling it "shared" would
+  // just be a way of excusing an action no section ever draws.
+  {
+    const { jobBindsTo } = liftUi(readUi(), ['function prNumber(', 'function jobBindsTo(']);
+    for (const kind of ['spec', 'pr-review', 'pr-respond']) {
+      assert.equal(jobBindsTo({ id: 'j', action: 'summarize', wsId: 'ws-1' }, { id: 'ws-1', kind }), true,
+        `a summarize job must bind its own ${kind} workspace`);
+    }
+    assert.equal(jobBindsTo({ id: 'j', action: 'summarize', wsId: 'ws-1' }, { id: 'ws-2', kind: 'spec' }), false);
   }
   assert.equal(actsOnKind({ action: 'nonsense' }, 'spec'), false);
   assert.equal(actsOnKind({ action: 'audit' }, 'no-such-kind'), false,
@@ -2661,7 +2675,11 @@ test('U6: a section sees exactly the jobs that act on its own workspaces', () =>
       owners.set(a, kind);
     }
   }
-  const shared = ['apply', 'poll'];
+  // `summarize` joins apply/poll as shared: like apply it names ONE workspace by wsId and any
+  // kind can host it, so admitting it through the kind arm would claim it for one section and
+  // hide it on the others. jobBindsTo's wsId arm is its way in — asserted below, so "shared"
+  // cannot become a way of excusing an action nothing ever draws.
+  const shared = ['apply', 'poll', 'summarize'];
   for (const a of ledger.REQUEST_ACTIONS) {
     assert.ok(owners.has(a) || shared.includes(a),
       `ledger.js can enqueue "${a}" but no section claims it and it is not one of the shared `
@@ -3311,4 +3329,350 @@ test('U9: nothing the row draws is left unstyled, and nothing styled is left und
     'the section list zone is created once and found once — a rename that missed one would leave '
     + 'the poll writing into nothing, silently');
   assert.ok(!ui.includes('features-grid'), 'and no reference to the old grid may survive anywhere');
+});
+
+/* ============================================================================================
+ * V — "which link is which": source roles, the Vertec booking line, the PR quick link, the summary.
+ * The complaint these answer: every Azure DevOps source wore one checkbox icon, so opening the user
+ * story meant reading a truncated title and clicking the PR by mistake.
+ * ========================================================================================== */
+
+/* The real shape of a pr-review workspace's sources, as `/flowlever:pr-review` registers them:
+ * the PR first (it is what the review is of), then the story, then the epic above it. */
+function prWorkspaceSources() {
+  return {
+    confluence: [
+      { id: '988446724', title: 'Atrius migration — specification (index)', url: 'https://uniccom.atlassian.net/wiki/x/BIDqOg' },
+    ],
+    ado: [
+      { id: 5882, type: 'Pull Request', title: "PR #5882 — [43057] Atrius 2.3: the map reads in the visitor's language",
+        url: 'https://dev.azure.com/FZAG/dxp/_git/DXP-Website/pullrequest/5882' },
+      { id: 43057, type: 'User Story', title: "Atrius 2.3 — The map reads in the visitor's language",
+        url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057',
+        vertecPhase: 'Maps Integration // 12. Atrius 2.3 — The map looks and reads like a DXP map' },
+      { id: 43049, type: 'Feature', title: 'Epic 2 — Map parity with PointConsulting (parent of 43057)',
+        url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43049' },
+    ],
+    figma: [],
+  };
+}
+
+function liftSources(ui) {
+  const decl = fnSource(ui, 'const SOURCE_ROLES = ');
+  return {
+    // The role table is read from the source, never re-typed here: a test carrying its own copy
+    // would keep passing while the strip rendered something else.
+    // eslint-disable-next-line no-new-func
+    SOURCE_ROLES: new Function(`${decl};\nreturn SOURCE_ROLES;`)(),
+    ...liftUi(ui, [decl, 'function isPrUrl(', 'function adoRole(', 'function trimIdPrefix(', 'function sourceEntries(']),
+  };
+}
+
+test('V1: every source names what it IS, and the two you reach for come first', () => {
+  const ui = readUi();
+  const { adoRole, sourceEntries, trimIdPrefix } = liftSources(ui);
+
+  // The mapping that carries the whole feature: the work-item type decides the role.
+  assert.equal(adoRole({ type: 'Pull Request' }), 'pr');
+  assert.equal(adoRole({ type: 'User Story' }), 'story');
+  assert.equal(adoRole({ type: 'Product Backlog Item' }), 'story', 'the Agile and Scrum templates name the same thing differently');
+  assert.equal(adoRole({ type: 'Bug' }), 'bug');
+  assert.equal(adoRole({ type: 'Feature' }), 'feature');
+  assert.equal(adoRole({ type: 'Epic' }), 'epic');
+  assert.equal(adoRole({ type: 'user story' }), 'story', 'the type is compared case-insensitively');
+  // An ADO instance can carry types we do not map; it must still get a role rather than throw.
+  assert.equal(adoRole({ type: 'Impediment' }), 'item');
+
+  // The fallback that makes this work on the workspaces the user already has: everything reviewed
+  // before `--itemType` was passed carries NO type at all, and those are exactly the PRs on screen
+  // today. A /pullrequest/<id> url is unambiguous.
+  assert.equal(adoRole({ url: 'https://dev.azure.com/FZAG/dxp/_git/DXP-Website/pullrequest/5882' }), 'pr',
+    'an untyped source at a pull-request url is a PR');
+  assert.equal(adoRole({ url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057' }), 'item',
+    'but an untyped work item is never guessed into a story');
+  assert.equal(adoRole({}), 'item');
+
+  const entries = sourceEntries({ sources: prWorkspaceSources() });
+  assert.deepEqual(entries.map((e) => e.role), ['pr', 'story', 'feature', 'spec'],
+    'the PR and its story sort first — they are what the reviewer reaches for');
+  assert.deepEqual(entries.map((e) => e.label), ['PR', 'Story', 'Feature', 'Spec']);
+  assert.deepEqual(entries.map((e) => e.idText), ['#5882', '#43057', '#43049', '']);
+
+  // The badge already says "PR #5882", so the title must not say it a second time and lose the
+  // width that would have shown what the PR is about.
+  assert.equal(entries[0].text, "[43057] Atrius 2.3: the map reads in the visitor's language");
+  assert.equal(entries[1].text, "Atrius 2.3 — The map reads in the visitor's language",
+    'a title that never restated its id is left exactly as it is');
+
+  // trimIdPrefix must never eat the title down to nothing, and must not match a longer number.
+  assert.equal(trimIdPrefix('#5882', 5882), '#5882', 'a title that is only its own id keeps it');
+  assert.equal(trimIdPrefix('58821 other thing', 5882), '58821 other thing', 'a prefix match must be the whole number');
+  assert.equal(trimIdPrefix(null, 5882), '');
+  // A BARE leading number is only a restatement when a separator follows. Work item #5 titled
+  // "5 Whys analysis of the outage" used to render as "Whys analysis of the outage" — the strip
+  // mangling the very title it exists to make identifiable.
+  assert.equal(trimIdPrefix('5 Whys analysis of the outage', 5), '5 Whys analysis of the outage');
+  assert.equal(trimIdPrefix('2026 roadmap alignment', 2026), '2026 roadmap alignment');
+  assert.equal(trimIdPrefix('5 — Whys analysis', 5), 'Whys analysis', 'but with a separator it IS a restatement');
+  assert.equal(trimIdPrefix('#5 Whys analysis', 5), 'Whys analysis', 'and the # form needs no separator');
+  assert.equal(trimIdPrefix('PR 5882 fixes the thing', 5882), 'fixes the thing');
+
+  // An unmapped type shows its REAL name — "Work item" would throw away what ADO told us.
+  const odd = sourceEntries({ sources: { ado: [{ id: 7, type: 'Impediment', title: 'Blocked on vendor' }] } });
+  assert.equal(odd[0].label, 'Impediment');
+
+  // Every role the mapper can return must have a row in the table the strip renders from.
+  for (const it of [{ type: 'Pull Request' }, { type: 'User Story' }, { type: 'Bug' }, { type: 'Task' },
+    { type: 'Feature' }, { type: 'Epic' }, {}]) {
+    const { SOURCE_ROLES } = liftSources(ui);
+    assert.ok(SOURCE_ROLES[adoRole(it)], `SOURCE_ROLES must describe role ${adoRole(it)}`);
+  }
+});
+
+test('V1b: nothing the sources strip draws is left unstyled', () => {
+  const ui = readUi();
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'style.css'), 'utf8');
+  const { SOURCE_ROLES } = liftSources(ui);
+  for (const role of Object.keys(SOURCE_ROLES)) {
+    assert.match(css, new RegExp(`\\.src-role-${role}(?![\\w-])`),
+      `style.css must tint .src-role-${role} — an untinted role is a chip that looks like every other`);
+    assert.ok(ui.includes(`${SOURCE_ROLES[role].icon}:`) || ['confluence', 'figma'].includes(SOURCE_ROLES[role].icon),
+      `ICONS must carry the glyph ${SOURCE_ROLES[role].icon} that role ${role} names`);
+  }
+  for (const live of ['.src-badge', '.src-id', '.src-text', '.src-out', '.vertec-row', '.vertec-label',
+    '.vertec-body', '.vertec-text', '.vertec-missing', '.vertec-phase', '.vertec-phase-label',
+    '.vertec-phase-text', '.copy-btn', '.dh-titlerow', '.dh-prlink', '.ws-summary',
+    '.ws-summary-label', '.ws-summary-body', '.ws-summary-empty']) {
+    assert.match(css, new RegExp(`\\${live}(?![\\w-])`), `style.css must style ${live}`);
+  }
+});
+
+test('V2: the Vertec line is the booking string, assembled from real fields only', () => {
+  const ui = readUi();
+  const { bookingItem, vertecBookingText, vertecPrefix, unverifiedBookingItem } = liftUi(ui, [
+    fnSource(ui, 'const VERTEC_RANK = '),
+    'function isPrUrl(', 'function adoRole(', 'function bookingItem(',
+    'function unverifiedBookingItem(', 'function vertecPrefix(', 'function vertecBookingText(',
+  ], { location: { href: 'http://localhost:4173/' } });
+
+  const feature = { sources: prWorkspaceSources() };
+  const item = bookingItem(feature);
+  assert.equal(item.id, 43057, 'a booking is made on the story, never on the PR that implements it');
+
+  // The exact string the user pastes into Vertec. Byte-for-byte, because it is pasted, not read.
+  assert.equal(vertecBookingText(item),
+    "FZAG-43057 Atrius 2.3 — The map reads in the visitor's language");
+
+  // The prefix is the Azure DevOps ORGANISATION — derived, so a new project needs no configuration.
+  assert.equal(vertecPrefix({ url: 'https://dev.azure.com/DXN/web/_workitems/edit/42507' }), 'DXN');
+  assert.equal(vertecPrefix({ url: 'https://fzag.visualstudio.com/dxp/_workitems/edit/1' }), 'FZAG',
+    'the pre-dev.azure.com host form still resolves');
+  assert.equal(vertecPrefix({ url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/1', vertecKey: 'fzag-web' }),
+    'FZAG-WEB', 'an explicit key wins over the derived org');
+
+  // The refusals. A booking line with a guessed prefix would be pasted into a real booking, so a
+  // missing org produces NO line rather than a plausible one.
+  assert.equal(vertecPrefix({ url: 'https://example.com/whatever' }), null);
+  assert.equal(vertecPrefix({}), null);
+  assert.equal(vertecBookingText({ id: 43057, title: 'x', url: 'https://example.com/x' }), null);
+  assert.equal(vertecBookingText({ title: 'x', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/1' }), null,
+    'no id, no booking key');
+  assert.equal(vertecBookingText(null), null);
+
+  // A PR-only workspace has nothing bookable — the row must not fall back to the PR.
+  assert.equal(bookingItem({ sources: { ado: [prWorkspaceSources().ado[0]] } }), null);
+  assert.equal(bookingItem({}), null);
+
+  // A bug is booked on the bug; a feature only when there is no story/bug/task above it.
+  const bugFirst = { sources: { ado: [
+    { id: 1, type: 'Feature', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/1' },
+    { id: 2, type: 'Bug', url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/2' },
+  ] } };
+  assert.equal(bookingItem(bugFirst).id, 2, 'the feature is a last resort, not the first ado source');
+});
+
+test('V2b: an UNTYPED work item is never bookable — the regression that put a made-up booking on the clipboard', () => {
+  const ui = readUi();
+  const { bookingItem, unverifiedBookingItem, vertecBookingText } = liftUi(ui, [
+    fnSource(ui, 'const VERTEC_RANK = '),
+    'function isPrUrl(', 'function adoRole(', 'function bookingItem(',
+    'function unverifiedBookingItem(', 'function vertecPrefix(', 'function vertecBookingText(',
+  ], { location: { href: 'http://localhost:4173/' } });
+
+  // The real shape of a workspace audited before `--itemType` existed — 36 of the user's 55
+  // bookable workspaces looked exactly like this. Neither item carries a type, and the titles are
+  // the audit skill's annotations, NOT the work items' own System.Title.
+  const legacy = { sources: { ado: [
+    { id: 42702, title: 'FOAN02 - Analytics Flight Overview (the date/time-filter surface)',
+      url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/42702' },
+    { id: 42640, title: 'Flight Overview Page (parent Feature)',
+      url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/42640' },
+  ] } };
+
+  // The bug: `item` ranked 3 — ahead of feature (4) and epic (5) — so an untyped source was
+  // bookable AND outranked the roles the ranking was written to demote. The ranking collapsed to
+  // "whichever was registered first", and the copy button offered
+  // `FZAG-42702 FOAN02 - Analytics Flight Overview (the date/time-filter surface)` — a paraphrase,
+  // on an item nobody confirmed was the story — with the same confidence as a verified line.
+  assert.equal(bookingItem(legacy), null,
+    'an untyped work item must not be bookable: neither which item nor the title can be confirmed');
+  // …but the row can still explain itself, so "missing" does not read as "broken".
+  assert.equal(unverifiedBookingItem(legacy).id, 42702);
+  assert.equal(unverifiedBookingItem({ sources: { ado: [{ id: 1, type: 'User Story' }] } }), null,
+    'and a typed workspace has nothing to explain');
+
+  // The guard must not cost the verified path: one typed item among untyped ones still books.
+  const mixed = { sources: { ado: [
+    legacy.sources.ado[0],
+    { id: 43057, type: 'User Story', title: 'The real System.Title',
+      url: 'https://dev.azure.com/FZAG/dxp/_workitems/edit/43057' },
+  ] } };
+  assert.equal(bookingItem(mixed).id, 43057);
+  assert.equal(vertecBookingText(bookingItem(mixed)), 'FZAG-43057 The real System.Title');
+
+  // `item` must stay out of the rank table — this is the assertion that fails if someone
+  // "helpfully" re-adds the fallback.
+  const rank = new Function(`${fnSource(ui, 'const VERTEC_RANK = ')};\nreturn VERTEC_RANK;`)();
+  assert.equal(rank.item, undefined, 'VERTEC_RANK must not make the untyped fallback role bookable');
+});
+
+test('V2c: "not bookable" and "type never recorded" are different sentences', () => {
+  const ui = readUi();
+  const { unbookableReason, unverifiedBookingItem } = liftUi(ui, [
+    'function isPrUrl(', 'function adoRole(', 'function unverifiedBookingItem(',
+    'function unbookableReason(',
+  ]);
+
+  // `adoRole` returns 'item' for BOTH "no type on file" and "a type we don't book against". Telling
+  // an Impediment that its type "was never recorded — the next review round records it" is false
+  // (the badge beside it reads IMPEDIMENT) and is a dead end: re-recording changes nothing.
+  const untyped = unbookableReason({ id: 42702 });
+  assert.match(untyped, /never recorded/);
+  assert.match(untyped, /next review round/, 'the untyped case has an action, so it names it');
+
+  const impediment = unbookableReason({ id: 66001, type: 'Impediment' });
+  assert.match(impediment, /#66001 with type "Impediment"/);
+  // No article before a type that comes from the ADO instance — "a Impediment" is the failure case
+  // of any article this code could pick.
+  assert.ok(!/\b(a|an) Impediment\b/.test(impediment));
+  assert.ok(!/never recorded/.test(impediment),
+    'a recorded type must not be told it was never recorded');
+  assert.ok(!/next review round/.test(impediment),
+    'nor pointed at a re-review that would change nothing');
+  assert.match(impediment, /story or bug/, 'it names what the user can actually do instead');
+
+  // Of several unbookable candidates, prefer the one that at least carries a phase.
+  const withPhase = unverifiedBookingItem({ sources: { ado: [
+    { id: 1, title: 'first' },
+    { id: 2, title: 'second', vertecPhase: 'Maps Integration' },
+  ] } });
+  assert.equal(withPhase.id, 2);
+});
+
+test('V2d: the Vertec row explains itself instead of vanishing — every combination', () => {
+  const ui = readUi();
+  // vertecRow builds DOM, so it is checked through its own source rather than run: the one thing
+  // that must hold is that the ONLY early return is "no work item at all".
+  const body = fnBody(ui, 'function vertecRow(');
+  const returns = body.match(/return null;/g) || [];
+  assert.equal(returns.length, 1,
+    'vertecRow may bail exactly once — on a workspace with no bookable-or-explainable work item. '
+    + 'A second bail is how a typed item with an underivable org and no phase used to vanish '
+    + 'silently, which the row\'s own comment says must never happen');
+  assert.match(body, /if \(!subject\) return null;/);
+  // And the copy button is built only alongside real booking text — never for an explanation.
+  assert.match(body, /text \? copyButton\(/);
+});
+
+test('V3: the PR quick link points at the PR, and only ever at the PR', () => {
+  const ui = readUi();
+  const { prSource } = liftUi(ui, [
+    'function safeHref(', 'function isPrUrl(', 'function adoRole(', 'function prSource(',
+  ]);
+
+  assert.equal(prSource({ sources: prWorkspaceSources() }).id, 5882);
+  // A spec workspace has no PR: the arrow must be absent, not pointed at the story.
+  assert.equal(prSource({ sources: { ado: [prWorkspaceSources().ado[1]] } }), null);
+  assert.equal(prSource({}), null);
+  // A PR recorded without a usable url cannot be opened, so it does not get an arrow that 404s.
+  assert.equal(prSource({ sources: { ado: [{ id: 5882, type: 'Pull Request', url: 'javascript:alert(1)' }] } }), null,
+    'and the href goes through safeHref, so a non-http scheme never reaches an anchor');
+});
+
+test('V5: the chip states a vote, it does not cast one — and the summarize job is drawn everywhere', () => {
+  const ui = readUi();
+
+  // FlowLever never votes: the user said "I will be the one that approves. I will do that on the
+  // PR." A control that looked pressable and changed nothing over there would be worse than no
+  // indicator at all, so the chip is a div — and that is a design claim, which means it is tested.
+  const chip = fnSource(ui, 'function approvalChip(');
+  assert.ok(!/h\('button'/.test(chip) && !/onclick/.test(chip),
+    'approvalChip must not render a button or bind a click — the vote is cast on the PR, not here');
+  assert.match(chip, /if \(!a \|\| !a\.vote\) return null;/,
+    'and a null vote draws nothing at all: a greyed-out vote reads as a broken control');
+
+  // A queue action that names one workspace must be in ONE list, not hardcoded per site. It was
+  // hardcoded at three, which is how `summarize` shipped invisible on the section grid, labelled
+  // "Re-reviewing" on Home, and unnoticed by the detail page when it finished.
+  // fnSource() brace-matches, so it is the wrong tool for an ARRAY literal — it would run off to
+  // the next `{` in the file. Read these as arrays.
+  const arrayLiteral = (name) => {
+    const m = ui.match(new RegExp(`^const ${name} = (\\[[\\s\\S]*?\\]);$`, 'm'));
+    assert.ok(m, `${name} must be one array literal at module scope`);
+    // eslint-disable-next-line no-new-func
+    return new Function(`return ${m[1]};`)();
+  };
+  const wsidList = arrayLiteral('WSID_JOB_ACTIONS');
+  assert.deepEqual(wsidList, ['apply', 'summarize']);
+  for (const [fn, why] of [
+    ['function startSectionRequestsPoll(', 'the section grid folds the job onto its row'],
+    ['function ensureFeatureJobPolling(', 'the detail page reloads when the summary lands'],
+  ]) {
+    assert.match(codeOnly(fnBody(ui, fn)), /WSID_JOB_ACTIONS|DETAIL_JOB_ACTIONS/,
+      `${fn} must read the shared list, not its own copy — ${why}`);
+  }
+
+  // Every action the server can enqueue needs a human-readable verb and a band, or a live job row
+  // wears the raw action string and lands under someone else's label.
+  const labels = new Function(`${ui.match(/^const REQ_ACTION_LABEL = .*$/m)[0]};\nreturn REQ_ACTION_LABEL;`)();
+  for (const a of ledger.REQUEST_ACTIONS) {
+    assert.ok(labels[a], `REQ_ACTION_LABEL must name "${a}" — a job row otherwise prints the action id`);
+  }
+  assert.match(codeOnly(fnBody(ui, 'function categoryOf(')), /summarize/,
+    'categoryOf must claim summarize, or it falls through to the "Re-reviewing" default');
+  const states = arrayLiteral('WS_STATES');
+  const summarizing = states.find((st) => st.key === 'job-summarizing');
+  assert.ok(summarizing && summarizing.band === 'in-progress', 'and its band must be in-progress');
+
+  // Its banner must not borrow the write-job wording — "Posting…" on a job that posts nothing.
+  const banner = fnSource(ui, 'function summarizeJobBanner(');
+  assert.ok(!/Posting|Applying|review queue/.test(banner),
+    'the summarize banner must not claim a post, an apply, or items to put back — it has none');
+  assert.match(codeOnly(fnBody(ui, 'function specJobBanner(')), /summarizeJobBanner\(j\)/,
+    'and specJobBanner must hand off to it before the write-job branches');
+});
+
+test('V4: the summary is written, never invented', () => {
+  const ui = readUi();
+  const body = fnBody(ui, 'function summaryPanel(');
+  // The app has no model. The ONLY text it may draw is feature.summary — a panel that fell back to
+  // the title or to the findings would be paraphrasing the thing the user already cannot parse.
+  assert.match(body, /feature\.summary/);
+  assert.ok(!/feature\.title/.test(body),
+    'summaryPanel must never fall back to the workspace title — that is the text it exists to explain');
+  // And an empty one offers the one thing that CAN fill it: a job the runner executes.
+  assert.match(body, /summarizeButton\(/, 'the empty state must offer a way to fill it in');
+
+  const btn = fnSource(ui, 'function summarizeButton(');
+  assert.match(btn, /action: 'summarize'/);
+  assert.match(btn, /wsId/, 'the job names the workspace it is for');
+  assert.match(btn, /dedupe: true/,
+    'a double-click must not stack two summarize passes over the same sources');
+  assert.match(btn, /readOnlyMode\(\)/,
+    'read-only mode must not offer a button the server would refuse');
+  // Queueing a job nobody runs is a silent no-op — the same rule Post/Apply follow.
+  assert.match(btn, /startRunner\(/);
+  // `summarize` must be a real server action, not a string only the browser believes in.
+  assert.ok(ledger.REQUEST_ACTIONS.includes('summarize'),
+    'the button enqueues an action the ledger can actually store');
 });

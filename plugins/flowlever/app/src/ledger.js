@@ -53,7 +53,11 @@ const TARGET_SYSTEMS = ['ado', 'confluence'];
 //                            instead of waiting for the scheduled /flowlever:poll — find new
 //                            PRs and re-check known ones for counterpart updates. Optional
 //                            `kind` narrows it to one section (pr-review / pr-respond)
-const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose', 'poll'];
+const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose', 'poll', 'summarize'];
+// Actions that are meaningless without a target workspace. Enqueuing one without a `wsId`
+// creates a row the runner can never dispatch and nothing ever cleans up — it just sits in the
+// queue looking like work. (`audit` is absent on purpose: it takes EITHER a wsId or URLs.)
+const WSID_REQUIRED_ACTIONS = ['apply', 're-audit', 'propose', 'summarize'];
 const REQUEST_STATUSES = ['queued', 'running', 'done', 'error'];
 // Workspace kinds a `poll` request may be narrowed to (null = both).
 const REQUEST_KINDS = ['pr-review', 'pr-respond'];
@@ -460,6 +464,10 @@ function normalizeFeature(feature, idFromPath = null) {
     : null;
   if (!Array.isArray(feature.specSections)) feature.specSections = [];
   if (!Array.isArray(feature.coverage)) feature.coverage = [];
+  // Absent, blank or the wrong type all collapse to null — "nobody has written one". The cockpit
+  // draws the summary block only for a non-empty string, so a workspace written before this field
+  // existed simply doesn't show one rather than rendering `undefined` or an empty panel.
+  feature.summary = typeof feature.summary === 'string' && feature.summary.trim() ? feature.summary : null;
   return feature;
 }
 
@@ -528,6 +536,20 @@ function setFeatureStatus(featureId, status) {
     throw euser(`invalid feature status "${status}": must be one of ${FEATURE_STATUSES.join(', ')}`);
   }
   return mutateFeature(featureId, (feature) => { feature.status = status; });
+}
+
+// The plain-language "what is this change actually about" blurb shown at the top of a workspace.
+// The app carries no model of its own, so this is written by the review skills — which have just
+// read the PR description, the linked work item and the specs — and by nothing else. An empty
+// summary therefore means NOBODY HAS WRITTEN ONE YET, never "this workspace has nothing to say":
+// the cockpit says exactly that rather than inventing a sentence from the title.
+// `null`/`''` clears it, so a wrong summary can be withdrawn without deleting the workspace.
+function setFeatureSummary(featureId, summary) {
+  if (summary !== null && summary !== undefined && typeof summary !== 'string') {
+    throw euser('summary must be a string (or null to clear it)');
+  }
+  const text = typeof summary === 'string' ? summary.trim() : '';
+  return mutateFeature(featureId, (feature) => { feature.summary = text || null; });
 }
 
 // The PR-review "waiting on author" tracker (pr-review / pr-respond). After posting, a
@@ -636,12 +658,73 @@ const WORKSPACE_STATES = [
   { state: 'needs-review', band: 'needs-you', label: 'Needs review' },
   { state: 'needs-rereview', band: 'needs-you', label: 'Needs re-review' },
   { state: 'author-responded', band: 'needs-you', label: 'Author responded' },
+  // Last within `needs-you`: the work is finished and what is left is one press on the PR, so it
+  // sorts under the reviews still needing a read-through. Bands are CONTIGUOUS runs in this array
+  // — a state placed outside its band's run is drawn under one header and sorted as if it sat
+  // under another, which is the exact failure the one-table rule exists to prevent.
+  { state: 'needs-approval', band: 'needs-you', label: 'Ready to approve' },
   { state: 'posting', band: 'in-progress', label: 'Posting' },
   { state: 'awaiting-author', band: 'waiting', label: 'Awaiting author' },
   { state: 'awaiting-reaudit', band: 'waiting', label: 'Awaiting re-audit' },
   { state: 'settled', band: 'waiting', label: 'Settled' },
   { state: 'done', band: 'done', label: 'Done' },
 ];
+
+// ---------- the PR approval signal ----------
+//
+// FlowLever never casts a vote — the reviewer does that on the PR. All this computes is the
+// RECOMMENDATION, so that "the review is finished and nobody told you" stops being a state you
+// have to notice for yourself. It is derived from the ledger alone: no ADO read, no ADO write.
+//
+// `major` sits with `blocker` on the reviewer's own rule, not on Azure DevOps': an approve says
+// "my feedback was handled", and a major finding is feedback. Only minor/info can ride along under
+// "Approved with suggestions".
+const APPROVAL_BLOCKING_SEVERITIES = ['blocker', 'major'];
+// The dimension the review skills raise a question under — `/flowlever:pr-review` maps `ambiguity`
+// onto the `question` conventional-comment label. An unanswered question is never an approve,
+// whatever severity it was filed at: the author has not replied to it yet.
+const QUESTION_DIMENSION = 'ambiguity';
+const APPROVAL_VOTES = ['approve', 'approve-with-suggestions', 'wait-for-author'];
+
+// What is still OUT on the PR, split by what it costs the vote. Only posted-and-still-open
+// findings count: a finding waived or resolved has been handled (fixed, pushed back, or accepted),
+// and one that never went out was never the author's to answer.
+function outstandingByWeight(findings) {
+  const out = (Array.isArray(findings) ? findings : []).filter((f) => f && isPosted(f));
+  // An unrecognised or missing severity counts as BLOCKING. Ingest validates severity, so this
+  // only reaches a hand-edited or legacy ledger — but the safe default for a vote is to withhold
+  // it, not to quietly file the unknown thing under "suggestion" and recommend an approve.
+  const isBlocking = (f) => !SEVERITIES.includes(f.severity) || APPROVAL_BLOCKING_SEVERITIES.includes(f.severity);
+  const isQuestion = (f) => f.dimension === QUESTION_DIMENSION;
+  return {
+    blocking: out.filter(isBlocking).length,
+    // A question already counted as blocking is not counted twice — the buckets partition `out`.
+    questions: out.filter((f) => !isBlocking(f) && isQuestion(f)).length,
+    suggestions: out.filter((f) => !isBlocking(f) && !isQuestion(f)).length,
+  };
+}
+
+// The vote those buckets imply. Kept separate from `approvalSignal` so `workspaceState` can ask
+// for it WITHOUT calling back into itself.
+function voteFor(o) {
+  if (o.blocking || o.questions) return 'wait-for-author';
+  if (o.suggestions) return 'approve-with-suggestions';
+  return 'approve';
+}
+
+// Has the PR moved since our last round? Either the runner flagged a response, or the recorded
+// activity is newer than the round.
+//
+// This is a FACT about the workspace, not a workspace *state*, and the difference is the whole of
+// bug B1: `workspaceState` only ever reaches its `author-responded` rule from inside the
+// "something is still posted" branch, so a review whose findings were all resolved — the clean
+// review, the finished one — walked straight past it. Reading the state string therefore answered
+// "did the PR move?" with "no" for exactly the workspaces where the question matters most, and the
+// signal recommended Approve on code the author had pushed to since anybody read it. Ask the facts.
+function prMovedSinceRound(feature, lastRoundAt) {
+  return Boolean(feature && feature.review && feature.review.authorRespondedAt)
+    || reviewStamps(feature, lastRoundAt).newSinceReview;
+}
 
 // Is this finding still LIVE work on the reviewer's side? Open/reworking and not already out of
 // their hands — nothing posted to the PR, nothing written back to the spec, no runner mid-write.
@@ -698,9 +781,19 @@ function workspaceState(feature, findings, lastRoundAt = null) {
   if (list.some(isPosted)) {
     // Either the runner explicitly flagged a response, or the recorded PR activity is newer than
     // our last round. Both mean the same thing: there is a delta on the PR to reconcile.
-    const responded = Boolean(feature && feature.review && feature.review.authorRespondedAt)
-      || reviewStamps(feature, lastRoundAt).newSinceReview;
-    return responded ? 'author-responded' : 'awaiting-author';
+    if (prMovedSinceRound(feature, lastRoundAt)) return 'author-responded';
+    // Comments are out, but if NONE of them blocks — only suggestions, no unanswered questions —
+    // the reviewer is not actually waiting on anybody: they can approve-with-suggestions now. That
+    // is a `needs-you` move, and filing it under "waiting on others" is exactly how it gets
+    // forgotten. Anything blocking stays `awaiting-author`, which is the truth.
+    // `lastRoundAt` is required for the same reason it is below: the row would otherwise say
+    // "Ready to approve" on a workspace whose chip declines to name a vote, and a row and a chip
+    // that disagree are worse than either alone.
+    if (isPrReviewKind(feature) && lastRoundAt
+        && voteFor(outstandingByWeight(list)) === 'approve-with-suggestions') {
+      return 'needs-approval';
+    }
+    return 'awaiting-author';
   }
   if (list.some(isApplied)) return 'awaiting-reaudit';
 
@@ -714,8 +807,74 @@ function workspaceState(feature, findings, lastRoundAt = null) {
   if (list.some(isLiveFinding)) return everPosted(feature, list) ? 'needs-rereview' : 'needs-review';
 
   // Nothing open, nothing out, not marked done: the work is finished but the workspace has not
-  // been closed. It is a real resting place, not an error — hence a name of its own.
+  // been closed. On a PR review that has ACTUALLY had a round, that is not a resting place at all
+  // — it is the moment the PR can be approved, and the moment the reviewer forgets to. It only
+  // counts once a round has run: recommending an approve on a workspace nobody has reviewed would
+  // be the worst thing this feature could do.
+  // …and only while the PR has not moved since. A review whose findings were all resolved is the
+  // likeliest workspace to reach here, and if the author has pushed since, whether the fixes are
+  // real is the open question — not something to badge "Ready to approve". Such a workspace stays
+  // `settled`, exactly as it did before this state existed.
+  if (isPrReviewKind(feature) && lastRoundAt && !prMovedSinceRound(feature, lastRoundAt)) {
+    return 'needs-approval';
+  }
+  // Otherwise a real resting place, not an error — hence a name of its own.
   return 'settled';
+}
+
+function isPrReviewKind(feature) { return ((feature && feature.kind) || 'spec') === 'pr-review'; }
+
+// The recommendation the cockpit shows: which vote this review has earned, and why — in the
+// reviewer's own terms, so the chip can be read without opening the findings.
+//
+// FlowLever does not cast it. The reviewer votes on the PR; this only removes "notice that you
+// are done" from the list of things they have to remember. `vote` is null whenever the honest
+// answer is "not yet" — and the `reason` then says what is missing, because a silent null reads
+// as a bug.
+function approvalSignal(feature, findings, lastRoundAt = null) {
+  const list = Array.isArray(findings) ? findings : [];
+  const outstanding = outstandingByWeight(list);
+  const none = (reason) => ({ vote: null, reason, outstanding });
+
+  // Only a pr-review carries a vote of yours: a spec has no PR, and on a pr-respond YOU are the
+  // author — the vote there is somebody else's to cast.
+  if (!isPrReviewKind(feature)) return none('not a PR review');
+  // No round has run, so nothing has been read. A workspace can sit here with zero findings and
+  // look exactly like a clean review; it is not one.
+  if (!lastRoundAt) return none('no review round has run yet');
+
+  // Gated on FACTS, not on the state string. A denylist of states was how B1 shipped: a state this
+  // list forgot — or one `workspaceState` could not reach, which is what happened — falls through
+  // to a vote, and the failure direction is "recommend Approve", the worst output this has. Each
+  // test below asks the ledger directly, so there is nothing to forget.
+  if (list.some(isPending)) return none('a post is still in flight');
+  // Anything open that has not gone out yet: the review is not finished, whatever else is true.
+  if (list.some(isLiveFinding)) return none('the review is not finished');
+  // The PR moved after our last round, so whether the feedback was handled is precisely what we
+  // do not know. Approving here would be signing off on code nobody re-read. This must be asked
+  // even when NOTHING is still outstanding — a clean review of a PR that has since been pushed to
+  // is the single most inviting way to get a false Approve.
+  if (prMovedSinceRound(feature, lastRoundAt)) {
+    return none('the PR changed after your last round — re-review first');
+  }
+
+  const vote = voteFor(outstanding);
+  // The words matter here, because this chip sits directly under the readiness gate, which says
+  // "nothing blocking" about a DIFFERENT set: the gate counts the reviewer's own open queue, and a
+  // posted finding deliberately leaves it (it stops being "to review" and stops dragging the
+  // score). Both are true at once — "0 open total · nothing blocking" beside "3 blocking" reads as
+  // a contradiction unless each names its own subject. So: comments, on the PR, awaiting them.
+  const n = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+  const bits = [];
+  if (outstanding.blocking) bits.push(n(outstanding.blocking, 'blocking comment'));
+  if (outstanding.questions) bits.push(n(outstanding.questions, 'unanswered question'));
+  if (outstanding.suggestions) bits.push(n(outstanding.suggestions, 'suggestion'));
+  const reason = vote === 'approve'
+    ? 'nothing outstanding — every finding was fixed, waived or answered'
+    : vote === 'wait-for-author'
+      ? `${bits.join(' · ')} still awaiting the author`
+      : `${bits.join(' · ')} posted — nothing blocking`;
+  return { vote, reason, outstanding };
 }
 
 // Register a source on a workspace. Idempotent by the type's key field: re-adding the same
@@ -731,6 +890,29 @@ function addSource(featureId, { type, ...fields }) {
   if (type === 'ado' && 'itemType' in entry) {
     entry.type = entry.itemType;
     delete entry.itemType;
+  }
+  // The work item's Vertec booking phase (ADO's `Custom.Vertec` field, under Administration) and
+  // an explicit booking-key override. Trimmed to null when blank so "recorded as empty" and "never
+  // recorded" are the same thing to the cockpit — it labels a missing phase rather than drawing a
+  // blank one, and a re-added source with a blank flag must not wipe a phase already on file.
+  // A blank value is DROPPED, never stored. `title` and `url` are here for the same reason the
+  // vertec fields are, and they earned it late: /flowlever:summarize re-registers every ado source
+  // on a workspace passing `--title "<System.Title>"`, so an unset shell variable would blank the
+  // real titles across 36 workspaces — silently destroying exactly the data that step exists to
+  // repair. Clearing stays possible, but only by passing an explicit null.
+  for (const k of ['vertecPhase', 'vertecKey', 'title', 'url']) {
+    if (!(k in entry)) continue;
+    if (entry[k] === null) continue;                       // explicit clear
+    if (typeof entry[k] !== 'string') throw euser(`${k} must be a string`);
+    const v = entry[k].trim();
+    if (v) entry[k] = v;
+    else delete entry[k];
+  }
+  // The key becomes the `FZAG-` half of a string pasted into a booking, so it has to LOOK like a
+  // key. Without this, `--vertecKey "foo bar"` yields the booking line "FOO BAR-43057 …", which is
+  // wrong in a way nothing downstream can detect.
+  if (typeof entry.vertecKey === 'string' && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.vertecKey)) {
+    throw euser(`vertecKey "${entry.vertecKey}" is not a booking key: letters, digits, . _ - only`);
   }
   const keyField = type === 'figma' ? 'fileKey' : 'id';
   if (entry[keyField] === undefined || entry[keyField] === null || entry[keyField] === '') {
@@ -1912,7 +2094,7 @@ function addRequest({ action, prId, wsId, title, instructions, kind } = {}) {
   if ((action === 'pr-review' || action === 'pr-respond') && (prId === undefined || prId === null || String(prId).trim() === '')) {
     throw euser(`${action} requires "prId"`);
   }
-  if ((action === 'apply' || action === 're-audit' || action === 'propose') && (wsId === undefined || wsId === null || String(wsId).trim() === '')) {
+  if (WSID_REQUIRED_ACTIONS.includes(action) && (wsId === undefined || wsId === null || String(wsId).trim() === '')) {
     throw euser(`${action} requires "wsId"`);
   }
   // `audit` is either a NEW analysis (needs `instructions` = the spec/work-item/Figma URLs) or a
@@ -2117,9 +2299,15 @@ module.exports = {
   threadCollisions,
   unreconciledAgainstThreads,
   setFeatureStatus,
+  setFeatureSummary,
   setFeatureReview,
   reviewStamps,
   WORKSPACE_STATES,
+  WSID_REQUIRED_ACTIONS,
+  APPROVAL_VOTES,
+  APPROVAL_BLOCKING_SEVERITIES,
+  QUESTION_DIMENSION,
+  approvalSignal,
   decisionOf,
   workspaceState,
   loadLedger,

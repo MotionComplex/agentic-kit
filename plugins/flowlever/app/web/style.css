@@ -502,11 +502,106 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
 }
 .dh-left { flex: 1; min-width: 0; }
-.dh-title { font-size: 22px; font-weight: 680; margin: 0 0 12px; letter-spacing: -0.02em; line-height: 1.28; }
+/* Title + the "open the PR" arrow on one line. The arrow sits on the first line of a wrapping
+ * heading (align-items:start), where the eye already is, rather than centred against two lines. */
+.dh-titlerow { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 12px; }
+.dh-title { font-size: 22px; font-weight: 680; margin: 0; letter-spacing: -0.02em; line-height: 1.28; min-width: 0; }
+.dh-prlink {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; margin-top: 1px; border-radius: var(--radius-sm);
+  color: var(--kind-review); background: var(--kind-review-soft);
+  border: 1px solid var(--kind-review-line); text-decoration: none;
+  transition: background var(--dur-fast) var(--ease-interactive), transform var(--dur-fast) var(--ease-interactive);
+}
+.dh-prlink:hover { background: oklch(0.78 0.13 240 / 0.26); transform: translate(1px, -1px); }
+.dh-prlink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* metadata (kind · status · id · delete) on its own row under the title, not floating
  * beside a wrapping heading */
 .dh-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .dh-meta .feature-id { font-family: var(--mono); font-size: 12px; color: var(--fg-mute); }
+
+/* ── Vertec booking line (header) ─────────────────────────────
+ * The exact string that goes into a Vertec booking, copyable in one press, with the booking
+ * phase beside it as information only — deliberately outside the copied text. */
+.vertec-row {
+  display: flex; align-items: flex-start; gap: 10px; margin-top: 12px;
+  padding: 8px 10px 8px 12px; border-radius: var(--radius-sm);
+  background: var(--panel-3); border: 1px solid var(--line);
+}
+.vertec-label {
+  flex: none; margin-top: 2px; color: var(--fg-mute); font-size: 10.5px; font-weight: 620;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.vertec-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+/* user-select:all so a manual drag grabs exactly the booking string and nothing around it */
+.vertec-text {
+  color: var(--fg); font-size: 13px; font-weight: 560; line-height: 1.4;
+  overflow-wrap: anywhere; user-select: all; -webkit-user-select: all;
+}
+.vertec-missing { color: var(--fg-mute); font-weight: 400; user-select: auto; -webkit-user-select: auto; }
+.vertec-phase { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; min-width: 0; }
+.vertec-phase-label { flex: none; color: var(--fg-mute); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; font-weight: 600; }
+.vertec-phase-text { color: var(--fg-dim); overflow-wrap: anywhere; }
+/* Top-aligned, not centred: when the body wraps to four lines on a narrow viewport a centred
+ * button floats level with the phase, detached from the line it actually copies. */
+.copy-btn { flex: none; align-self: flex-start; margin-top: 1px; color: var(--fg-mute); }
+.copy-btn:hover { color: var(--accent-text); background: var(--accent-soft); }
+.copy-btn.copied, .copy-btn.copied:hover { color: var(--add-fg); background: oklch(0.86 0.13 150 / 0.16); }
+
+/* ── "What this is about" — the workspace summary ─────────────
+ * Sits directly under the header: the question you have before any workflow control means
+ * anything. Written by the review skills; the app never invents one. */
+.ws-summary {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 18px; margin-bottom: 16px;
+  background: var(--panel); border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--accent-line); border-radius: var(--radius);
+}
+.ws-summary-label {
+  color: var(--fg-mute); font-size: 11px; font-weight: 620;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+/* Type comes from .md.md-prose (which also strips the report view's panel chrome); this only
+ * holds the colour the prose sits on. */
+.ws-summary-body { color: var(--fg-dim); }
+/* A summary that opens with `# Heading` must not draw an h1 inside a panel that already has a
+ * label — md-prose resets the report chrome but leaves the document type scale alone.
+ * The `.md` in the middle is load-bearing: `.ws-summary-body h1` ties (0,1,1) with `.md h1`, which
+ * is declared LATER in this file and therefore won. Only font-weight/border landed — enough to
+ * look styled while the 22px scale stayed. */
+.ws-summary-body .md h1, .ws-summary-body .md h2, .ws-summary-body .md h3 {
+  font-size: 13px; font-weight: 640; margin: 10px 0 4px; padding: 0; border: 0; letter-spacing: 0;
+}
+.ws-summary-body > .md > :first-child { margin-top: 0; }
+.ws-summary-empty { padding: 10px 18px; font-size: 12.5px; }
+.ws-summary-empty code { font-family: var(--mono); font-size: 11.5px; }
+.ws-summary-emptyrow { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.ws-summary-emptyrow > .meta-dim { flex: 1 1 260px; min-width: 0; }
+.ws-summary-btn { flex: none; }
+
+/* ── the approval indicator ───────────────────────────────────
+ * Which PR vote this review has earned. FlowLever never casts it, so this is deliberately NOT a
+ * button — a control that looked pressable but changed nothing on the PR would be worse than no
+ * indicator at all. Sits directly above "Mark review complete", which is the moment the vote
+ * gets forgotten. */
+.approval {
+  display: flex; flex-direction: column; gap: 3px; align-items: flex-start;
+  padding: 7px 11px; border-radius: var(--radius-sm); max-width: 260px;
+  border: 1px solid var(--line); background: var(--panel-3);
+}
+.approval-head { display: flex; align-items: center; gap: 7px; }
+.approval-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--fg-mute); }
+.approval-label { font-size: 12.5px; font-weight: 640; color: var(--fg); }
+.approval-why { font-size: 11px; color: var(--fg-mute); line-height: 1.35; }
+.approval-go      { border-color: var(--ready-line);      background: var(--ready-soft); }
+.approval-go .approval-dot      { background: var(--ready); }
+.approval-go .approval-label    { color: var(--ready); }
+.approval-go-soft { border-color: var(--inprogress-line); background: var(--inprogress-soft); }
+.approval-go-soft .approval-dot   { background: var(--inprogress); }
+.approval-go-soft .approval-label { color: var(--inprogress); }
+.approval-hold    { border-color: var(--line); background: var(--panel-3); }
+.approval-hold .approval-dot   { background: var(--fg-mute); }
+.approval-hold .approval-label { color: var(--fg-dim); }
 .dh-sub { color: var(--fg-mute); font-size: 13px; }
 .dh-right { display: flex; align-items: center; gap: 18px; flex: none; }
 .dh-gate { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
@@ -743,16 +838,43 @@ main#app { max-width: 1180px; margin: 0 auto; padding: 30px 24px 80px; }
 }
 .src-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 8px; align-items: stretch; }
 .src-label { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-mute); font-size: 12px; font-weight: 560; text-transform: uppercase; letter-spacing: .5px; }
-.src-icon { color: var(--fg-dim); display: inline-flex; flex: none; }
-/* one uniform single-line row per source: icon · title (ellipsis) · external-link arrow */
+.src-icon { display: inline-flex; flex: none; color: var(--src-tint, var(--fg-dim)); }
+/* one uniform single-line row per source:
+ * role icon · ROLE BADGE · #id · title (ellipsis) · external-link arrow.
+ * The badge and the tint carry the identity, so the role is legible before the title is read —
+ * which is the point: the title is what gets truncated, and clicking the PR when you wanted the
+ * story is the mistake this row exists to stop. */
 .src-link, .src-nolink {
   display: flex; align-items: center; gap: 8px; min-width: 0; height: 36px;
-  padding: 0 12px; border-radius: var(--radius-sm); font-size: 12px;
+  padding: 0 12px 0 10px; border-radius: var(--radius-sm); font-size: 12px;
   background: var(--panel-3); border: 1px solid var(--line); color: var(--fg-dim);
+  border-left: 3px solid var(--src-tint, var(--line));
+  transition: border-color var(--dur-fast) var(--ease-interactive), color var(--dur-fast) var(--ease-interactive);
 }
-.src-link:hover { border-color: var(--accent-line); color: var(--fg); }
+.src-link:hover { border-color: var(--accent-line); border-left-color: var(--src-tint, var(--accent-line)); color: var(--fg); }
+.src-badge {
+  flex: none; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 650;
+  text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;
+  color: var(--src-tint, var(--fg-dim));
+  background: var(--src-tint-soft, var(--panel-2));
+  border: 1px solid var(--src-tint-line, var(--line));
+}
+.src-id { flex: none; font-family: var(--mono); font-size: 11px; color: var(--fg-mute); }
 .src-out { opacity: .5; flex: none; margin-left: auto; }
 .src-text { color: var(--fg-dim); flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* One tint per role, set on the row and inherited by its icon + badge. Hues reuse the palette
+ * already in play: PR = the pr-review blue, epic/feature = the pr-respond violet, spec = the
+ * brand yellow, bug = the blocker red, story = the success green. */
+.src-role-pr      { --src-tint: var(--kind-review); --src-tint-soft: var(--kind-review-soft); --src-tint-line: var(--kind-review-line); }
+.src-role-story   { --src-tint: var(--ready); --src-tint-soft: var(--ready-soft); --src-tint-line: var(--ready-line); }
+.src-role-bug     { --src-tint: var(--blocker); --src-tint-soft: var(--blocker-soft); --src-tint-line: var(--blocker-line); }
+.src-role-task    { --src-tint: var(--minor); --src-tint-soft: var(--minor-soft); --src-tint-line: var(--minor-line); }
+.src-role-feature,
+.src-role-epic    { --src-tint: var(--kind-respond); --src-tint-soft: var(--kind-respond-soft); --src-tint-line: var(--kind-respond-line); }
+.src-role-item    { --src-tint: var(--info); --src-tint-soft: var(--info-soft); --src-tint-line: var(--line); }
+.src-role-spec    { --src-tint: var(--accent-text); --src-tint-soft: var(--accent-soft); --src-tint-line: var(--accent-line); }
+.src-role-design  { --src-tint: oklch(0.8 0.13 20); --src-tint-soft: oklch(0.8 0.13 20 / 0.14); --src-tint-line: oklch(0.8 0.13 20 / 0.42); }
 
 /* ============================== tabs ============================== */
 

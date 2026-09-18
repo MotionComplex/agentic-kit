@@ -42,6 +42,9 @@ review the whole diff as usual.
   3. Only if none exists, create one with id `pr-<id>-<short-slug>` (e.g. `pr-482-checkout-api`):
      `FLOWLEVER_DATA="${FLOWLEVER_DATA:-$HOME/.flowlever}" node "${CLAUDE_PLUGIN_ROOT}/app/src/cli.js" feature add <wsId> --title "PR #<id> — <pr title>" --kind pr-review`
 - Register sources: the PR, plus any auto-discovered ticket/spec, via `source add` (use `ado`/`confluence`).
+  **Always pass `--itemType`** on an ado source (`"Pull Request"` for the PR itself, `"User Story"` /
+  `"Bug"` / `"Feature"` for the work items) — the cockpit badges and colour-codes each source by it, and
+  an untyped work item is drawn as a generic "Work item" that the user has to read the title to identify.
 - If the request carried `instructions`, persist them onto the workspace as `feature.reviewBrief` here.
 
 > **When run from the cockpit queue (`/flowlever:watch`), emit phases as you go** so the job row shows
@@ -71,17 +74,45 @@ thread — **other reviewers' and your own from earlier rounds**. Use the same
 (omit it for a PR-level comment with no anchor). Deep link: `.../pullRequest/<prId>?discussionId=<threadId>`.
 
 **MANDATORY spec discovery — do NOT skip (this is the whole point of a *spec-aware* review):**
-1. Read the **linked work item** off the PR; fetch its Description + Acceptance Criteria.
+1. Read the **linked work item** off the PR; fetch its Description + Acceptance Criteria **and the
+   `Custom.Vertec` field** (the "Vertec" field under the work item's *Administration* section — it
+   carries the booking phase). Use `expand:"Fields"` on `wit_work_item` so custom fields come back;
+   `fields:[...]` and `expand` cannot be combined.
 2. **Scan the ticket Description/AC for every Confluence link** (`*.atlassian.net/wiki/...` incl. tiny
    `/wiki/x/<id>` links). Recurse one level into those pages for sub-spec links (contracts, matrices).
    Fetch each via `getConfluencePage`.
 3. **Register every source you used as a workspace source** so the UI's Sources strip is complete and
-   honest — the PR (`--type ado`), the ticket (`--type ado --itemType "User Story"`), and **each
-   Confluence spec** (`--type confluence --id <pageId> --title "<page title>" --url "<url>"`). A
-   code-only review with zero confluence sources is a FAILURE of this skill — if the ticket has spec
-   links, they must be fetched AND registered.
+   honest — the PR (`--type ado --itemType "Pull Request"`), the ticket (`--type ado --itemType "User
+   Story"` — or its real type: Bug / Task / Feature / Epic), and **each Confluence spec**
+   (`--type confluence --id <pageId> --title "<page title>" --url "<url>"`). A code-only review with
+   zero confluence sources is a FAILURE of this skill — if the ticket has spec links, they must be
+   fetched AND registered.
+   **Pass `--vertecPhase "<Custom.Vertec>"` on the ticket** when the field has a value, and always
+   pass `--url` (the cockpit derives the `FZAG-` booking prefix from the ADO organisation in it):
+   ```
+   ... cli.js source add <wsId> --type ado --id 43057 --itemType "User Story" \
+       --title "<work item title>" --url "https://dev.azure.com/<org>/<project>/_workitems/edit/43057" \
+       --vertecPhase "<the Custom.Vertec value, verbatim>"
+   ```
+   `--title` must be the work item's **own** `System.Title`, unedited — the cockpit builds the
+   copy-to-clipboard Vertec booking line (`FZAG-43057 <title>`) out of it, and that string is pasted
+   into a real booking. Do not prefix, summarise or "improve" it.
 4. If the ticket genuinely has no spec links, say so explicitly in the run summary (so "no specs" is a
    stated finding, never a silent omission).
+5. **Write the workspace summary.** You have just read the PR description, the work item and the
+   specs; the cockpit has no model of its own, so this is the only chance anything gets written:
+   ```
+   ... cli.js feature summary <wsId> --text "<2–4 sentences>"     # or --file <md> for longer
+   ```
+   Answer the question a reviewer has *before* reading the diff: **what is this change, and why**.
+   Lead with the change in one plain sentence (feature added / bug fixed / refactor), then the
+   mechanism, then anything that meaningfully narrows the scope (deferred parts, blocked
+   dependencies, what the ticket rescoped). Markdown is rendered — short paragraphs or a few
+   bullets. Write it from the sources; **never paraphrase the PR title back**, which is the text
+   already on screen. Re-write it on every re-review so it tracks what the PR has become.
+   **A run that finishes with `feature.summary` still null is a FAILURE of this skill** — same bar
+   as step 3's registered specs. Check it before §4: `... cli.js feature show <wsId> --json` must
+   show a non-null `summary`, and the run summary must say so.
 
 Then `requests set <reqId> --phase "reviewing changes"` and run the spec-aware review: check the PR's
 implementation against the fetched specs (contract/schema/column/AC compliance), not just code quality →
@@ -196,6 +227,14 @@ genuinely has no author activity to point at.
 The runner then marks the request `done --phase "review ready" --wsId <wsId>`.
 
 ## 4. Hand to the cockpit
+Before handing over, confirm the three things the cockpit's header reads and cannot derive itself —
+each one is a `source add` / `feature summary` you were told to make in §2, and each shows as a
+visible gap if it was skipped:
+`... cli.js feature show <wsId>` → a non-null **Summary**, every ado source carrying a `[type]`,
+and a **Vertec phase** on the ticket (unless `Custom.Vertec` is genuinely empty — then say so).
+An untyped ticket suppresses the Vertec booking line entirely, by design: the cockpit will not
+guess which work item to book or trust a title it cannot confirm.
+
 Tell the user to open **Home → PR Review → this workspace** (or `/flowlever:start`) and step through:
 each finding shows the diff + decision row (Accept · Edit · Redirect · Waive · Skip). Decisions persist.
 

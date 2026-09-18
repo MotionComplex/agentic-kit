@@ -25,10 +25,27 @@ Usage: node src/cli.js <command> [args]
                                          Mark/clear "author responded" on a posted PR review (runner).
                                          --at/--by record WHEN the counterpart last updated the PR and
                                          who — shown in the cockpit next to when we last reviewed it.
+  feature summary <id> --text "..." | --file <md> | --clear
+                                         Set the plain-language "what is this change about" blurb
+                                         shown at the top of the workspace. Written by the review
+                                         skills, which have just read the PR, ticket and specs —
+                                         the app has no model of its own, so nothing else fills it.
   source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--title "..."] [--url <url>]
+                               [--vertecPhase "..."] [--vertecKey <KEY>]
+                               [--clear-vertec-phase] [--clear-vertec-key]
   source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title "..."] [--url <url>]
                                          confluence/ado need --id; figma needs --fileKey (--nodeId
-                                         optional). --itemType (ado only) stores the work-item type.
+                                         optional). --itemType (ado only) stores the work-item type
+                                         ("User Story", "Bug", "Pull Request", …) — the cockpit
+                                         badges each source by it, so a PR is never mistaken for a
+                                         story. --vertecPhase (ado only) stores the work item's
+                                         Vertec booking phase (ADO field Custom.Vertec, under
+                                         Administration); --vertecKey overrides the booking prefix
+                                         the cockpit otherwise derives from the ADO org in --url.
+                                         A BLANK --vertecPhase/--vertecKey is dropped, never stored,
+                                         so re-registering a source can't wipe a real value by
+                                         interpolating an empty variable; --clear-vertec-phase /
+                                         --clear-vertec-key are the explicit way to remove one.
   threads set <featureId> --file threads.json | --none
                                          Record the comment threads the PR ALREADY carries (other
                                          reviewers' and your own). Required before "ingest" on a
@@ -114,7 +131,7 @@ function userError(msg) {
 
 // ---------- arg parsing (hand-rolled) ----------
 
-const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear', 'dedupe', 'yes', 'force']);
+const BOOL_FLAGS = new Set(['json', 'reopen-resolved', 'pin', 'unpin', 'no-open', 'needs-input', 'no-needs-input', 'responded', 'no-responded', 'clear', 'clear-vertec-phase', 'clear-vertec-key', 'dedupe', 'yes', 'force']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -281,11 +298,25 @@ function cmdFeatureShow({ pos, flags }) {
     ['  Open', openSummary(r.openBySeverity)],
   ]));
 
+  if (feature.summary) {
+    console.log('\nSummary:');
+    for (const line of feature.summary.split('\n')) console.log(`  ${line}`);
+  }
+
   const sources = feature.sources || {};
   const srcRows = [];
   for (const type of ['confluence', 'ado', 'figma']) {
     for (const s of sources[type] || []) {
-      srcRows.push([`  ${type}`, s.id != null ? s.id : `${s.fileKey || ''}${s.nodeId ? '#' + s.nodeId : ''}`, s.title || '', s.url || '']);
+      // The work-item type is what tells a PR apart from the story it implements, so it is
+      // printed next to the id rather than left to the title's wording.
+      srcRows.push([
+        `  ${type}`,
+        s.type ? `[${s.type}]` : '',
+        s.id != null ? s.id : `${s.fileKey || ''}${s.nodeId ? '#' + s.nodeId : ''}`,
+        s.title || '',
+        s.url || '',
+      ]);
+      if (s.vertecPhase) srcRows.push(['', '', '', `Vertec phase: ${s.vertecPhase}`, '']);
     }
   }
   console.log('\nSources:');
@@ -323,6 +354,30 @@ function cmdFeatureDelete({ pos, flags }) {
   console.log(`Deleted feature ${id}`);
 }
 
+// The workspace's plain-language summary. `--file` exists because a good summary is a short
+// paragraph or a few bullets, and a shell argument is a poor place to keep newlines.
+function cmdFeatureSummary({ pos, flags }) {
+  const featureId = need(pos[0], '<featureId>');
+  const given = ['text', 'file', 'clear'].filter((k) => flags[k] !== undefined);
+  if (given.length !== 1) {
+    throw userError('Pass exactly one of --text "...", --file <path> or --clear');
+  }
+  let summary = null;
+  if (flags.text !== undefined) summary = String(flags.text);
+  if (flags.file !== undefined) {
+    const file = path.resolve(String(flags.file));
+    try {
+      summary = fs.readFileSync(file, 'utf8');
+    } catch (err) {
+      throw userError(`Cannot read summary file '${flags.file}': ${err.message}`);
+    }
+  }
+  const feature = ledger.setFeatureSummary(featureId, summary);
+  console.log(feature.summary
+    ? `${feature.id} summary set (${feature.summary.length} chars)`
+    : `${feature.id} summary cleared`);
+}
+
 function cmdSourceAdd({ pos, flags }) {
   const featureId = need(pos[0], '<featureId>');
   const type = need(flags.type, '--type');
@@ -345,6 +400,25 @@ function cmdSourceAdd({ pos, flags }) {
     // command used to never read the flag at all, so `--itemType` was accepted and dropped.
     if (type === 'ado' && flags.itemType !== undefined) source.itemType = flags.itemType;
     label = id;
+  }
+  // The Vertec booking phase + prefix override ride on the work item, so they are ado-only, and a
+  // hard error beats silently dropping them: a skill that put the flag on the wrong source would
+  // otherwise look like it worked and show no phase. This guard sits OUTSIDE the id-keyed branch
+  // on purpose — inside it, `--type figma` never reached the check and exited 0 having stored
+  // nothing, while the help text promised "a hard error elsewhere".
+  for (const k of ['vertecPhase', 'vertecKey']) {
+    if (flags[k] === undefined) continue;
+    if (type !== 'ado') throw userError(`--${k} applies to --type ado only (got '${type}')`);
+    source[k] = flags[k];
+  }
+  // Clearing is its own explicit flag, never a blank value: `--vertecPhase "$PHASE"` with an
+  // empty PHASE is an accident and must not wipe a real phase (addSource drops blanks for that
+  // reason), but a phase emptied in ADO still needs a way off the source.
+  for (const [flag, field] of [['clear-vertec-phase', 'vertecPhase'], ['clear-vertec-key', 'vertecKey']]) {
+    if (!flags[flag]) continue;
+    if (type !== 'ado') throw userError(`--${flag} applies to --type ado only (got '${type}')`);
+    if (flags[field] !== undefined) throw userError(`--${flag} and --${field} contradict each other`);
+    source[field] = null;
   }
   if (flags.title !== undefined) source.title = flags.title;
   if (flags.url !== undefined) source.url = flags.url;
@@ -878,6 +952,7 @@ async function run(argv) {
     case 'feature show': return cmdFeatureShow(rest);
     case 'feature delete': return cmdFeatureDelete(rest);
     case 'feature activity': return cmdFeatureActivity(rest);
+    case 'feature summary': return cmdFeatureSummary(rest);
     case 'source add': return cmdSourceAdd(rest);
     case 'threads set': return cmdThreadsSet(rest);
     case 'threads list': return cmdThreadsList(rest);

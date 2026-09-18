@@ -257,10 +257,58 @@ first" list drift, and the symptom is a row drawn in one band but sorted as if i
 | | `needs-rereview` | undecided items and this workspace has posted before |
 | | `author-responded` | comments are out and the other side moved (flag or clocks) |
 | `in-progress` | `posting` | a runner is mid-write (`pending`), so every other stamp is stale |
+| | `needs-approval` | the review is finished — the PR is yours to approve (see "The approval signal") |
 | `waiting` | `awaiting-author` | comments out, no response yet |
 | | `awaiting-reaudit` | spec changes applied, waiting on a re-audit to reconcile |
 | | `settled` | nothing open, nothing out, not closed |
 | `done` | `done` | `feature.status === 'done'` — outranks everything |
+
+### The approval signal
+`ledger.approvalSignal(feature, findings, lastRoundAt)` → `{ vote, reason, outstanding }`, served on
+every list row and on the feature detail. **FlowLever never casts a vote** — the reviewer does that
+on the pull request. This is a recommendation and nothing else: no ADO read, no ADO write.
+
+`vote` is `'approve' | 'approve-with-suggestions' | 'wait-for-author' | null`, decided from the
+findings that are **posted and still open** (`isPosted`) — a finding resolved or waived has been
+handled (fixed, pushed back, or accepted), and one that never went out was never the author's to
+answer. `outstanding` splits those into `{ blocking, questions, suggestions }`, a partition:
+
+- **blocking** — severity `blocker` or `major`, **or any severity the config does not define**.
+  `major` sits here on the reviewer's rule, not Azure DevOps': an approve says "my feedback was
+  handled", and a major IS feedback. An unknown severity fails toward withholding the vote rather
+  than quietly counting as a suggestion.
+- **questions** — dimension `ambiguity` (what `/flowlever:pr-review` posts as a `question`
+  conventional comment) at any lesser severity. An unanswered question is never an approve.
+- **suggestions** — everything else: minor/info, non-question. These ride along under
+  "Approved with suggestions".
+
+Any blocking or question ⇒ `wait-for-author`; else any suggestion ⇒ `approve-with-suggestions`;
+else `approve`.
+
+`vote` is **null** — and `reason` says which — whenever the honest answer is "not yet": the
+workspace is not a `pr-review`; no round has run (`lastRoundAt` null — a fresh workspace with no
+findings would otherwise look exactly like a clean review); a post is in flight (`isPending`); the
+review is unfinished (any `isLiveFinding`); or **the PR moved after the last round**, where whether
+the feedback was handled is precisely what is unknown.
+
+Each of those is asked of the **ledger directly**, never of `workspaceState`'s return value, and
+that is load-bearing rather than stylistic. Gating on the state string shipped a false Approve:
+`workspaceState` only reaches its `author-responded` rule from inside the "something is still
+posted" branch, so a review whose findings were *all resolved* — the clean, finished one — walked
+straight past it, and the state string answered "did the PR move?" with "no" for exactly the
+workspaces where it matters most. A denylist of states also fails open, and its failure direction
+is "recommend Approve". `prMovedSinceRound(feature, lastRoundAt)` is the shared fact; `done` is not
+exempt from it, since `done` outranks every state and would otherwise shield the stalest
+workspaces.
+
+`workspaceState` reads the same facts, so the band agrees with the chip: a `pr-review` that would
+be `settled`, **has had a round, and whose PR has not moved since** is `needs-approval` instead,
+and one that would be `awaiting-author` with only suggestions out (same two conditions) is
+`needs-approval` too — with nothing blocking, the
+reviewer is not waiting on anybody and can approve-with-suggestions now. Anything blocking stays
+`awaiting-author`. Note `reason` deliberately says "blocking **comments**": the readiness gate
+beside it says "nothing blocking" about a different set (the reviewer's own open queue, which a
+posted finding has left), and without distinct subjects the two read as a contradiction.
 
 Order is the contract: the first rule that matches claims the workspace. `done` wins outright, then
 `posting` (while the runner writes, the ledger's other stamps still describe the pre-post world).
@@ -303,11 +351,39 @@ disagreement takes a strict-subset accept with the remainder left untouched.
   "status": "auditing",            // draft | auditing | reworking | ready | implementing | done
   "createdAt": "2026-06-13T01:10:00Z",
   "updatedAt": "2026-06-13T01:10:00Z",
+  "summary": null,                 // OPTIONAL — the plain-language "what this change is about" blurb
+                                   // shown at the top of the workspace, as markdown. Written ONLY by
+                                   // the review skills (`feature summary`), which have just read the
+                                   // PR, the work item and the specs; the app has no model, so it
+                                   // never invents one. null ⇒ nobody has written one yet, which the
+                                   // cockpit says outright rather than paraphrasing the title.
+                                   // Absent / blank / non-string all normalize to null.
   "sources": {
     "confluence": [ { "id": "123456", "title": "Checkout Redesign Spec", "url": "https://...", "version": 14, "lastFetched": null } ],
     "ado":        [ { "id": 42695, "type": "User Story", "title": "...", "url": "https://...", "state": "New", "lastFetched": null } ],
     "figma":      [ { "fileKey": "abc123", "nodeId": "1:23", "title": "Checkout flow v3", "url": "https://...", "lastFetched": null } ]
   },
+  // ado sources carry two more OPTIONAL fields, both fed by `source add`:
+  //   "type"        — the WORK-ITEM type ("Pull Request" | "User Story" | "Bug" | "Task" | "Feature" |
+  //                   "Epic" | anything else the ADO instance defines), set via --itemType. The
+  //                   cockpit's Sources strip badges, colours and ORDERS each source by it, so the PR
+  //                   and the story it implements are distinguishable before their titles are read.
+  //                   Untyped is tolerated: a source at a `/pullrequest/<id>` url reads as a PR, and
+  //                   anything else as a generic work item — never guessed into a story.
+  //   "vertecPhase" — the work item's `Custom.Vertec` field (ADO, under Administration): the Vertec
+  //                   booking phase, shown beside the booking line as information only, never copied.
+  //   "vertecKey"   — OPTIONAL override for the booking prefix. By default the cockpit derives it
+  //                   from the ADO ORGANISATION in `url` (dev.azure.com/<org>/… → "FZAG"), and the
+  //                   booking line is `<PREFIX>-<id> <title>` built from `id` + the item's own
+  //                   `title`. No org and no override ⇒ NO booking line: a guessed prefix would be
+  //                   pasted into a real booking. Validated as a key ([A-Za-z0-9][A-Za-z0-9._-]*).
+  //
+  // THE BOOKING LINE REQUIRES A RECORDED `type`. An ado source with no `type` is NOT bookable —
+  // the cockpit will not pick which work item to book (story vs. the epic above it) nor trust that
+  // `title` is the item's own `System.Title` rather than the audit skill's paraphrase of it
+  // ("FOAN00 #42700" is a real example on disk). Such a workspace shows the Vertec row with an
+  // explanation and NO copy button, until a review round records the type. This is the same rule
+  // as the prefix: unverified ⇒ no line, because the line gets pasted into a real booking.
   "priorThreads": null,             // PR kinds: the comments the PR ALREADY carries. null = never
                                     // fetched (ingest refuses); { recordedAt, threads: [] } = a
                                     // positive "this PR has no comments". See "The duplicate gate".
@@ -500,6 +576,14 @@ request through `running → done` (or `error`). The engine never runs adapters 
     {
       "id": "req-3",                   // short slug: `req-<counter>`
       "action": "pr-review",           // pr-review | pr-respond | apply | re-audit | audit | propose | poll
+                                       //   | summarize — the cockpit's "Generate summary" button on a
+                                       //     workspace whose summary is null. Names ONE workspace by
+                                       //     wsId (like `apply`), so any kind can host it and it is
+                                       //     admitted by jobBindsTo's wsId arm, never by the kind arm.
+                                       //     /flowlever:summarize reads the sources ALREADY on the
+                                       //     workspace and writes feature.summary (+ backfills each ado
+                                       //     source's itemType/vertecPhase). Read-only toward
+                                       //     ADO/Confluence: posts nothing, ingests no round.
       "prId": "1481",                  // PR id — required for pr-review/pr-respond, else null
       "wsId": "pr-1481-review",        // target workspace id — required for apply + re-audit, set by the runner once it creates the ws
       "kind": null,                    // `poll` only: pr-review | pr-respond narrows the refresh to one
@@ -623,10 +707,24 @@ feature delete <id> --yes                 delete workspace (features + ledger + 
                                           --yes is required — without it the command lists exactly
                                           which files it would remove and refuses.
 feature activity <id> [--responded] [--note "..."] [--at <iso>] [--by "<name>"] | --clear   mark/clear "author responded" on a posted PR review (watch runner); --at/--by record the REAL time + author of the newest counterpart update on the PR (review.lastActivityAt/lastActivityBy) — the "PR updated <when>" clock the cockpit pairs with "Reviewed <when>". Stamp-only (no --responded) is allowed.
+feature summary <id> --text "..." | --file <md> | --clear    set/clear the workspace's plain-language
+                                          "what this change is about" blurb (feature.summary). Written
+                                          by the review skills — the app has no model, so nothing else
+                                          fills it. Exactly one of the three flags; blank ⇒ null.
 source add <featureId> --type confluence|ado --id <id> [--itemType "..."] [--title ...] [--url ...]
+                               [--vertecPhase "..."] [--vertecKey <KEY>]
+                               [--clear-vertec-phase] [--clear-vertec-key]
 source add <featureId> --type figma --fileKey <key> [--nodeId <node>] [--title ...] [--url ...]
                                           confluence/ado are keyed by --id; figma is keyed by
                                           --fileKey (--nodeId optional) — figma has no --id.
+                                          --itemType (ado) is the work-item type the cockpit badges
+                                          each source by; --vertecPhase / --vertecKey are ado-only
+                                          (a hard error elsewhere) and feed the Vertec booking line.
+                                          A blank --vertecPhase/--vertecKey is DROPPED, not stored,
+                                          so re-registering a source never wipes a phase on file
+                                          by interpolating an empty shell variable;
+                                          --clear-vertec-phase / --clear-vertec-key remove one
+                                          explicitly (and contradict the value flags).
 threads set <featureId> --file threads.json | --none
                                           record the comment threads the PR already carries.
                                           REQUIRED before `ingest` on a pr-review/pr-respond
