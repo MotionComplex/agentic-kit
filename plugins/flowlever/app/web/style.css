@@ -124,6 +124,13 @@ a { color: inherit; text-decoration: none; }
 
 .num, .num-line, .dial-num, .pill, .score, td, th { font-variant-numeric: tabular-nums; }
 
+/* Every inline SVG glyph rides this span (iconSpan). Left as a plain inline box the svg sits on
+ * the text baseline, so the line box reserves descender space under it and the glyph rides high
+ * inside its control — the "off-centre" arrow in the PR quick-link button. Blockifying the svg as
+ * a flex item drops the baseline out of the equation, so the glyph is centred by its own box. */
+.icon { display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.icon > svg { display: block; }
+
 /* glass surface utility — translucent fill + blur + hairline + ambient drop */
 .glass {
   background: var(--glass-bg);
@@ -1933,6 +1940,12 @@ a.backlink:focus-visible {
 .post-flow { font-family: var(--mono); font-size: 11px; }
 .post-disclosure { display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 12px; cursor: pointer; user-select: none; }
 .post-disclosure input { accent-color: var(--accent); cursor: pointer; }
+
+/* The same panel with no control in it: nothing is postable, so it reports the outcome instead of
+ * offering a button that counts to zero. Quieter than the live panel — it asks for nothing. */
+.finish-post-empty { background: var(--panel-3); border-style: dashed; }
+.post-empty-msg { margin: 10px 0 0; font-size: 13px; color: var(--fg-dim); }
+.post-empty-hint { margin: 6px 0 0; font-size: 12px; }
 
 /* ============================== delete / dismiss affordances ============================== */
 
