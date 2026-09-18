@@ -1220,16 +1220,16 @@ test('decisionOf: every hunk accepted → approve; any edited → edit; any reje
   assert.equal(ledger.decisionOf(withHunks({ 0: { status: 'accepted' }, 1: { status: 'rejected' } })), null);
 });
 
-test('WORKSPACE_STATES is one ordered table covering all nine states in band order', () => {
-  assert.equal(ledger.WORKSPACE_STATES.length, 9);
+test('WORKSPACE_STATES is one ordered table covering all ten states in band order', () => {
+  assert.equal(ledger.WORKSPACE_STATES.length, 10);
   assert.deepEqual(ledger.WORKSPACE_STATES.map((s) => s.state), [
-    'ready-to-post', 'needs-review', 'needs-rereview', 'author-responded',
+    'ready-to-post', 'needs-review', 'needs-rereview', 'author-responded', 'needs-approval',
     'posting',
     'awaiting-author', 'awaiting-reaudit', 'settled',
     'done',
   ]);
   assert.deepEqual(ledger.WORKSPACE_STATES.map((s) => s.band), [
-    'needs-you', 'needs-you', 'needs-you', 'needs-you',
+    'needs-you', 'needs-you', 'needs-you', 'needs-you', 'needs-you',
     'in-progress',
     'waiting', 'waiting', 'waiting',
     'done',
@@ -1241,7 +1241,7 @@ test('WORKSPACE_STATES is one ordered table covering all nine states in band ord
   }
   const bandsInOrder = [...new Set(ledger.WORKSPACE_STATES.map((s) => s.band))];
   assert.deepEqual(bandsInOrder, ['needs-you', 'in-progress', 'waiting', 'done']);
-  assert.equal(new Set(ledger.WORKSPACE_STATES.map((s) => s.state)).size, 9, 'no duplicate states');
+  assert.equal(new Set(ledger.WORKSPACE_STATES.map((s) => s.state)).size, 10, 'no duplicate states');
 });
 
 test('workspaceState: open finding + suggestion, never posted → needs-review', () => {
@@ -1460,4 +1460,126 @@ test('addSource: a Vertec value can be cleared explicitly, and a key that is not
     ledger.addSource(id, { type: 'ado', id: 3, vertecKey: ok });
     assert.equal(ledger.getFeature(id).sources.ado.find((s) => s.id === 3).vertecKey, ok);
   }
+});
+
+/* ---- the PR approval signal: which vote the review has earned, and why ---- */
+
+const ROUND_AT = '2026-09-18T08:00:00.000Z';
+function prFeature(over = {}) {
+  return { id: 'pr-1', kind: 'pr-review', status: 'draft', review: {}, ...over };
+}
+// A finding that went OUT to the PR and is still open — the only kind that costs the vote.
+function posted(over = {}) {
+  return {
+    fp: `fp-${Math.abs(JSON.stringify(over).length)}-${over.severity || 'minor'}-${over.dimension || 'x'}`,
+    severity: 'minor', dimension: 'consistency', status: 'reworking',
+    postedAt: '2026-09-18T07:00:00.000Z', suggestion: 'do the thing', ...over,
+  };
+}
+
+test('approvalSignal: approve only when nothing is outstanding', () => {
+  const f = prFeature();
+  // Every finding fixed (resolved), pushed back / accepted (waived), or never raised.
+  const handled = [
+    { fp: 'a', severity: 'blocker', status: 'resolved', postedAt: '2026-09-18T07:00:00.000Z' },
+    { fp: 'b', severity: 'major', status: 'waived', statusReason: 'author pushed back, fair', postedAt: '2026-09-18T07:00:00.000Z' },
+  ];
+  const s = ledger.approvalSignal(f, handled, ROUND_AT);
+  assert.equal(s.vote, 'approve');
+  assert.match(s.reason, /nothing outstanding/);
+  // A clean review — nothing found at all — is the same answer.
+  assert.equal(ledger.approvalSignal(f, [], ROUND_AT).vote, 'approve');
+});
+
+test('approvalSignal: a major never rides along on an approve', () => {
+  // The reviewer's own rule, not Azure DevOps': an approve says "my feedback was handled", and a
+  // major IS feedback. This is the assertion that fails if someone re-tiers major as a suggestion.
+  for (const severity of ['blocker', 'major']) {
+    const s = ledger.approvalSignal(prFeature(), [posted({ severity })], ROUND_AT);
+    assert.equal(s.vote, 'wait-for-author', `an open ${severity} must hold the author`);
+    assert.equal(s.outstanding.blocking, 1);
+    // The chip sits under a readiness gate that says "nothing blocking" about the reviewer's own
+    // open queue, which a posted finding has deliberately left. Each must name its own subject or
+    // the two read as a contradiction on one screen.
+    assert.match(s.reason, /1 blocking comment still awaiting the author/);
+    assert.equal(s.outstanding.suggestions, 0, `${severity} must not be counted as a suggestion`);
+  }
+});
+
+test('approvalSignal: an unanswered question is never an approve, at any severity', () => {
+  // `ambiguity` is the dimension the review skills raise a question under (it maps to the
+  // `question` conventional-comment label). Severity is irrelevant: the author has not replied.
+  const s = ledger.approvalSignal(prFeature(), [posted({ severity: 'info', dimension: 'ambiguity' })], ROUND_AT);
+  assert.equal(s.vote, 'wait-for-author');
+  assert.equal(s.outstanding.questions, 1);
+  assert.equal(s.outstanding.suggestions, 0);
+  // Answered (resolved) or accepted (waived) questions cost nothing.
+  const closed = [
+    posted({ dimension: 'ambiguity', status: 'resolved' }),
+    posted({ dimension: 'ambiguity', status: 'waived' }),
+  ];
+  assert.equal(ledger.approvalSignal(prFeature(), closed, ROUND_AT).vote, 'approve');
+});
+
+test('approvalSignal: only suggestions left ⇒ approve with suggestions', () => {
+  const s = ledger.approvalSignal(prFeature(),
+    [posted({ severity: 'minor' }), posted({ severity: 'info', dimension: 'design-match' })], ROUND_AT);
+  assert.equal(s.vote, 'approve-with-suggestions');
+  assert.equal(s.outstanding.suggestions, 2);
+  assert.match(s.reason, /2 suggestions posted — nothing blocking/);
+  // Singular reads correctly too — the chip is a sentence, not a template.
+  assert.match(ledger.approvalSignal(prFeature(), [posted()], ROUND_AT).reason, /^1 suggestion posted/);
+});
+
+test('approvalSignal: the honest nulls — it refuses to recommend what it cannot know', () => {
+  const nul = (feature, findings, at) => ledger.approvalSignal(feature, findings, at);
+
+  // No round has run. A brand-new workspace has no findings and would otherwise look exactly like
+  // a clean review — recommending approve on code nobody read is the worst thing this could do.
+  assert.equal(nul(prFeature(), [], null).vote, null);
+  assert.match(nul(prFeature(), [], null).reason, /no review round/);
+
+  // Undecided work: the review is not finished.
+  assert.equal(nul(prFeature(), [{ fp: 'u', severity: 'minor', status: 'open', suggestion: 'x' }], ROUND_AT).vote, null);
+
+  // Decided but not yet posted: the next move is Post, not a vote.
+  const decided = [{ fp: 'd', severity: 'minor', status: 'open', suggestion: 'x', decision: 'approve' }];
+  assert.equal(nul(prFeature(), decided, ROUND_AT).vote, null);
+
+  // The PR moved after our last round — whether the feedback was handled is exactly what we don't
+  // know, so there is no vote until it has been re-read.
+  const moved = prFeature({ review: { lastActivityAt: '2026-09-18T09:00:00.000Z', lastActivityBy: 'Piotr' } });
+  const sig = nul(moved, [posted({ severity: 'blocker' })], ROUND_AT);
+  assert.equal(sig.vote, null);
+  assert.match(sig.reason, /re-review first/);
+
+  // A spec has no PR; on a pr-respond the vote is somebody else's to cast.
+  assert.equal(nul({ kind: 'spec', review: {} }, [], ROUND_AT).vote, null);
+  assert.equal(nul({ kind: 'pr-respond', review: {} }, [], ROUND_AT).vote, null);
+  // And a workspace with no kind at all (pre-dating the field) defaults to spec — no vote.
+  assert.equal(nul({ review: {} }, [], ROUND_AT).vote, null);
+});
+
+test('workspaceState: a finished PR review is NEEDS-YOU, not "waiting on others"', () => {
+  // The whole complaint: the review is done, the next move is one press on the PR, and the
+  // workspace was filed under the band you stop looking at.
+  assert.equal(ledger.workspaceState(prFeature(), [], ROUND_AT), 'needs-approval');
+  const band = (st) => ledger.WORKSPACE_STATES.find((s) => s.state === st).band;
+  assert.equal(band('needs-approval'), 'needs-you');
+
+  // …but only once a round has actually run. Before that it is just an empty workspace.
+  assert.equal(ledger.workspaceState(prFeature(), [], null), 'settled');
+  // …and only for a pr-review: a settled spec is genuinely settled.
+  assert.equal(ledger.workspaceState({ kind: 'spec', review: {} }, [], ROUND_AT), 'settled');
+  assert.equal(ledger.workspaceState({ kind: 'pr-respond', review: {} }, [], ROUND_AT), 'settled');
+
+  // Comments out, none of them blocking → you can approve-with-suggestions now, so it is your
+  // move, not the author's.
+  assert.equal(ledger.workspaceState(prFeature(), [posted({ severity: 'minor' })], ROUND_AT), 'needs-approval');
+  // Anything blocking, or an unanswered question, genuinely IS waiting on the author.
+  assert.equal(ledger.workspaceState(prFeature(), [posted({ severity: 'major' })], ROUND_AT), 'awaiting-author');
+  assert.equal(ledger.workspaceState(prFeature(), [posted({ dimension: 'ambiguity' })], ROUND_AT), 'awaiting-author');
+  // And nothing here may outrank the states above it.
+  assert.equal(ledger.workspaceState(prFeature({ status: 'done' }), [], ROUND_AT), 'done');
+  assert.equal(ledger.workspaceState(prFeature(), [{ fp: 'p', status: 'open', pending: 'post', suggestion: 'x' }], ROUND_AT), 'posting');
 });

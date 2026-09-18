@@ -177,6 +177,9 @@ function handleFeatureList(res, kindFilter) {
       // The one canonical answer to "what is going on here" (ledger.WORKSPACE_STATES). Computed
       // server-side so the inbox and the section lists can never disagree about it.
       state: ledger.workspaceState(f, findings, lastRoundAt),
+      // Which PR vote this review has earned, and why. Derived from the ledger only — FlowLever
+      // never casts it; the reviewer votes on the PR.
+      approval: ledger.approvalSignal(f, findings, lastRoundAt),
       // When we last reviewed vs. when the PR was last touched by the other side — so a card
       // can say "reviewed 3h ago · PR updated 20m ago" and flag that a re-review is worthwhile.
       stamps: ledger.reviewStamps(f, lastRoundAt),
@@ -222,6 +225,7 @@ function handleHome(res) {
       // The one canonical answer to "what is going on here" (ledger.WORKSPACE_STATES); the
       // grouping the inbox draws from it is the browser's job, so the sort below is unchanged.
       state: ledger.workspaceState(f, findings, lastRoundAt),
+      approval: ledger.approvalSignal(f, findings, lastRoundAt),
     };
   });
   rows.sort((a, b) =>
@@ -237,11 +241,18 @@ function handleHome(res) {
 
 function handleFeatureDetail(res, id) {
   const feature = ledger.getFeature(id);
+  const led = ledger.loadLedger(id);
+  const rounds = ledger.loadRounds(id);
+  const list = (rounds && rounds.rounds) || [];
+  const lastRoundAt = list.length ? list[list.length - 1].at : null;
   sendJson(res, 200, {
     feature,
-    ledger: ledger.loadLedger(id),
-    rounds: ledger.loadRounds(id),
+    ledger: led,
+    rounds,
     readiness: ledger.readiness(id),
+    // Same derived recommendation the list rows carry, so the detail header and the row it was
+    // opened from can never disagree about which vote the review has earned.
+    approval: ledger.approvalSignal(feature, led.findings || [], lastRoundAt),
   });
 }
 

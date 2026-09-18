@@ -2646,6 +2646,18 @@ test('U6: a section sees exactly the jobs that act on its own workspaces', () =>
     assert.equal(actsOnKind({ action: 'apply' }, kind), false,
       'apply must not be admitted by the kind arm — jobBindsTo is its only way in');
     assert.equal(actsOnKind({ action: 'poll' }, kind), false);
+    assert.equal(actsOnKind({ action: 'summarize' }, kind), false,
+      'nor summarize — it names one workspace, exactly like apply');
+  }
+  // …and the wsId arm really does admit it, on every kind. Without this, calling it "shared" would
+  // just be a way of excusing an action no section ever draws.
+  {
+    const { jobBindsTo } = liftUi(readUi(), ['function prNumber(', 'function jobBindsTo(']);
+    for (const kind of ['spec', 'pr-review', 'pr-respond']) {
+      assert.equal(jobBindsTo({ id: 'j', action: 'summarize', wsId: 'ws-1' }, { id: 'ws-1', kind }), true,
+        `a summarize job must bind its own ${kind} workspace`);
+    }
+    assert.equal(jobBindsTo({ id: 'j', action: 'summarize', wsId: 'ws-1' }, { id: 'ws-2', kind: 'spec' }), false);
   }
   assert.equal(actsOnKind({ action: 'nonsense' }, 'spec'), false);
   assert.equal(actsOnKind({ action: 'audit' }, 'no-such-kind'), false,
@@ -2661,7 +2673,11 @@ test('U6: a section sees exactly the jobs that act on its own workspaces', () =>
       owners.set(a, kind);
     }
   }
-  const shared = ['apply', 'poll'];
+  // `summarize` joins apply/poll as shared: like apply it names ONE workspace by wsId and any
+  // kind can host it, so admitting it through the kind arm would claim it for one section and
+  // hide it on the others. jobBindsTo's wsId arm is its way in — asserted below, so "shared"
+  // cannot become a way of excusing an action nothing ever draws.
+  const shared = ['apply', 'poll', 'summarize'];
   for (const a of ledger.REQUEST_ACTIONS) {
     assert.ok(owners.has(a) || shared.includes(a),
       `ledger.js can enqueue "${a}" but no section claims it and it is not one of the shared `
@@ -3589,6 +3605,19 @@ test('V4: the summary is written, never invented', () => {
   assert.match(body, /feature\.summary/);
   assert.ok(!/feature\.title/.test(body),
     'summaryPanel must never fall back to the workspace title — that is the text it exists to explain');
-  // And an empty one says so, on PR workspaces, naming the command that fills it.
-  assert.match(body, /feature summary/, 'the empty state must name the command that writes one');
+  // And an empty one offers the one thing that CAN fill it: a job the runner executes.
+  assert.match(body, /summarizeButton\(/, 'the empty state must offer a way to fill it in');
+
+  const btn = fnSource(ui, 'function summarizeButton(');
+  assert.match(btn, /action: 'summarize'/);
+  assert.match(btn, /wsId/, 'the job names the workspace it is for');
+  assert.match(btn, /dedupe: true/,
+    'a double-click must not stack two summarize passes over the same sources');
+  assert.match(btn, /readOnlyMode\(\)/,
+    'read-only mode must not offer a button the server would refuse');
+  // Queueing a job nobody runs is a silent no-op — the same rule Post/Apply follow.
+  assert.match(btn, /startRunner\(/);
+  // `summarize` must be a real server action, not a string only the browser believes in.
+  assert.ok(ledger.REQUEST_ACTIONS.includes('summarize'),
+    'the button enqueues an action the ledger can actually store');
 });

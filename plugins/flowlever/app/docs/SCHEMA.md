@@ -257,10 +257,45 @@ first" list drift, and the symptom is a row drawn in one band but sorted as if i
 | | `needs-rereview` | undecided items and this workspace has posted before |
 | | `author-responded` | comments are out and the other side moved (flag or clocks) |
 | `in-progress` | `posting` | a runner is mid-write (`pending`), so every other stamp is stale |
+| | `needs-approval` | the review is finished — the PR is yours to approve (see "The approval signal") |
 | `waiting` | `awaiting-author` | comments out, no response yet |
 | | `awaiting-reaudit` | spec changes applied, waiting on a re-audit to reconcile |
 | | `settled` | nothing open, nothing out, not closed |
 | `done` | `done` | `feature.status === 'done'` — outranks everything |
+
+### The approval signal
+`ledger.approvalSignal(feature, findings, lastRoundAt)` → `{ vote, reason, outstanding }`, served on
+every list row and on the feature detail. **FlowLever never casts a vote** — the reviewer does that
+on the pull request. This is a recommendation and nothing else: no ADO read, no ADO write.
+
+`vote` is `'approve' | 'approve-with-suggestions' | 'wait-for-author' | null`, decided from the
+findings that are **posted and still open** (`isPosted`) — a finding resolved or waived has been
+handled (fixed, pushed back, or accepted), and one that never went out was never the author's to
+answer. `outstanding` splits those into `{ blocking, questions, suggestions }`, a partition:
+
+- **blocking** — severity `blocker` or `major`. `major` sits here on the reviewer's rule, not Azure
+  DevOps': an approve says "my feedback was handled", and a major IS feedback.
+- **questions** — dimension `ambiguity` (what `/flowlever:pr-review` posts as a `question`
+  conventional comment) at any lesser severity. An unanswered question is never an approve.
+- **suggestions** — everything else: minor/info, non-question. These ride along under
+  "Approved with suggestions".
+
+Any blocking or question ⇒ `wait-for-author`; else any suggestion ⇒ `approve-with-suggestions`;
+else `approve`.
+
+`vote` is **null** — and `reason` says which — whenever the honest answer is "not yet": the
+workspace is not a `pr-review`; no round has run (`lastRoundAt` null — a fresh workspace with no
+findings would otherwise look exactly like a clean review); a post is in flight; the review is
+unfinished (`needs-review` / `needs-rereview` / `ready-to-post`); or the PR moved after the last
+round (`author-responded`), where whether the feedback was handled is precisely what is unknown.
+
+`workspaceState` reads the same rule twice, so the band agrees with the chip: a `pr-review` that
+would be `settled` **and has had a round** is `needs-approval` instead, and one that would be
+`awaiting-author` with only suggestions out is `needs-approval` too — with nothing blocking, the
+reviewer is not waiting on anybody and can approve-with-suggestions now. Anything blocking stays
+`awaiting-author`. Note `reason` deliberately says "blocking **comments**": the readiness gate
+beside it says "nothing blocking" about a different set (the reviewer's own open queue, which a
+posted finding has left), and without distinct subjects the two read as a contradiction.
 
 Order is the contract: the first rule that matches claims the workspace. `done` wins outright, then
 `posting` (while the runner writes, the ledger's other stamps still describe the pre-post world).
@@ -528,6 +563,14 @@ request through `running → done` (or `error`). The engine never runs adapters 
     {
       "id": "req-3",                   // short slug: `req-<counter>`
       "action": "pr-review",           // pr-review | pr-respond | apply | re-audit | audit | propose | poll
+                                       //   | summarize — the cockpit's "Generate summary" button on a
+                                       //     workspace whose summary is null. Names ONE workspace by
+                                       //     wsId (like `apply`), so any kind can host it and it is
+                                       //     admitted by jobBindsTo's wsId arm, never by the kind arm.
+                                       //     /flowlever:summarize reads the sources ALREADY on the
+                                       //     workspace and writes feature.summary (+ backfills each ado
+                                       //     source's itemType/vertecPhase). Read-only toward
+                                       //     ADO/Confluence: posts nothing, ingests no round.
       "prId": "1481",                  // PR id — required for pr-review/pr-respond, else null
       "wsId": "pr-1481-review",        // target workspace id — required for apply + re-audit, set by the runner once it creates the ws
       "kind": null,                    // `poll` only: pr-review | pr-respond narrows the refresh to one

@@ -71,6 +71,13 @@ Run (self-contained — app at `${CLAUDE_PLUGIN_ROOT}/app`, data in `~/.flowleve
        work-item fields / Confluence sections **surgically** (patch one node, never regenerate the page).
        Then `--phase "applied to spec"`.
      On success: `requests set <reqId> --status done --phase "<as above>"`.
+   - **`summarize`** (has `wsId`): the cockpit's **"Generate summary"** button on a workspace whose
+     "What this is about" panel is empty. Run **`/flowlever:summarize <wsId>`**: read the sources
+     the workspace ALREADY carries (PR description, work items, Confluence pages), write
+     `feature.summary`, and — since the work items are open anyway — backfill each ado source's
+     `--itemType` and `--vertecPhase`. READ ONLY toward ADO/Confluence: it posts nothing, writes no
+     work item, and ingests no round. Emit phases (`--phase "reading the registered sources"`). On
+     success: `requests set <reqId> --status done --phase "summary written" --wsId <wsId>`.
    - **`re-audit`** (has `wsId`): the user **Rejected a proposal with a counter**. Run
      **`/flowlever:audit <wsId>` in Scoped re-audit mode** (see that skill) — re-evaluate ONLY the
      findings whose `draft.review.verdict === "redirect"`, honoring each one's counter `note` (and the

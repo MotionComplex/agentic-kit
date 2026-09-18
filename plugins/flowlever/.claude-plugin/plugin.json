@@ -1,8 +1,8 @@
 {
   "name": "flowlever",
   "displayName": "FlowLever",
-  "version": "0.10.0",
-  "description": "Local review cockpit for specs and PR review/respond: a fingerprinted findings ledger that tracks issues across rounds, a guided review-flow stepper, exportable work orders, and UI-triggered jobs. Bundles the zero-dependency Node app plus /flowlever:* skills (audit, propose, apply-spec, rework, brief, track, start, stop, watch, poll, pr-review, pr-respond).",
+  "version": "0.11.0",
+  "description": "Local review cockpit for specs and PR review/respond: a fingerprinted findings ledger that tracks issues across rounds, a guided review-flow stepper, exportable work orders, and UI-triggered jobs. Bundles the zero-dependency Node app plus /flowlever:* skills (audit, propose, apply-spec, rework, brief, track, start, stop, watch, poll, pr-review, pr-respond, summarize).",
   "author": {
     "name": "MotionComplex"
   },

@@ -49,6 +49,7 @@ const WS_STATES = [
   { key: 'needs-review',     band: 'needs-you',   label: 'New — to review'     },
   { key: 'needs-rereview',   band: 'needs-you',   label: 'Re-review'           },
   { key: 'author-responded', band: 'needs-you',   label: 'Author responded'    },
+  { key: 'needs-approval',   band: 'needs-you',   label: 'Ready to approve'    },
   { key: 'job-posting',      band: 'in-progress', label: 'Posting review'      },
   { key: 'job-rereviewing',  band: 'in-progress', label: 'Re-reviewing'        },
   { key: 'job-reviewing',    band: 'in-progress', label: 'Reviewing'           },
@@ -201,7 +202,7 @@ const DISCLOSURE_LINE = '🤖 AI comment posted by Claude';
  * gets the newest app.js, but src/server.js is only read when the cockpit process starts, so an
  * updated plugin + a long-running server means the page calls routes the server has never heard of.
  * That used to surface as a bare "Not found"; now it says which half is stale. */
-const EXPECTED_API_VERSION = '4';
+const EXPECTED_API_VERSION = '5';
 
 /* ============================== tiny DOM lib ============================== */
 
@@ -5089,6 +5090,9 @@ function detailView(data, tab) {
           h('div', { class: `dh-blocking ${blockers > 0 ? 'hot' : ''}` },
             blockers > 0 ? `${plural(blockers, 'blocker', 'blockers')} blocking` : 'nothing blocking'),
           h('div', { class: 'meta-dim num-line' }, `${totalOpen} open total`),
+          // Which vote this review has earned — directly above the button that ends the review,
+          // because "I finished in FlowLever and forgot to vote on the PR" is the gap it closes.
+          approvalChip(data),
           completeControl(feature),
         ),
       ),
@@ -5458,6 +5462,34 @@ function copyButton(text, label, title) {
   return btn;
 }
 
+/* ============================== the approval indicator ============================== */
+
+/* The three votes, in the reviewer's words and Azure DevOps'. FlowLever never casts one — it only
+ * says which the review has earned, because noticing that for yourself is the step that gets
+ * skipped. `ado` is the literal vote name so the chip names the thing you press over there. */
+const APPROVAL_VOTES = {
+  approve:                   { label: 'Approve',                  ado: 'Approved',                   tone: 'go' },
+  'approve-with-suggestions': { label: 'Approve with suggestions', ado: 'Approved with suggestions', tone: 'go-soft' },
+  'wait-for-author':         { label: 'Wait for author',          ado: 'Waiting for the author',     tone: 'hold' },
+};
+
+/* The chip on the workspace header. Says the vote, and underneath it why — a recommendation whose
+ * reasoning you cannot see is one you have to re-derive before you trust it, which costs more than
+ * it saves. Renders nothing at all when the honest answer is "not yet": a greyed-out vote reads as
+ * a broken control, whereas an absent one reads as "the review isn't finished", which is the
+ * truth and is already said by the state pill beside it. */
+function approvalChip(data) {
+  const a = data && data.approval;
+  if (!a || !a.vote) return null;
+  const v = APPROVAL_VOTES[a.vote];
+  if (!v) return null;                      // a vote from a newer server this build doesn't know
+  return h('div', { class: `approval approval-${v.tone}`, title: `Vote "${v.ado}" on the pull request — FlowLever does not cast it` },
+    h('div', { class: 'approval-head' },
+      h('span', { class: 'approval-dot' }),
+      h('span', { class: 'approval-label' }, v.label)),
+    h('div', { class: 'approval-why' }, a.reason));
+}
+
 /* ============================== PR quick link + summary ============================== */
 
 /* The PR this workspace is about, as a linkable source. */
@@ -5490,13 +5522,60 @@ function summaryPanel(feature) {
       // `.md` carries a panel + border and would draw a second box inside this one.
       h('div', { class: 'ws-summary-body' }, mdBlock(text, 'md-prose')));
   }
-  const kind = (feature && feature.kind) || 'spec';
-  if (kind !== 'pr-review' && kind !== 'pr-respond') return null;
   return h('div', { class: 'ws-summary ws-summary-empty' },
     h('span', { class: 'ws-summary-label' }, 'What this is about'),
-    h('span', { class: 'meta-dim' },
-      'No summary yet — the next review round writes one. To fill it in now: ',
-      h('code', {}, `cli.js feature summary ${(feature && feature.id) || '<id>'} --text "…"`)));
+    h('div', { class: 'ws-summary-emptyrow' },
+      h('span', { class: 'meta-dim' },
+        'No summary yet. The sources are already registered, so this only needs a read — not a whole re-review.'),
+      summarizeButton(feature)));
+}
+
+/* Ask the runner to write the summary for a workspace that has none. The sources are already on
+ * the workspace, so this is a read of material the review skills have fetched before — which is
+ * why it is its own small job rather than a full re-review.
+ *
+ * Read-only toward Azure DevOps and Confluence, and it writes nothing to the PR: the job fetches
+ * the registered sources and fills in what the cockpit cannot derive — the summary, and while it
+ * is there the work-item types and Vertec phase that a workspace reviewed before those existed is
+ * missing. See skills/summarize. */
+function summarizeButton(feature) {
+  const wsId = feature && feature.id;
+  if (!wsId) return null;
+  if (readOnlyMode()) {
+    return h('span', { class: 'meta-dim', title: READ_ONLY_TITLE }, 'read-only');
+  }
+  const btn = h('button', {
+    class: 'btn btn-accent ws-summary-btn', type: 'button',
+    title: 'Read the workspace\'s registered sources and write the summary — no PR writes, no re-review',
+    onclick: async () => {
+      btn.disabled = true;
+      btn.textContent = 'Queueing…';
+      try {
+        await api('/api/requests', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'summarize', wsId, dedupe: true }),
+        });
+        // Same rule as Post/Apply: queueing a job nobody runs is a silent no-op, so the runner is
+        // started here rather than left for the user to remember.
+        const r = await refreshRunner();
+        if (r && r.available && !r.running) {
+          await startRunner('watch', { silent: true });
+          toast('Writing the summary — reading the registered sources now', 'success');
+        } else if (r && r.running) {
+          toast('Summary queued — the running session will pick it up', 'success');
+        } else {
+          toast('Summary queued — run /flowlever:watch in Claude Code to execute it', 'success');
+        }
+        ensureApplyPolling();
+        pollRequestsNow();
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Generate summary';
+        toast(`Could not queue the summary: ${e.message}`);
+      }
+    },
+  }, 'Generate summary');
+  return btn;
 }
 
 /* ============================== diff engine + renderer ============================== */

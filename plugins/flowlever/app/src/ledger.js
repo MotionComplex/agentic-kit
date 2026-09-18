@@ -53,7 +53,7 @@ const TARGET_SYSTEMS = ['ado', 'confluence'];
 //                            instead of waiting for the scheduled /flowlever:poll — find new
 //                            PRs and re-check known ones for counterpart updates. Optional
 //                            `kind` narrows it to one section (pr-review / pr-respond)
-const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose', 'poll'];
+const REQUEST_ACTIONS = ['pr-review', 'pr-respond', 'apply', 're-audit', 'audit', 'propose', 'poll', 'summarize'];
 const REQUEST_STATUSES = ['queued', 'running', 'done', 'error'];
 // Workspace kinds a `poll` request may be narrowed to (null = both).
 const REQUEST_KINDS = ['pr-review', 'pr-respond'];
@@ -654,12 +654,56 @@ const WORKSPACE_STATES = [
   { state: 'needs-review', band: 'needs-you', label: 'Needs review' },
   { state: 'needs-rereview', band: 'needs-you', label: 'Needs re-review' },
   { state: 'author-responded', band: 'needs-you', label: 'Author responded' },
+  // Last within `needs-you`: the work is finished and what is left is one press on the PR, so it
+  // sorts under the reviews still needing a read-through. Bands are CONTIGUOUS runs in this array
+  // — a state placed outside its band's run is drawn under one header and sorted as if it sat
+  // under another, which is the exact failure the one-table rule exists to prevent.
+  { state: 'needs-approval', band: 'needs-you', label: 'Ready to approve' },
   { state: 'posting', band: 'in-progress', label: 'Posting' },
   { state: 'awaiting-author', band: 'waiting', label: 'Awaiting author' },
   { state: 'awaiting-reaudit', band: 'waiting', label: 'Awaiting re-audit' },
   { state: 'settled', band: 'waiting', label: 'Settled' },
   { state: 'done', band: 'done', label: 'Done' },
 ];
+
+// ---------- the PR approval signal ----------
+//
+// FlowLever never casts a vote — the reviewer does that on the PR. All this computes is the
+// RECOMMENDATION, so that "the review is finished and nobody told you" stops being a state you
+// have to notice for yourself. It is derived from the ledger alone: no ADO read, no ADO write.
+//
+// `major` sits with `blocker` on the reviewer's own rule, not on Azure DevOps': an approve says
+// "my feedback was handled", and a major finding is feedback. Only minor/info can ride along under
+// "Approved with suggestions".
+const APPROVAL_BLOCKING_SEVERITIES = ['blocker', 'major'];
+// The dimension the review skills raise a question under — `/flowlever:pr-review` maps `ambiguity`
+// onto the `question` conventional-comment label. An unanswered question is never an approve,
+// whatever severity it was filed at: the author has not replied to it yet.
+const QUESTION_DIMENSION = 'ambiguity';
+const APPROVAL_VOTES = ['approve', 'approve-with-suggestions', 'wait-for-author'];
+
+// What is still OUT on the PR, split by what it costs the vote. Only posted-and-still-open
+// findings count: a finding waived or resolved has been handled (fixed, pushed back, or accepted),
+// and one that never went out was never the author's to answer.
+function outstandingByWeight(findings) {
+  const out = (Array.isArray(findings) ? findings : []).filter((f) => f && isPosted(f));
+  const isBlocking = (f) => APPROVAL_BLOCKING_SEVERITIES.includes(f.severity);
+  const isQuestion = (f) => f.dimension === QUESTION_DIMENSION;
+  return {
+    blocking: out.filter(isBlocking).length,
+    // A question already counted as blocking is not counted twice — the buckets partition `out`.
+    questions: out.filter((f) => !isBlocking(f) && isQuestion(f)).length,
+    suggestions: out.filter((f) => !isBlocking(f) && !isQuestion(f)).length,
+  };
+}
+
+// The vote those buckets imply. Kept separate from `approvalSignal` so `workspaceState` can ask
+// for it WITHOUT calling back into itself.
+function voteFor(o) {
+  if (o.blocking || o.questions) return 'wait-for-author';
+  if (o.suggestions) return 'approve-with-suggestions';
+  return 'approve';
+}
 
 // Is this finding still LIVE work on the reviewer's side? Open/reworking and not already out of
 // their hands — nothing posted to the PR, nothing written back to the spec, no runner mid-write.
@@ -718,7 +762,15 @@ function workspaceState(feature, findings, lastRoundAt = null) {
     // our last round. Both mean the same thing: there is a delta on the PR to reconcile.
     const responded = Boolean(feature && feature.review && feature.review.authorRespondedAt)
       || reviewStamps(feature, lastRoundAt).newSinceReview;
-    return responded ? 'author-responded' : 'awaiting-author';
+    if (responded) return 'author-responded';
+    // Comments are out, but if NONE of them blocks — only suggestions, no unanswered questions —
+    // the reviewer is not actually waiting on anybody: they can approve-with-suggestions now. That
+    // is a `needs-you` move, and filing it under "waiting on others" is exactly how it gets
+    // forgotten. Anything blocking stays `awaiting-author`, which is the truth.
+    if (isPrReviewKind(feature) && voteFor(outstandingByWeight(list)) === 'approve-with-suggestions') {
+      return 'needs-approval';
+    }
+    return 'awaiting-author';
   }
   if (list.some(isApplied)) return 'awaiting-reaudit';
 
@@ -732,8 +784,62 @@ function workspaceState(feature, findings, lastRoundAt = null) {
   if (list.some(isLiveFinding)) return everPosted(feature, list) ? 'needs-rereview' : 'needs-review';
 
   // Nothing open, nothing out, not marked done: the work is finished but the workspace has not
-  // been closed. It is a real resting place, not an error — hence a name of its own.
+  // been closed. On a PR review that has ACTUALLY had a round, that is not a resting place at all
+  // — it is the moment the PR can be approved, and the moment the reviewer forgets to. It only
+  // counts once a round has run: recommending an approve on a workspace nobody has reviewed would
+  // be the worst thing this feature could do.
+  if (isPrReviewKind(feature) && lastRoundAt) return 'needs-approval';
+  // Otherwise a real resting place, not an error — hence a name of its own.
   return 'settled';
+}
+
+function isPrReviewKind(feature) { return ((feature && feature.kind) || 'spec') === 'pr-review'; }
+
+// The recommendation the cockpit shows: which vote this review has earned, and why — in the
+// reviewer's own terms, so the chip can be read without opening the findings.
+//
+// FlowLever does not cast it. The reviewer votes on the PR; this only removes "notice that you
+// are done" from the list of things they have to remember. `vote` is null whenever the honest
+// answer is "not yet" — and the `reason` then says what is missing, because a silent null reads
+// as a bug.
+function approvalSignal(feature, findings, lastRoundAt = null) {
+  const list = Array.isArray(findings) ? findings : [];
+  const outstanding = outstandingByWeight(list);
+  const none = (reason) => ({ vote: null, reason, outstanding });
+
+  // Only a pr-review carries a vote of yours: a spec has no PR, and on a pr-respond YOU are the
+  // author — the vote there is somebody else's to cast.
+  if (!isPrReviewKind(feature)) return none('not a PR review');
+  // No round has run, so nothing has been read. A workspace can sit here with zero findings and
+  // look exactly like a clean review; it is not one.
+  if (!lastRoundAt) return none('no review round has run yet');
+
+  const state = workspaceState(feature, list, lastRoundAt);
+  if (state === 'posting') return none('a post is still in flight');
+  if (state === 'needs-review' || state === 'needs-rereview' || state === 'ready-to-post') {
+    return none('the review is not finished');
+  }
+  // The PR moved after our last round, so whether the feedback was handled is precisely what we
+  // do not know. Approving here would be signing off on code nobody re-read.
+  if (state === 'author-responded') return none('the PR changed after your last round — re-review first');
+
+  const vote = voteFor(outstanding);
+  // The words matter here, because this chip sits directly under the readiness gate, which says
+  // "nothing blocking" about a DIFFERENT set: the gate counts the reviewer's own open queue, and a
+  // posted finding deliberately leaves it (it stops being "to review" and stops dragging the
+  // score). Both are true at once — "0 open total · nothing blocking" beside "3 blocking" reads as
+  // a contradiction unless each names its own subject. So: comments, on the PR, awaiting them.
+  const n = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+  const bits = [];
+  if (outstanding.blocking) bits.push(n(outstanding.blocking, 'blocking comment'));
+  if (outstanding.questions) bits.push(n(outstanding.questions, 'unanswered question'));
+  if (outstanding.suggestions) bits.push(n(outstanding.suggestions, 'suggestion'));
+  const reason = vote === 'approve'
+    ? 'nothing outstanding — every finding was fixed, waived or answered'
+    : vote === 'wait-for-author'
+      ? `${bits.join(' · ')} still awaiting the author`
+      : `${bits.join(' · ')} posted — nothing blocking`;
+  return { vote, reason, outstanding };
 }
 
 // Register a source on a workspace. Idempotent by the type's key field: re-adding the same
@@ -2157,6 +2263,10 @@ module.exports = {
   setFeatureReview,
   reviewStamps,
   WORKSPACE_STATES,
+  APPROVAL_VOTES,
+  APPROVAL_BLOCKING_SEVERITIES,
+  QUESTION_DIMENSION,
+  approvalSignal,
   decisionOf,
   workspaceState,
   loadLedger,
