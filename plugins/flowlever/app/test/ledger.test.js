@@ -1548,7 +1548,7 @@ test('approvalSignal: the honest nulls — it refuses to recommend what it canno
 
   // The PR moved after our last round — whether the feedback was handled is exactly what we don't
   // know, so there is no vote until it has been re-read.
-  const moved = prFeature({ review: { lastActivityAt: '2026-09-18T09:00:00.000Z', lastActivityBy: 'Piotr' } });
+  const moved = prFeature({ review: { lastActivityAt: '2026-09-18T09:00:00.000Z', lastActivityBy: 'the author' } });
   const sig = nul(moved, [posted({ severity: 'blocker' })], ROUND_AT);
   assert.equal(sig.vote, null);
   assert.match(sig.reason, /re-review first/);
@@ -1591,7 +1591,7 @@ test('approvalSignal: a PR that moved after the round NEVER gets a vote — even
   // string therefore answered "did the PR move?" with "no" for exactly the workspaces where it
   // matters most, and the chip said Approve on code the author had pushed to since anybody read it.
   // 14 of the user's own workspaces had this shape.
-  const moved = prFeature({ review: { lastActivityAt: '2026-09-18T12:00:00.000Z', lastActivityBy: 'Piotr' } });
+  const moved = prFeature({ review: { lastActivityAt: '2026-09-18T12:00:00.000Z', lastActivityBy: 'the author' } });
   const flagged = prFeature({ review: { authorRespondedAt: '2026-09-18T12:00:00.000Z' } });
   const allHandled = [{ fp: 'a', severity: 'blocker', status: 'resolved', postedAt: '2026-09-18T07:00:00.000Z' }];
 
